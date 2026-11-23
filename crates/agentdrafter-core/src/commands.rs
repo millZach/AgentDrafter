@@ -1152,7 +1152,10 @@ fn change_input() -> Value {
             "set": text("The drawing set's folder, or an original `.dwg` file to revise."),
             "change_set": change_set,
             "dry_run": flag("Report what the change set would do, and write nothing."),
-            "output": text("Original DWG only: where to write the revision `.dwg` (never overwriting the original or any existing file). Without it, `<stem>.rev1.dwg`, `<stem>.rev2.dwg`, ... beside the original."),
+            "output": {
+                "description": "Original DWG only: where to write the revision `.dwg` (never overwriting the original or any existing file). `null` acts as if it were left out. Without it, `<stem>.rev1.dwg`, `<stem>.rev2.dwg`, ... beside the original.",
+                "type": ["string", "null"],
+            },
             "allow_loss": flag("Original DWG only: allow revising an original the DWG library could not decode whole, recording accepted losses in the reply and report."),
             "plot_style": plot_style_name("Original DWG only: CTB plot style file name (such as `monochrome.ctb`) for the revision PDF. `null` acts as if it were left out."),
             "plot_styles": plot_styles(),
@@ -1187,22 +1190,13 @@ fn run_change(
             "plot_styles",
             "no_pdf",
         ] {
-            if let Some(val) = input.get(option) {
-                let active = match val {
-                    Value::Null => false,
-                    Value::Bool(b) => *b,
-                    Value::Array(items) => !items.is_empty(),
-                    _ => true,
-                };
-                if active {
-                    return Err(Error::usage(format!(
-                        "`{option}` applies only when revising an original `.dwg` file, not a \
-                         drawing set folder"
-                    ))
-                    .at_field(option));
-                }
+            if input.contains_key(option) {
+                return Err(Error::usage(format!(
+                    "`{option}` applies only when revising an original `.dwg` file, not a \
+                     drawing set folder"
+                ))
+                .at_field(option));
             }
-            input.remove(option);
         }
         let settings = take_settings(&mut input, base, false)?;
         let request: ChangeRequest = parse("change", input)?;

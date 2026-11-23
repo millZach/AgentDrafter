@@ -4,6 +4,10 @@
 *.dxf
 *.mirror.yaml
 *.mirror.tmp
+*.changes.json
+*.rev[0-9]*.pdf
+*.rev.tmp
+.agentdrafter-*.tmp
 *.bak
 *.dwl
 *.dwl2

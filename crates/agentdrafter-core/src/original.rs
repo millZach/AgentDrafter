@@ -491,7 +491,7 @@ pub(crate) fn stem_of(path: &Path) -> String {
 /// The file identity of a regular, non-symlink file at `path`, without
 /// following symlinks or Windows reparse points.
 #[cfg(unix)]
-fn regular_file_id_no_follow(path: &Path) -> Option<FileId> {
+pub(crate) fn regular_file_id_no_follow(path: &Path) -> Option<FileId> {
     let meta = fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_file() {
         return None;
@@ -500,7 +500,7 @@ fn regular_file_id_no_follow(path: &Path) -> Option<FileId> {
 }
 
 #[cfg(windows)]
-fn regular_file_id_no_follow(path: &Path) -> Option<FileId> {
+pub(crate) fn regular_file_id_no_follow(path: &Path) -> Option<FileId> {
     use std::os::windows::fs::OpenOptionsExt;
     let file = OpenOptions::new()
         .access_mode(0)
@@ -517,7 +517,7 @@ fn regular_file_id_no_follow(path: &Path) -> Option<FileId> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn regular_file_id_no_follow(_path: &Path) -> Option<FileId> {
+pub(crate) fn regular_file_id_no_follow(_path: &Path) -> Option<FileId> {
     None
 }
 

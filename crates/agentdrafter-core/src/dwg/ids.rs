@@ -51,11 +51,50 @@ pub(super) fn write_id_and_name(
     common.extended_data.upsert_record(record);
 }
 
+/// Writes only an object's `name` in AgentDrafter's extended data without
+/// fabricating an empty `id`, so an object without a carried ID keeps its
+/// stable handle ID (`{sheet}/handle:{HEX}`).
+pub(super) fn write_name_only(common: &mut EntityCommon, name: &str) {
+    let mut record = ExtendedDataRecord::new(APPLICATION);
+    record.add_value(XDataValue::String(NAME_KEY.to_owned()));
+    record.add_value(XDataValue::String(name.to_owned()));
+    common.extended_data.upsert_record(record);
+}
+
+/// Removes AgentDrafter's extended-data record (both structured and any raw
+/// DWG EED blob for `app_handle`) so clones or renamed objects never inherit
+/// stale carried IDs or names when serialized by acadrust.
+pub(super) fn strip_agentdrafter_xdata(common: &mut EntityCommon, app_handle: Option<u64>) {
+    // Remove case-insensitively from structured records.
+    let app_names: Vec<String> = common
+        .extended_data
+        .records()
+        .iter()
+        .filter(|r| r.application_name.eq_ignore_ascii_case(APPLICATION))
+        .map(|r| r.application_name.clone())
+        .collect();
+    for app_name in app_names {
+        common.extended_data.remove_record(&app_name);
+    }
+    // Also strip verbatim raw DWG EED blobs for the AgentDrafter APPID handle
+    // so DwgObjectWriter never re-emits the old bytes verbatim.
+    if let Some(h) = app_handle {
+        common
+            .extended_data
+            .raw_dwg_eed
+            .retain(|(app, _)| *app != h);
+    }
+}
+
 /// The object's ID, from AgentDrafter's extended data on it: its sheet's
-/// name and its own ID, joined by `/`.
+/// name and its own ID, joined by `/`. Returns `None` if no non-empty ID is
+/// recorded.
 pub(super) fn read_id(common: &EntityCommon) -> Option<String> {
     let data = &common.extended_data;
     let own = value_of(data, ID_KEY)?;
+    if own.is_empty() {
+        return None;
+    }
     match value_of(data, SHEET_KEY) {
         Some(sheet) => Some(format!("{sheet}{ID_SEPARATOR}{own}")),
         None => Some(own),

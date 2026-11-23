@@ -1375,7 +1375,8 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                 "sheet".into(),
                 json!({
                     "description": "The sheet to add it to, in its row: it is on this sheet \
-                                    alone. Give sheet or template.",
+                                    alone. On a drawing set give sheet or template; on an \
+                                    original `.dwg`, omit sheet to target that drawing.",
                     "$ref": "#/$defs/sheet_name",
                 }),
             );
@@ -1383,12 +1384,15 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                 "template".into(),
                 json!({
                     "description": "The template to add it to: it is on every sheet built \
-                                    from it. Give sheet or template.",
+                                    from it. On a drawing set give sheet or template.",
                     "$ref": "#/$defs/template_path",
                 }),
             );
-            let place =
-                json!({ "oneOf": [{ "required": ["sheet"] }, { "required": ["template"] }] });
+            // Drawing sets require `sheet` or `template` (enforced at runtime
+            // by `read_change_set`); original `.dwg` revisions allow omitting
+            // both to default to the original's sheet. Giving both is always
+            // forbidden.
+            let place = json!({ "not": { "required": ["sheet", "template"] } });
             let own = schema.as_object_mut().expect("an object's definition");
             let mut all_of = vec![place];
             if let Some(one_of) = own.remove("oneOf") {
@@ -2101,13 +2105,18 @@ fn table_schema(op: TableOp, table: Table, defs: &Map<String, Value>) -> Value {
         }
         TableOp::Delete => {}
     }
-    json!({
+    let mut schema = json!({
         "type": "object",
         "required": required,
         "additionalProperties": false,
         "properties": properties,
-        "oneOf": [{ "required": ["sheet"] }, { "required": ["template"] }],
-    })
+    });
+    if matches!((op, table), (TableOp::Add | TableOp::Change, Table::Layer)) {
+        schema["not"] = json!({ "required": ["sheet", "template"] });
+    } else {
+        schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+    }
+    schema
 }
 
 /// The schema of an operation on a table's grid, before its `op`.

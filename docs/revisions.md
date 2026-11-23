@@ -23,16 +23,22 @@ agentdrafter change P-101.dwg edits.json --allow-loss --no-pdf
 
 Through the HTTP API, the MCP server and the Python library the command is `change` with `set` pointing at the `.dwg` file, taking the same options (`output`, `allow_loss`, `dry_run`, `plot_style`, `plot_styles`, `no_pdf`, `fonts`, `no_system_fonts`) from the one core registry (ADR-0007). Passing original-only options (`output`, `allow_loss`, `plot_style`, `plot_styles`, `no_pdf`) against a drawing-set folder is refused with `usage`.
 
-## Decode-loss gate (ADR-0004)
+## Decode-loss gate & collateral changes (ADR-0004)
 
-Before applying any operation, AgentDrafter inspects the [decode report](originals.md#the-decode-report) from strictly reading the original:
+Before applying any operation, AgentDrafter inspects the [decode report](originals.md#the-decode-report) from reading the original (falling back to read-past-damage when a damaged file has recoverable records):
 
-- If `decoded` is `false` (any `not_decoded` custom/proxy/opaque record, `skipped > 0`, `recovered_errors > 0`, or `diagnostics_truncated`) and `--allow-loss` is **not** set, the revision is refused with `incomplete_decode`. The error and reply name the undecoded kinds, counts and handles, and **zero files are written**.
+- If `decoded` is `false` (any `not_decoded` custom/proxy/opaque record, `skipped > 0`, `recovered_errors > 0`, `read_past_damage`, or `diagnostics_truncated`) and `--allow-loss` is **not** set, the revision is refused with `incomplete_decode`. The error and reply name the undecoded kinds, counts, handles and any `read_past_damage` reason, and **zero files are written**.
 - With `--allow-loss` (`allow_loss: true`), the revision proceeds. Undecoded custom records preserved as raw bytes by acadrust stay untouched in the saved revision (in the original's DWG version), and the full `decode_report` and `allowed_loss: true` are recorded in both the reply and `<rev-stem>.changes.json`.
+- After serializing the revision DWG, AgentDrafter strictly re-reads those exact bytes and diffs entities (including owner handles, raw records, geometry, attributes, and extended data), non-graphical objects, dictionaries, symbol tables, requested additions/deletions, and decode health against the pre-edit snapshot. If any `unexpected_changes` occurred outside the requested operations and `--allow-loss` is **not** set, publishing is refused (writing **zero files**) and the unexpected changes are returned in the reply; with `--allow-loss`, the revision is published and the unexpected changes are recorded in both the reply and `<rev-stem>.changes.json`.
 
 ## Preserving the original DWG version (ADR-0006)
 
-A revision is always written back in the exact DWG version the original arrived in (`AC1009`/R12, `AC1012`/R13, `AC1014`/R14, `AC1015`/R2000, `AC1018`/R2004, `AC1021`/R2007, `AC1024`/R2010, `AC1027`/R2013, `AC1032`/R2018). If an original arrived in a format the DWG library cannot write back without converting (such as `AC1006`/R10, which acadrust reads as `AC1009`), revising is refused with `dwg_write` rather than silently upgrading the version.
+A revision is always written back in the exact DWG version the original arrived in (`AC1009`/R12, `AC1012`/R13, `AC1014`/R14, `AC1015`/R2000, `AC1018`/R2004, `AC1021`/R2007, `AC1024`/R2010, `AC1027`/R2013, `AC1032`/R2018), verified byte-for-byte across all 6 bytes of the DWG header before and after serialization. If an original arrived in a format the DWG library cannot write back without converting (such as `AC1006`/R10 or an `AD10xx` header prefix), revising is refused with `dwg_write` rather than silently converting the version.
+
+## Client drawings stay outside the repository (ADR-0008)
+
+> [!CAUTION]
+> Never commit a revision DWG, its `.changes.json` change list (which carries file names, text, attribute values, and handles), or its revision PDF for a real plant drawing into a public repository. Keep plant originals and their revisions in a private folder outside the repository. `.gitignore` ignores `*.dwg`, `*.changes.json`, `*.rev[0-9]*.pdf`, and AgentDrafter's temporary files as a backstop, not a substitute for keeping client material outside the checkout.
 
 ## Operations on an original DWG
 

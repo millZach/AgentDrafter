@@ -508,8 +508,8 @@ Only what an operation touched is rewritten. Each record is read into the strict
 
 ## What is not offered yet
 
-- Failed checks in a dry run: the [checker](check.md) reads saved files, and a dry run saves none.
-- Revising an existing DWG: a change set edits a drawing set's records, not an original.
+- Failed checks in a dry run on a drawing set: the [checker](check.md) reads saved files, and a dry run saves none. (Revising an original `.dwg` with `--dry-run` checks the serialized revision bytes in memory; see [revisions.md](revisions.md).)
+- Journal, `undo` and `accept` on original-DWG revisions (Part 2 of #71; revising an original `.dwg` into a new revision DWG with `.changes.json` and PDF is built in [revisions.md](revisions.md)).
 - Change sets on a sheet description outside a drawing set.
 - Operations on the set's other parts: hatch patterns, the block library's own layers, linetypes and text styles, renaming or deleting a block, rows and their values directly, and a sheet's template.
 - Choosing where in its list an added object goes; it is drawn after the others.

@@ -608,6 +608,21 @@ fn parse_stale(mut args: Args) -> Result<Value, Error> {
 /// the change set's JSON file or `-` for standard input, and the options.
 fn parse_change(mut args: Args) -> Result<Value, Error> {
     let usage = |message: String| Error::usage(format!("{message}; usage: {CHANGE_USAGE}"));
+    let value = |flag: &str, val: Option<OsString>| -> Result<OsString, Error> {
+        match val {
+            Some(v)
+                if v.to_str()
+                    .is_some_and(|text| text.starts_with('-') && text.len() > 1) =>
+            {
+                Err(usage(format!(
+                    "{flag} needs a value, not option `{}`",
+                    v.to_string_lossy()
+                )))
+            }
+            Some(v) => Ok(v),
+            None => Err(usage(format!("{flag} needs a value"))),
+        }
+    };
     let mut given: Vec<OsString> = Vec::new();
     let mut dry_run = false;
     let mut output: Option<PathBuf> = None;
@@ -621,34 +636,29 @@ fn parse_change(mut args: Args) -> Result<Value, Error> {
             Some("--dry-run") => dry_run = true,
             Some("--allow-loss") => allow_loss = true,
             Some("--no-pdf") => no_pdf = true,
-            Some("--output" | "-o") => match args.next() {
-                Some(path) => {
-                    if output.replace(PathBuf::from(path)).is_some() {
-                        return Err(usage("--output is given twice".to_owned()));
-                    }
+            Some("--output" | "-o") => {
+                let path = value("--output", args.next())?;
+                if output.replace(PathBuf::from(path)).is_some() {
+                    return Err(usage("--output is given twice".to_owned()));
                 }
-                None => return Err(usage("--output needs a value".to_owned())),
-            },
-            Some("--plot-style") => match args.next() {
-                Some(name) => {
-                    let name = name
-                        .into_string()
-                        .map_err(|_| usage("the plot style's name is not valid text".to_owned()))?;
-                    if plot_style.replace(name).is_some() {
-                        return Err(usage("--plot-style is given twice".to_owned()));
-                    }
+            }
+            Some("--plot-style") => {
+                let name = value("--plot-style", args.next())?
+                    .into_string()
+                    .map_err(|_| usage("the plot style's name is not valid text".to_owned()))?;
+                if plot_style.replace(name).is_some() {
+                    return Err(usage("--plot-style is given twice".to_owned()));
                 }
-                None => return Err(usage("--plot-style needs a value".to_owned())),
-            },
-            Some("--plot-styles") => match args.next() {
-                Some(folder) => plot_styles.push(PathBuf::from(folder)),
-                None => return Err(usage("--plot-styles needs a value".to_owned())),
-            },
+            }
+            Some("--plot-styles") => {
+                let folder = value("--plot-styles", args.next())?;
+                plot_styles.push(PathBuf::from(folder));
+            }
             Some("--no-system-fonts") => fonts.no_system = true,
-            Some("--fonts") => match args.next() {
-                Some(folder) => fonts.push(PathBuf::from(folder)),
-                None => return Err(usage("--fonts needs a value".to_owned())),
-            },
+            Some("--fonts") => {
+                let folder = value("--fonts", args.next())?;
+                fonts.push(PathBuf::from(folder));
+            }
             Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
                 return Err(usage(format!("change takes no option `{flag}`")))
             }

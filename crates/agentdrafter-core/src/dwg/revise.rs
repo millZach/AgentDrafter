@@ -14,12 +14,14 @@ use std::path::Path;
 
 use acadrust::entities::{
     AttributeEntity, BoundaryEdge, EntityCommon, EntityType, HorizontalAlignment,
-    Insert as DwgInsert, LwVertex, MText as DwgMText, Polyline3D, Text as DwgText,
-    TextHorizontalAlignment, TextVerticalAlignment, VerticalAlignment,
+    Insert as DwgInsert, LwVertex, MText as DwgMText, MirrorOptions, Text as DwgText,
+    TextHorizontalAlignment, TextVerticalAlignment, Vertex2D, Vertex3DPolyline, VerticalAlignment,
 };
 use acadrust::objects::ObjectType;
 use acadrust::tables::{Layer as DwgLayer, TableEntry};
-use acadrust::types::{Color, DxfVersion, Handle, LineWeight, Vector2, Vector3};
+use acadrust::types::{
+    Color, DxfVersion, Handle, LineWeight, Transform as DwgTransform, Vector2, Vector3,
+};
 use acadrust::{CadDocument, DwgWriter};
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -99,33 +101,65 @@ struct ObjectDigest {
     owner: u64,
     /// Exact raw bytes for R2004+ non-compound passthrough objects.
     raw_bytes: Option<Vec<u8>>,
-    /// Logical summary for pre-R2004 or compound objects that acadrust
-    /// re-encodes instead of streaming verbatim.
+    /// Field-complete logical digest for pre-R2004 or compound objects that
+    /// acadrust re-encodes instead of streaming verbatim, and for diagnostics.
     logical: String,
+}
+
+/// Structural digest of one non-graphical object in `drawing.objects`.
+#[derive(Clone, Debug, PartialEq)]
+struct NonGraphicalDigest {
+    kind: String,
+    owner: u64,
+    summary: String,
 }
 
 /// Structural digest of one layer table entry.
 #[derive(Clone, Debug, PartialEq)]
 struct LayerDigest {
+    handle: u64,
     name: String,
     color: String,
+    color_name: Option<String>,
+    book_name: Option<String>,
     linetype: String,
     lineweight: String,
-    flags: (bool, bool, bool, bool),
+    flags: (bool, bool, bool, bool, bool, bool),
+    transparency: String,
     description: String,
+}
+
+/// Structural digest of one block record table entry.
+#[derive(Clone, Debug, PartialEq)]
+struct BlockRecordDigest {
+    handle: u64,
+    name: String,
+    flags: String,
+    layout_handle: u64,
+    entity_handles: Vec<u64>,
 }
 
 /// Pre-edit structural snapshot of an original drawing.
 struct DrawingSnapshot {
     dwg_version: String,
+    decode: DecodeReport,
     objects: BTreeMap<u64, ObjectDigest>,
+    /// Handles of owned sub-entities (Insert SEQENDs, Polyline3D vertices)
+    /// that live inside their parent entity rather than top-level `entities`.
+    sub_handles: HashSet<u64>,
+    non_graphical: BTreeMap<u64, NonGraphicalDigest>,
     layers: BTreeMap<String, LayerDigest>,
+    line_types: BTreeMap<String, String>,
+    text_styles: BTreeMap<String, String>,
+    dim_styles: BTreeMap<String, String>,
+    block_records: BTreeMap<String, BlockRecordDigest>,
 }
 
 /// An open original DWG ready for in-place revision, strictly behind the `dwg`
 /// seam.
 pub(crate) struct RevisionSession {
     drawing: CadDocument,
+    original_header: Option<[u8; 6]>,
     raw_version: Option<String>,
     dwg_version: String,
     decode: DecodeReport,
@@ -134,24 +168,46 @@ pub(crate) struct RevisionSession {
     expected_touched: HashSet<u64>,
     expected_added: HashSet<u64>,
     expected_deleted: HashSet<u64>,
+    expected_spaces_mutated: HashSet<u64>,
     expected_layers_added: HashSet<String>,
     expected_layers_changed: HashSet<String>,
     app_registered: bool,
 }
 
 impl RevisionSession {
-    /// Opens an original DWG strictly from `bytes` already read from `path`,
-    /// capturing its decode report, initial contents, and pre-edit structural
-    /// snapshot without modifying anything.
+    /// Opens an original DWG from `bytes` already read from `path`, trying
+    /// strict reading first and falling back to read-past-damage when a damaged
+    /// DWG still has recoverable records (so `--allow-loss` can revise it and
+    /// record `read_past_damage`, while without `--allow-loss` it is refused
+    /// with `incomplete_decode`).
     pub(crate) fn open(bytes: &[u8], path: &Path) -> Result<Self, Error> {
+        let original_header: Option<[u8; 6]> = bytes.get(..6).and_then(|s| s.try_into().ok());
         let raw_version = raw_dwg_version(bytes);
-        let (drawing, stats) = read_drawing_bytes_with_stats(bytes, path, false)?;
-        let initial_contents = contents(&drawing, &stats, raw_version.clone())?;
+        let (drawing, stats, read_past_damage) =
+            match read_drawing_bytes_with_stats(bytes, path, false) {
+                Ok((drawing, stats)) => (drawing, stats, None),
+                Err(strict_err) => {
+                    // Only attempt read-past-damage on files with a DWG header.
+                    if raw_version.is_none() {
+                        return Err(strict_err);
+                    }
+                    match read_drawing_bytes_with_stats(bytes, path, true) {
+                        Ok((drawing, stats)) => (drawing, stats, Some(strict_err.message)),
+                        Err(_) => return Err(strict_err),
+                    }
+                }
+            };
+        let mut initial_contents = contents(&drawing, &stats, raw_version.clone())?;
+        if let Some(reason) = read_past_damage {
+            initial_contents.decode.decoded = false;
+            initial_contents.decode.read_past_damage = Some(reason);
+        }
         let decode = initial_contents.decode.clone();
         let dwg_version = initial_contents.dwg_version.clone();
-        let snapshot = snapshot_drawing(&drawing, &dwg_version);
+        let snapshot = snapshot_drawing(&drawing, &dwg_version, &decode);
         Ok(Self {
             drawing,
+            original_header,
             raw_version,
             dwg_version,
             decode,
@@ -160,6 +216,7 @@ impl RevisionSession {
             expected_touched: HashSet::new(),
             expected_added: HashSet::new(),
             expected_deleted: HashSet::new(),
+            expected_spaces_mutated: HashSet::new(),
             expected_layers_added: HashSet::new(),
             expected_layers_changed: HashSet::new(),
             app_registered: false,
@@ -186,11 +243,12 @@ impl RevisionSession {
         contents(&self.drawing, &empty_stats, self.raw_version.clone())
     }
 
-    /// Verifies that pinned acadrust can write this drawing back in the exact
-    /// DWG version the original arrived in (ADR-0006), refusing cleanly rather
-    /// than silently converting versions (such as `AC1006` -> `AC1009`).
+    /// Verifies that pinned acadrust can write this drawing back with the exact
+    /// 6-byte DWG version header the original arrived in (ADR-0006), refusing
+    /// cleanly rather than silently converting versions (such as `AC1006` ->
+    /// `AC1009` or `AD1032` -> `AC1032`).
     pub(crate) fn check_writable_version(&self) -> Result<(), Error> {
-        if self.drawing.version == DxfVersion::Unknown {
+        let Some(expected_header) = writable_header_bytes(self.drawing.version) else {
             return Err(Error::new(
                 ErrorCode::DwgWrite,
                 format!(
@@ -198,21 +256,17 @@ impl RevisionSession {
                     self.dwg_version
                 ),
             ));
-        }
-        let target = self.drawing.version.to_string();
-        if let Some(raw) = &self.raw_version {
-            // `AD10xx` is AutoCAD's alternate header prefix for the same AC10xx
-            // version; different version digits (such as `AC1006` normalized to
-            // `AC1009`) would silently convert the file and must be refused.
-            let raw_digits = raw.get(2..).unwrap_or("");
-            let target_digits = target.get(2..).unwrap_or("");
-            if raw_digits != target_digits {
+        };
+        if let Some(orig) = self.original_header {
+            if orig != expected_header {
+                let raw = String::from_utf8_lossy(&orig);
+                let target = std::str::from_utf8(&expected_header).unwrap_or("?");
                 return Err(Error::new(
                     ErrorCode::DwgWrite,
                     format!(
                         "the DWG library reads `{raw}` as `{target}` and cannot write `{raw}` \
-                         without converting its DWG version; revising is refused to preserve \
-                         the original version (ADR-0006)"
+                         without changing its 6-byte DWG version header; revising is refused to \
+                         preserve the original version (ADR-0006)"
                     ),
                 ));
             }
@@ -342,10 +396,19 @@ impl RevisionSession {
         layouts.into_iter().map(|(l, _)| l.name.clone()).collect()
     }
 
-    /// Returns whether the object at hex handle `hex` exists, and its layer
-    /// name if locked.
+    fn is_layer_locked(&self, layer_name: &str) -> bool {
+        self.drawing
+            .layers
+            .iter()
+            .find(|l| l.name.eq_ignore_ascii_case(layer_name))
+            .is_some_and(|l| l.flags.locked)
+    }
+
+    /// Returns whether the sheet object at hex handle `hex` exists, and its
+    /// layer name if locked. Refuses handles belonging to block definitions.
     pub(crate) fn locked_layer_of(&self, hex: &str) -> Result<Option<String>, Error> {
         let handle = parse_hex_handle(hex)?;
+        let _ = self.ensure_sheet_entity(handle, hex)?;
         let Some(object) = self.drawing.get_entity(handle) else {
             return Err(Error::new(
                 ErrorCode::UnknownName,
@@ -353,32 +416,69 @@ impl RevisionSession {
             ));
         };
         let layer = layer_of(object.common());
-        let locked = self
-            .drawing
-            .layers
-            .iter()
-            .find(|l| l.name.eq_ignore_ascii_case(&layer))
-            .is_some_and(|l| l.flags.locked);
-        Ok(locked.then_some(layer))
+        Ok(self.is_layer_locked(&layer).then_some(layer))
     }
 
-    fn space_of_owner(&self, owner: Handle) -> TargetSpace {
+    fn sheet_space_of_owner(&self, owner: Handle) -> Option<TargetSpace> {
         if owner.is_null() || owner == self.drawing.header.model_space_block_handle {
-            return TargetSpace::Model;
+            return Some(TargetSpace::Model);
         }
         for obj in self.drawing.objects.values() {
             if let ObjectType::Layout(layout) = obj {
                 if layout.block_record == owner {
-                    return TargetSpace::Layout(layout.name.clone());
+                    return Some(TargetSpace::Layout(layout.name.clone()));
                 }
             }
         }
-        TargetSpace::Model
+        if !self.drawing.header.paper_space_block_handle.is_null()
+            && owner == self.drawing.header.paper_space_block_handle
+        {
+            if let Some(name) = self.drawing.objects.values().find_map(|obj| {
+                if let ObjectType::Layout(l) = obj {
+                    if !l.name.eq_ignore_ascii_case("Model")
+                        && l.block_record == self.drawing.header.paper_space_block_handle
+                    {
+                        return Some(l.name.clone());
+                    }
+                }
+                None
+            }) {
+                return Some(TargetSpace::Layout(name));
+            }
+        }
+        None
+    }
+
+    fn ensure_sheet_entity(&self, handle: Handle, hex: &str) -> Result<TargetSpace, Error> {
+        let Some(object) = self.drawing.get_entity(handle) else {
+            return Err(Error::new(
+                ErrorCode::UnknownName,
+                format!("no object with handle `{hex}` in the drawing"),
+            ));
+        };
+        self.sheet_space_of_owner(object.common().owner_handle)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::BadValue,
+                    format!(
+                        "object `{hex}` belongs to a block definition, not a sheet space, so it \
+                         cannot be targeted as a sheet object"
+                    ),
+                )
+            })
+    }
+
+    fn agentdrafter_app_handle(&self) -> Option<u64> {
+        self.drawing
+            .app_ids
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(block::APPLICATION))
+            .map(|a| a.handle.value())
     }
 
     /// Adds a newly parsed [`Object`] directly to model space or `space`,
     /// allocating a fresh handle. Writes AgentDrafter xdata only when an
-    /// explicit `id` or `name` was requested.
+    /// explicit `id` or `name` was requested, and never writes an empty `id`.
     pub(crate) fn add_object(
         &mut self,
         object: &Object,
@@ -390,63 +490,100 @@ impl RevisionSession {
     ) -> Result<(String, MutationHandles), Error> {
         let blocks = self.all_insertable_blocks();
         let mut dwg_obj = dwg_object(object, start_of, &blocks)?;
-        if explicit_id.is_some() || explicit_name.is_some() {
-            self.ensure_application_registered()?;
-            let id_part = explicit_id.unwrap_or("");
-            ids::write_id_and_name(dwg_obj.common_mut(), sheet_name, id_part, explicit_name);
+        match (explicit_id, explicit_name) {
+            (Some(id_part), name_part) => {
+                self.ensure_application_registered()?;
+                ids::write_id_and_name(dwg_obj.common_mut(), sheet_name, id_part, name_part);
+            }
+            (None, Some(name_part)) => {
+                self.ensure_application_registered()?;
+                ids::write_name_only(dwg_obj.common_mut(), name_part);
+            }
+            (None, None) => {}
         }
         let handle = self.insert_into_space(dwg_obj, space)?;
         let hex = handle_text(handle);
         let mut record = MutationHandles::default();
         self.expected_added.insert(handle.value());
         record.added.push(hex.clone());
-        // If we added an Insert with attributes, pre-assign handles to its
-        // attributes and seqend so the diff check tracks every added handle.
-        if let Some(EntityType::Insert(ins)) = self.drawing.get_entity_mut(handle) {
-            ins.common.raw_record = None;
-            for att in &mut ins.attributes {
-                att.common.raw_record = None;
+        if let Some(owner) = self
+            .drawing
+            .get_entity(handle)
+            .map(|e| e.common().owner_handle.value())
+        {
+            if owner != 0 {
+                self.expected_spaces_mutated.insert(owner);
             }
         }
-        // Assign concrete handles to insert child attributes if present so the
-        // diff self-check knows their exact handles.
-        self.assign_insert_child_handles(handle, &mut record);
+        self.assign_child_handles(handle, &mut record);
         Ok((hex, record))
     }
 
-    /// Assigns concrete handles to any unallocated attributes/seqend on an
-    /// added or cloned `Insert` so `expected_added` knows every handle written.
-    fn assign_insert_child_handles(&mut self, insert_handle: Handle, record: &mut MutationHandles) {
-        let (need_att, need_seq) = match self.drawing.get_entity(insert_handle) {
-            Some(EntityType::Insert(ins)) if !ins.attributes.is_empty() => (
-                ins.attributes
+    /// Assigns concrete handles to any unallocated owned sub-entities on an
+    /// added, edited, or cloned `Insert` (attributes + seqend) or `Polyline3D`
+    /// (vertices) so every handle written is unique and tracked.
+    fn assign_child_handles(&mut self, entity_handle: Handle, record: &mut MutationHandles) {
+        enum Need {
+            None,
+            Insert { need_att: Vec<bool>, need_seq: bool },
+            Polyline3D { need_verts: Vec<bool> },
+        }
+        let need = match self.drawing.get_entity(entity_handle) {
+            Some(EntityType::Insert(ins)) if !ins.attributes.is_empty() => Need::Insert {
+                need_att: ins
+                    .attributes
                     .iter()
                     .map(|a| a.common.handle.is_null())
-                    .collect::<Vec<_>>(),
-                ins.seqend_handle.is_none_or(|h| h.is_null()),
-            ),
-            _ => return,
+                    .collect(),
+                need_seq: ins.seqend_handle.is_none_or(|h| h.is_null()),
+            },
+            Some(EntityType::Polyline3D(p3)) if !p3.vertices.is_empty() => Need::Polyline3D {
+                need_verts: p3.vertices.iter().map(|v| v.handle.is_null()).collect(),
+            },
+            _ => Need::None,
         };
-        let mut allocated_atts = Vec::with_capacity(need_att.len());
-        for needs in need_att {
-            allocated_atts.push(needs.then(|| self.drawing.allocate_handle()));
-        }
-        let allocated_seq = need_seq.then(|| self.drawing.allocate_handle());
-        if let Some(EntityType::Insert(ins)) = self.drawing.get_entity_mut(insert_handle) {
-            ins.common.raw_record = None;
-            for (att, maybe_h) in ins.attributes.iter_mut().zip(allocated_atts) {
-                if let Some(h) = maybe_h {
-                    att.common.handle = h;
-                    att.common.owner_handle = insert_handle;
-                    att.common.raw_record = None;
-                    self.expected_added.insert(h.value());
-                    record.added.push(handle_text(h));
+        match need {
+            Need::None => {}
+            Need::Insert { need_att, need_seq } => {
+                let allocated_atts: Vec<Option<Handle>> = need_att
+                    .into_iter()
+                    .map(|n| n.then(|| self.drawing.allocate_handle()))
+                    .collect();
+                let allocated_seq = need_seq.then(|| self.drawing.allocate_handle());
+                if let Some(EntityType::Insert(ins)) = self.drawing.get_entity_mut(entity_handle) {
+                    ins.common.raw_record = None;
+                    for (att, maybe_h) in ins.attributes.iter_mut().zip(allocated_atts) {
+                        att.common.owner_handle = entity_handle;
+                        att.common.raw_record = None;
+                        if let Some(h) = maybe_h {
+                            att.common.handle = h;
+                            self.expected_added.insert(h.value());
+                            record.added.push(handle_text(h));
+                        }
+                    }
+                    if let Some(seq_h) = allocated_seq {
+                        ins.seqend_handle = Some(seq_h);
+                        self.expected_added.insert(seq_h.value());
+                        record.added.push(handle_text(seq_h));
+                    }
                 }
             }
-            if let Some(seq_h) = allocated_seq {
-                ins.seqend_handle = Some(seq_h);
-                self.expected_added.insert(seq_h.value());
-                record.added.push(handle_text(seq_h));
+            Need::Polyline3D { need_verts } => {
+                let allocated_verts: Vec<Option<Handle>> = need_verts
+                    .into_iter()
+                    .map(|n| n.then(|| self.drawing.allocate_handle()))
+                    .collect();
+                if let Some(EntityType::Polyline3D(p3)) = self.drawing.get_entity_mut(entity_handle)
+                {
+                    p3.common.raw_record = None;
+                    for (v, maybe_h) in p3.vertices.iter_mut().zip(allocated_verts) {
+                        if let Some(h) = maybe_h {
+                            v.handle = h;
+                            self.expected_added.insert(h.value());
+                            record.added.push(handle_text(h));
+                        }
+                    }
+                }
             }
         }
     }
@@ -481,7 +618,9 @@ impl RevisionSession {
 
     /// Sets one attribute value on the `Insert` at `hex`, preserving its
     /// handle, style, position, alignment, xdata, flags, and sibling
-    /// attributes.
+    /// attributes. Checks both the insert's and the attribute's own layer for
+    /// lock, and refuses constant attributes without counting them toward
+    /// `occurrence`.
     pub(crate) fn set_attribute(
         &mut self,
         hex: &str,
@@ -490,43 +629,72 @@ impl RevisionSession {
         value: &str,
     ) -> Result<(String, MutationHandles), Error> {
         let handle = parse_hex_handle(hex)?;
-        // Inspect read-only first so we never clear `raw_record` on failure.
-        let matching_indices: Vec<usize> = match self.drawing.get_entity(handle) {
-            Some(EntityType::Insert(ins)) => ins
-                .attributes
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| a.tag.eq_ignore_ascii_case(tag))
-                .map(|(i, _)| i)
-                .collect(),
-            Some(other) => {
-                return Err(Error::new(
-                    ErrorCode::BadValue,
-                    format!("set_attribute works on an insert, not a {}", kind_of(other)),
-                ))
-            }
-            None => {
-                return Err(Error::new(
-                    ErrorCode::UnknownName,
-                    format!("no object with handle `{hex}` in the drawing"),
-                ))
-            }
-        };
+        let _ = self.ensure_sheet_entity(handle, hex)?;
+        let (matching_indices, has_constant_match, insert_layer) =
+            match self.drawing.get_entity(handle) {
+                Some(EntityType::Insert(ins)) => {
+                    let mut editable = Vec::new();
+                    let mut saw_constant = false;
+                    for (i, a) in ins.attributes.iter().enumerate() {
+                        if a.tag.eq_ignore_ascii_case(tag) {
+                            if a.flags.constant {
+                                saw_constant = true;
+                            } else {
+                                editable.push(i);
+                            }
+                        }
+                    }
+                    (editable, saw_constant, layer_of(&ins.common))
+                }
+                Some(other) => {
+                    return Err(Error::new(
+                        ErrorCode::BadValue,
+                        format!("set_attribute works on an insert, not a {}", kind_of(other)),
+                    ))
+                }
+                None => {
+                    return Err(Error::new(
+                        ErrorCode::UnknownName,
+                        format!("no object with handle `{hex}` in the drawing"),
+                    ))
+                }
+            };
+        if self.is_layer_locked(&insert_layer) {
+            return Err(Error::new(
+                ErrorCode::Locked,
+                format!(
+                    "insert `{hex}` sits on layer `{insert_layer}`, which is locked; unlock it \
+                     first with change_layer, set: {{\"locked\": false}}"
+                ),
+            ));
+        }
         let chosen = match (matching_indices.as_slice(), occurrence) {
             ([], _) => {
+                if has_constant_match {
+                    return Err(Error::new(
+                        ErrorCode::BadValue,
+                        format!(
+                            "attribute `{tag}` on insert `{hex}` is constant and cannot be edited"
+                        ),
+                    ));
+                }
                 let available: Vec<String> = match self.drawing.get_entity(handle) {
-                    Some(EntityType::Insert(ins)) => {
-                        ins.attributes.iter().map(|a| a.tag.clone()).collect()
-                    }
+                    Some(EntityType::Insert(ins)) => ins
+                        .attributes
+                        .iter()
+                        .filter(|a| !a.flags.constant)
+                        .map(|a| a.tag.clone())
+                        .collect(),
                     _ => Vec::new(),
                 };
                 return Err(Error::new(
                     ErrorCode::UnknownName,
                     if available.is_empty() {
-                        format!("insert `{hex}` carries no attributes; cannot set `{tag}`")
+                        format!("insert `{hex}` carries no editable attributes; cannot set `{tag}`")
                     } else {
                         format!(
-                            "insert `{hex}` carries no attribute `{tag}`; its attributes: {}",
+                            "insert `{hex}` carries no editable attribute `{tag}`; its editable \
+                             attributes: {}",
                             available.join(", ")
                         )
                     },
@@ -560,6 +728,19 @@ impl RevisionSession {
                 ));
             }
         };
+        let att_layer = match self.drawing.get_entity(handle) {
+            Some(EntityType::Insert(ins)) => layer_of(&ins.attributes[chosen].common),
+            _ => unreachable!("checked above"),
+        };
+        if self.is_layer_locked(&att_layer) {
+            return Err(Error::new(
+                ErrorCode::Locked,
+                format!(
+                    "attribute `{tag}` on insert `{hex}` sits on layer `{att_layer}`, which is \
+                     locked; unlock it first with change_layer, set: {{\"locked\": false}}"
+                ),
+            ));
+        }
         let mut record = MutationHandles::default();
         let coded = text::text_code(value);
         let ins = match self.drawing.get_entity_mut(handle) {
@@ -600,6 +781,8 @@ impl RevisionSession {
         start_of: &dyn Fn(&TextObject) -> Point3,
     ) -> Result<(String, MutationHandles), Error> {
         let handle = parse_hex_handle(hex)?;
+        let _ = self.ensure_sheet_entity(handle, hex)?;
+        let app_handle = self.agentdrafter_app_handle();
         // Validate completely on a cloned copy of the target entity before
         // touching the live drawing (all-or-nothing, and preserves raw_record
         // on failure!).
@@ -608,6 +791,15 @@ impl RevisionSession {
                 ErrorCode::UnknownName,
                 format!("no object with handle `{hex}` in the drawing"),
             ));
+        };
+        let old_p3_handles: Vec<u64> = match &original {
+            EntityType::Polyline3D(p3) => p3
+                .vertices
+                .iter()
+                .filter(|v| !v.handle.is_null())
+                .map(|v| v.handle.value())
+                .collect(),
+            _ => Vec::new(),
         };
         let mut updated = original;
         let mut register_app = false;
@@ -772,18 +964,23 @@ impl RevisionSession {
                         Some(name.to_owned())
                     };
                     let carried_id = ids::read_id(updated.common());
-                    if new_name.is_some() || carried_id.is_some() {
-                        register_app = true;
-                        let own_id = carried_id
-                            .as_deref()
-                            .and_then(|full| full.split_once('/').map(|(_, rest)| rest))
-                            .unwrap_or("");
-                        ids::write_id_and_name(
-                            updated.common_mut(),
-                            sheet_name,
-                            own_id,
-                            new_name.as_deref(),
-                        );
+                    ids::strip_agentdrafter_xdata(updated.common_mut(), app_handle);
+                    match (carried_id.as_deref(), new_name.as_deref()) {
+                        (Some(full), name_opt) => {
+                            register_app = true;
+                            let own_id = full.split_once('/').map(|(_, rest)| rest).unwrap_or(full);
+                            ids::write_id_and_name(
+                                updated.common_mut(),
+                                sheet_name,
+                                own_id,
+                                name_opt,
+                            );
+                        }
+                        (None, Some(name_str)) => {
+                            register_app = true;
+                            ids::write_name_only(updated.common_mut(), name_str);
+                        }
+                        (None, None) => {}
                     }
                     changed_keys.push("name".to_owned());
                 }
@@ -813,10 +1010,27 @@ impl RevisionSession {
                 }
             }
         }
+        if let EntityType::Polyline3D(p3) = &updated {
+            let kept: HashSet<u64> = p3
+                .vertices
+                .iter()
+                .filter(|v| !v.handle.is_null())
+                .map(|v| v.handle.value())
+                .collect();
+            for old_h in &old_p3_handles {
+                if !kept.contains(old_h) {
+                    self.expected_deleted.insert(*old_h);
+                    record.deleted.push(format!("{old_h:X}"));
+                } else {
+                    self.expected_touched.insert(*old_h);
+                }
+            }
+        }
         *self
             .drawing
             .get_entity_mut(handle)
             .expect("target verified above") = updated;
+        self.assign_child_handles(handle, &mut record);
         Ok((format!("changed {}", changed_keys.join(", ")), record))
     }
 
@@ -827,6 +1041,7 @@ impl RevisionSession {
         by: [f64; 3],
     ) -> Result<MutationHandles, Error> {
         let handle = parse_hex_handle(hex)?;
+        let _ = self.ensure_sheet_entity(handle, hex)?;
         let Some(original) = self.drawing.get_entity(handle).cloned() else {
             return Err(Error::new(
                 ErrorCode::UnknownName,
@@ -849,6 +1064,7 @@ impl RevisionSession {
         angle: f64,
     ) -> Result<MutationHandles, Error> {
         let handle = parse_hex_handle(hex)?;
+        let _ = self.ensure_sheet_entity(handle, hex)?;
         let Some(original) = self.drawing.get_entity(handle).cloned() else {
             return Err(Error::new(
                 ErrorCode::UnknownName,
@@ -869,6 +1085,7 @@ impl RevisionSession {
         factor: f64,
     ) -> Result<MutationHandles, Error> {
         let handle = parse_hex_handle(hex)?;
+        let _ = self.ensure_sheet_entity(handle, hex)?;
         let Some(original) = self.drawing.get_entity(handle).cloned() else {
             return Err(Error::new(
                 ErrorCode::UnknownName,
@@ -892,13 +1109,14 @@ impl RevisionSession {
         erase_source: bool,
     ) -> Result<(String, MutationHandles), Error> {
         let handle = parse_hex_handle(hex)?;
+        let space = self.ensure_sheet_entity(handle, hex)?;
+        let app_handle = self.agentdrafter_app_handle();
         let Some(original) = self.drawing.get_entity(handle).cloned() else {
             return Err(Error::new(
                 ErrorCode::UnknownName,
                 format!("no object with handle `{hex}` in the drawing"),
             ));
         };
-        let space = self.space_of_owner(original.common().owner_handle);
         let mut mirrored = original;
         mirror_entity(&mut mirrored, first, second)?;
         if erase_source {
@@ -906,13 +1124,22 @@ impl RevisionSession {
             let record = self.commit_edited_entity(handle, mirrored);
             Ok((handle_text(handle), record))
         } else {
-            sanitize_clone(&mut mirrored);
+            sanitize_clone(&mut mirrored, app_handle);
             let new_handle = self.insert_into_space(mirrored, &space)?;
             let new_hex = handle_text(new_handle);
             let mut record = MutationHandles::default();
             self.expected_added.insert(new_handle.value());
             record.added.push(new_hex.clone());
-            self.assign_insert_child_handles(new_handle, &mut record);
+            if let Some(owner) = self
+                .drawing
+                .get_entity(new_handle)
+                .map(|e| e.common().owner_handle.value())
+            {
+                if owner != 0 {
+                    self.expected_spaces_mutated.insert(owner);
+                }
+            }
+            self.assign_child_handles(new_handle, &mut record);
             Ok((new_hex, record))
         }
     }
@@ -927,15 +1154,16 @@ impl RevisionSession {
         about: [f64; 3],
     ) -> Result<(String, MutationHandles), Error> {
         let handle = parse_hex_handle(hex)?;
+        let space = self.ensure_sheet_entity(handle, hex)?;
+        let app_handle = self.agentdrafter_app_handle();
         let Some(original) = self.drawing.get_entity(handle).cloned() else {
             return Err(Error::new(
                 ErrorCode::UnknownName,
                 format!("no object with handle `{hex}` in the drawing"),
             ));
         };
-        let space = self.space_of_owner(original.common().owner_handle);
         let mut copy = original;
-        sanitize_clone(&mut copy);
+        sanitize_clone(&mut copy, app_handle);
         if by != [0.0; 3] {
             translate_entity(&mut copy, Vector3::new(by[0], by[1], by[2]))?;
         }
@@ -947,14 +1175,24 @@ impl RevisionSession {
         let mut record = MutationHandles::default();
         self.expected_added.insert(new_handle.value());
         record.added.push(new_hex.clone());
-        self.assign_insert_child_handles(new_handle, &mut record);
+        if let Some(owner) = self
+            .drawing
+            .get_entity(new_handle)
+            .map(|e| e.common().owner_handle.value())
+        {
+            if owner != 0 {
+                self.expected_spaces_mutated.insert(owner);
+            }
+        }
+        self.assign_child_handles(new_handle, &mut record);
         Ok((new_hex, record))
     }
 
     /// Deletes the object at `hex` (and its owned attributes/seqend if an
-    /// `Insert`) from `CadDocument`.
+    /// `Insert`, or owned vertices if a `Polyline3D`) from `CadDocument`.
     pub(crate) fn delete_object(&mut self, hex: &str) -> Result<MutationHandles, Error> {
         let handle = parse_hex_handle(hex)?;
+        let _ = self.ensure_sheet_entity(handle, hex)?;
         let mut record = MutationHandles::default();
         let Some(removed) = self.drawing.remove_entity(handle) else {
             return Err(Error::new(
@@ -965,6 +1203,9 @@ impl RevisionSession {
         // Also strip the handle from its owning block record's entity_handles
         // so in-memory queries see the deletion immediately.
         let owner = removed.common().owner_handle;
+        if !owner.is_null() {
+            self.expected_spaces_mutated.insert(owner.value());
+        }
         for br in self.drawing.block_records.iter_mut() {
             if owner.is_null() || br.handle == owner {
                 br.entity_handles.retain(|h| *h != handle);
@@ -983,6 +1224,13 @@ impl RevisionSession {
                 if !seq.is_null() {
                     self.expected_deleted.insert(seq.value());
                     record.deleted.push(handle_text(seq));
+                }
+            }
+        } else if let EntityType::Polyline3D(p3) = &removed {
+            for v in &p3.vertices {
+                if !v.handle.is_null() {
+                    self.expected_deleted.insert(v.handle.value());
+                    record.deleted.push(handle_text(v.handle));
                 }
             }
         }
@@ -1054,9 +1302,14 @@ impl RevisionSession {
         }))
     }
 
-    /// Modifies an existing layer in `drawing.layers`, never dropping other
-    /// layers.
-    pub(crate) fn change_layer(&mut self, updated: &Layer) -> Result<MutationHandles, Error> {
+    /// Modifies ONLY the fields named in `keys` on an existing layer in
+    /// `drawing.layers`, preserving unmodeled true colors, color books,
+    /// lineweights, transparency, plot styles, and handles verbatim.
+    pub(crate) fn change_layer_fields(
+        &mut self,
+        updated: &Layer,
+        keys: &Map<String, Value>,
+    ) -> Result<MutationHandles, Error> {
         let Some(existing) = self
             .drawing
             .layers
@@ -1068,7 +1321,28 @@ impl RevisionSession {
                 format!("unknown layer `{}`", updated.name),
             ));
         };
-        set_layer_properties(existing, updated);
+        for key in keys.keys() {
+            match key.as_str() {
+                "color" => {
+                    existing.color = Color::Index(updated.color);
+                    existing.color_name = None;
+                    existing.book_name = None;
+                }
+                "linetype" => existing.line_type = updated.linetype.clone(),
+                "lineweight" => {
+                    existing.line_weight = match updated.lineweight {
+                        Some(w) => LineWeight::Value(w.hundredths()),
+                        None => LineWeight::Default,
+                    };
+                }
+                "on" => existing.flags.off = !updated.on,
+                "frozen" => existing.flags.frozen = updated.frozen,
+                "locked" => existing.flags.locked = updated.locked,
+                "plot" => existing.is_plottable = updated.plot,
+                "description" => existing.description = updated.description.clone(),
+                _ => {}
+            }
+        }
         let handle = existing.handle;
         self.expected_layers_changed
             .insert(updated.name.to_lowercase());
@@ -1097,10 +1371,10 @@ impl RevisionSession {
         record
     }
 
-    /// Serializes the revised drawing to DWG bytes in the original's exact DWG
-    /// version, re-reads those exact bytes strictly, and diffs the re-read
-    /// drawing against the pre-edit snapshot to report any unexpected changes
-    /// outside what the operations requested.
+    /// Serializes the revised drawing to DWG bytes in the original's exact 6-byte
+    /// DWG version header, strictly re-reads those bytes, and diffs every
+    /// entity, non-graphical object, symbol table, requested add/delete, and
+    /// decode health metric against the pre-edit snapshot.
     pub(crate) fn serialize_and_verify(
         &self,
         revision_path: &Path,
@@ -1125,22 +1399,27 @@ impl RevisionSession {
                 ))
             }
         };
+        if let Some(orig) = self.original_header {
+            if bytes.get(..6) != Some(&orig[..]) {
+                let expected = String::from_utf8_lossy(&orig);
+                let got = bytes
+                    .get(..6)
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_else(|| "<short>".to_owned());
+                return Err(Error::new(
+                    ErrorCode::DwgWrite,
+                    format!(
+                        "expected the revision to keep the exact 6-byte DWG header `{expected}`, \
+                         but the DWG library wrote `{got}` (ADR-0006)"
+                    ),
+                ));
+            }
+        }
         let written_version =
             raw_dwg_version(&bytes).unwrap_or_else(|| self.drawing.version.to_string());
-        let expected_digits = self.dwg_version.get(2..).unwrap_or("");
-        let written_digits = written_version.get(2..).unwrap_or("");
-        if expected_digits != written_digits {
-            return Err(Error::new(
-                ErrorCode::DwgWrite,
-                format!(
-                    "expected the revision to be written in `{}`, but the DWG library wrote \
-                     `{written_version}` (ADR-0006)",
-                    self.dwg_version
-                ),
-            ));
-        }
-        let (re_read, _) = read_drawing_bytes_with_stats(&bytes, revision_path, false)?;
-        let after = snapshot_drawing(&re_read, &written_version);
+        let (re_read, re_stats) = read_drawing_bytes_with_stats(&bytes, revision_path, false)?;
+        let re_contents = contents(&re_read, &re_stats, Some(written_version.clone()))?;
+        let after = snapshot_drawing(&re_read, &written_version, &re_contents.decode);
         let unexpected = self.diff_snapshots(&after);
         Ok((bytes, unexpected))
     }
@@ -1148,9 +1427,7 @@ impl RevisionSession {
     fn diff_snapshots(&self, after: &DrawingSnapshot) -> Vec<UnexpectedChange> {
         let mut unexpected = Vec::new();
         let before = &self.snapshot;
-        let before_digits = before.dwg_version.get(2..).unwrap_or("");
-        let after_digits = after.dwg_version.get(2..).unwrap_or("");
-        if before_digits != after_digits {
+        if before.dwg_version != after.dwg_version {
             unexpected.push(UnexpectedChange {
                 kind: "HEADER".to_owned(),
                 handle: "0".to_owned(),
@@ -1161,8 +1438,23 @@ impl RevisionSession {
                 ),
             });
         }
+        check_decode_regression(&before.decode, &after.decode, &mut unexpected);
+
+        // 1. Untouched entities must survive with identical owner, raw bytes (when
+        //    passthrough-eligible), and field-complete logical digest.
         for (&handle, orig) in &before.objects {
             if self.expected_deleted.contains(&handle) {
+                if after.objects.contains_key(&handle) {
+                    unexpected.push(UnexpectedChange {
+                        kind: orig.kind.clone(),
+                        handle: format!("{handle:X}"),
+                        change: UnexpectedChangeKind::Added,
+                        detail: format!(
+                            "deleted {} was still present in the revision after writing",
+                            orig.kind
+                        ),
+                    });
+                }
                 continue;
             }
             match after.objects.get(&handle) {
@@ -1173,18 +1465,27 @@ impl RevisionSession {
                     detail: format!("untouched {} was missing from the revision", orig.kind),
                 }),
                 Some(now) if !self.expected_touched.contains(&handle) => {
-                    let differed = match (&orig.raw_bytes, &now.raw_bytes) {
+                    let owner_changed = orig.owner != now.owner;
+                    let raw_changed = match (&orig.raw_bytes, &now.raw_bytes) {
                         (Some(a), Some(b)) => a != b,
-                        _ => orig.kind != now.kind || orig.logical != now.logical,
+                        _ => false,
                     };
-                    if differed {
+                    let logical_changed = orig.kind != now.kind || orig.logical != now.logical;
+                    if owner_changed || raw_changed || logical_changed {
+                        let reason = if owner_changed {
+                            format!("owner changed from {:X} to {:X}", orig.owner, now.owner)
+                        } else if logical_changed {
+                            format!("before: {}; after: {}", orig.logical, now.logical)
+                        } else {
+                            "verbatim raw record bytes changed".to_owned()
+                        };
                         unexpected.push(UnexpectedChange {
                             kind: orig.kind.clone(),
                             handle: format!("{handle:X}"),
                             change: UnexpectedChangeKind::Changed,
                             detail: format!(
-                                "untouched {} changed in the revision (before: {}; after: {})",
-                                orig.kind, orig.logical, now.logical
+                                "untouched {} changed in the revision ({reason})",
+                                orig.kind
                             ),
                         });
                     }
@@ -1202,7 +1503,61 @@ impl RevisionSession {
                 });
             }
         }
-        // Check layers table for unexpected additions/removals/changes.
+        // Verify every requested addition actually appeared in the written DWG.
+        for &handle in &self.expected_added {
+            if self.expected_deleted.contains(&handle) {
+                continue;
+            }
+            if !after.objects.contains_key(&handle) && !after.sub_handles.contains(&handle) {
+                unexpected.push(UnexpectedChange {
+                    kind: "ADDED_OBJECT".to_owned(),
+                    handle: format!("{handle:X}"),
+                    change: UnexpectedChangeKind::Removed,
+                    detail: "requested added object was missing after writing the revision"
+                        .to_owned(),
+                });
+            }
+        }
+
+        // 2. Non-graphical objects (dictionaries, layouts, xrecords, custom objects).
+        for (&handle, orig) in &before.non_graphical {
+            match after.non_graphical.get(&handle) {
+                None => unexpected.push(UnexpectedChange {
+                    kind: orig.kind.clone(),
+                    handle: format!("{handle:X}"),
+                    change: UnexpectedChangeKind::Removed,
+                    detail: format!(
+                        "untouched non-graphical {} was missing from the revision",
+                        orig.kind
+                    ),
+                }),
+                Some(now) if orig != now => unexpected.push(UnexpectedChange {
+                    kind: orig.kind.clone(),
+                    handle: format!("{handle:X}"),
+                    change: UnexpectedChangeKind::Changed,
+                    detail: format!(
+                        "untouched non-graphical {} changed in the revision",
+                        orig.kind
+                    ),
+                }),
+                Some(_) => {}
+            }
+        }
+        for (&handle, now) in &after.non_graphical {
+            if !before.non_graphical.contains_key(&handle) {
+                unexpected.push(UnexpectedChange {
+                    kind: now.kind.clone(),
+                    handle: format!("{handle:X}"),
+                    change: UnexpectedChangeKind::Added,
+                    detail: format!(
+                        "unexpected non-graphical {} appeared in the revision",
+                        now.kind
+                    ),
+                });
+            }
+        }
+
+        // 3. Symbol tables: layers, linetypes, text styles, dim styles, block records.
         for (key, orig) in &before.layers {
             match after.layers.get(key) {
                 None => unexpected.push(UnexpectedChange {
@@ -1232,6 +1587,75 @@ impl RevisionSession {
                 });
             }
         }
+        for key in &self.expected_layers_added {
+            if !after.layers.contains_key(key) {
+                unexpected.push(UnexpectedChange {
+                    kind: "LAYER".to_owned(),
+                    handle: key.clone(),
+                    change: UnexpectedChangeKind::Removed,
+                    detail: format!("requested added layer `{key}` was missing after writing"),
+                });
+            }
+        }
+        diff_named_table(
+            "LTYPE",
+            &before.line_types,
+            &after.line_types,
+            &mut unexpected,
+        );
+        diff_named_table(
+            "STYLE",
+            &before.text_styles,
+            &after.text_styles,
+            &mut unexpected,
+        );
+        diff_named_table(
+            "DIMSTYLE",
+            &before.dim_styles,
+            &after.dim_styles,
+            &mut unexpected,
+        );
+        for (key, orig) in &before.block_records {
+            match after.block_records.get(key) {
+                None => unexpected.push(UnexpectedChange {
+                    kind: "BLOCK_RECORD".to_owned(),
+                    handle: orig.name.clone(),
+                    change: UnexpectedChangeKind::Removed,
+                    detail: format!("untouched block record `{}` was removed", orig.name),
+                }),
+                Some(now) => {
+                    let meta_changed = orig.handle != now.handle
+                        || orig.flags != now.flags
+                        || orig.layout_handle != now.layout_handle;
+                    let members_changed = !self.expected_spaces_mutated.contains(&orig.handle)
+                        && orig.entity_handles != now.entity_handles;
+                    if meta_changed || members_changed {
+                        unexpected.push(UnexpectedChange {
+                            kind: "BLOCK_RECORD".to_owned(),
+                            handle: orig.name.clone(),
+                            change: UnexpectedChangeKind::Changed,
+                            detail: format!(
+                                "untouched block record `{}` changed in the revision",
+                                orig.name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        for (key, now) in &after.block_records {
+            if !before.block_records.contains_key(key) {
+                unexpected.push(UnexpectedChange {
+                    kind: "BLOCK_RECORD".to_owned(),
+                    handle: now.name.clone(),
+                    change: UnexpectedChangeKind::Added,
+                    detail: format!(
+                        "unexpected block record `{}` appeared in the revision",
+                        now.name
+                    ),
+                });
+            }
+        }
         unexpected
     }
 }
@@ -1258,27 +1682,37 @@ fn clear_raw_record(object: &mut EntityType) {
     }
 }
 
-/// Resets handle, raw_record, extension dictionary, reactors, and carried
-/// AgentDrafter ID/name on a cloned object before adding it as a new copy.
-fn sanitize_clone(object: &mut EntityType) {
+/// Resets handle, raw_record, extension dictionary, reactors, carried
+/// AgentDrafter ID/name (both structured and raw DWG EED), and owned sub-entity
+/// handles on a cloned object before adding it as a new copy.
+fn sanitize_clone(object: &mut EntityType, app_handle: Option<u64>) {
     let common = object.common_mut();
     common.handle = Handle::NULL;
     common.owner_handle = Handle::NULL;
     common.raw_record = None;
     common.xdictionary_handle = None;
     common.reactors.clear();
-    // Strip AgentDrafter ID/name xdata so copies never duplicate a name or ID.
-    common.extended_data.remove_record(block::APPLICATION);
-    if let EntityType::Insert(ins) = object {
-        ins.seqend_handle = None;
-        for att in &mut ins.attributes {
-            att.common.handle = Handle::NULL;
-            att.common.owner_handle = Handle::NULL;
-            att.common.raw_record = None;
-            att.common.xdictionary_handle = None;
-            att.common.reactors.clear();
-            att.common.extended_data.remove_record(block::APPLICATION);
+    // Strip AgentDrafter ID/name xdata (structured AND raw_dwg_eed) so copies
+    // never duplicate a name or ID.
+    ids::strip_agentdrafter_xdata(common, app_handle);
+    match object {
+        EntityType::Insert(ins) => {
+            ins.seqend_handle = None;
+            for att in &mut ins.attributes {
+                att.common.handle = Handle::NULL;
+                att.common.owner_handle = Handle::NULL;
+                att.common.raw_record = None;
+                att.common.xdictionary_handle = None;
+                att.common.reactors.clear();
+                ids::strip_agentdrafter_xdata(&mut att.common, app_handle);
+            }
         }
+        EntityType::Polyline3D(p3) => {
+            for v in &mut p3.vertices {
+                v.handle = Handle::NULL;
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1421,6 +1855,50 @@ fn apply_type_change(
             }
             _ => return Err(unknown_change_key("polyline", key)),
         },
+        EntityType::Polyline2D(poly) => match key {
+            "closed" => {
+                let Some(b) = value.as_bool() else {
+                    return Err(
+                        Error::new(ErrorCode::WrongType, "expected true or false").at_field(field)
+                    );
+                };
+                poly.flags.set_closed(b);
+            }
+            "points" => {
+                let Some(arr) = value.as_array() else {
+                    return Err(
+                        Error::new(ErrorCode::WrongType, "expected a list of points")
+                            .at_field(field),
+                    );
+                };
+                if arr.len() < 2 {
+                    return Err(Error::new(
+                        ErrorCode::BadValue,
+                        "a polyline needs at least 2 points",
+                    )
+                    .at_field(field));
+                }
+                let mut pts = Vec::with_capacity(arr.len());
+                for (i, item) in arr.iter().enumerate() {
+                    pts.push(vector(parse_point_json(
+                        item,
+                        units,
+                        &format!("{field}[{i}]"),
+                    )?));
+                }
+                // Mutate vertices in place, preserving entity common/handle/layer/normal.
+                poly.elevation = pts[0].z;
+                for (i, pt) in pts.iter().enumerate() {
+                    if let Some(existing) = poly.vertices.get_mut(i) {
+                        existing.location = *pt;
+                    } else {
+                        poly.vertices.push(Vertex2D::new(*pt));
+                    }
+                }
+                poly.vertices.truncate(pts.len());
+            }
+            _ => return Err(unknown_change_key("polyline", key)),
+        },
         EntityType::Polyline3D(poly) => match key {
             "closed" => {
                 let Some(b) = value.as_bool() else {
@@ -1452,7 +1930,20 @@ fn apply_type_change(
                         &format!("{field}[{i}]"),
                     )?));
                 }
-                *poly = Polyline3D::from_points(pts);
+                // Mutate vertices in place, preserving handle, owner, layer,
+                // flags, xdata, and existing vertex handles. New vertices start
+                // with `Handle::NULL` and receive fresh handles before commit.
+                let parent_layer = poly.common.layer.clone();
+                for (i, pt) in pts.iter().enumerate() {
+                    if let Some(existing) = poly.vertices.get_mut(i) {
+                        existing.position = *pt;
+                    } else {
+                        let mut v = Vertex3DPolyline::new(*pt);
+                        v.layer = parent_layer.clone();
+                        poly.vertices.push(v);
+                    }
+                }
+                poly.vertices.truncate(pts.len());
             }
             _ => return Err(unknown_change_key("polyline", key)),
         },
@@ -1887,137 +2378,70 @@ fn unknown_change_key(kind: &str, key: &str) -> Error {
 
 // ── Direct transforms on acadrust EntityType ──────────────────────────────
 
-fn translate_v2(v: Vector2, d: Vector3) -> Vector2 {
-    Vector2::new(v.x + d.x, v.y + d.y)
+/// True when `normal` is the standard +Z extrusion vector `(0, 0, 1)`, where
+/// OCS coincides with WCS.
+fn is_standard_z(normal: Vector3) -> bool {
+    normal.x.abs() < 1e-9 && normal.y.abs() < 1e-9 && (normal.z - 1.0).abs() < 1e-9
+}
+
+/// Returns `true` if `object` is an OCS entity whose stored coordinates use a
+/// non-standard extrusion normal (not `+Z`).
+fn has_non_standard_normal(object: &EntityType) -> bool {
+    let normal = match object {
+        EntityType::Circle(e) => e.normal,
+        EntityType::Arc(e) => e.normal,
+        EntityType::Ellipse(e) => e.normal,
+        EntityType::LwPolyline(e) => e.normal,
+        EntityType::Polyline2D(e) => e.normal,
+        EntityType::Solid(e) => e.normal,
+        EntityType::Text(e) => e.normal,
+        EntityType::MText(e) => e.normal,
+        EntityType::Insert(e) => {
+            if !is_standard_z(e.normal) {
+                return true;
+            }
+            return e.attributes.iter().any(|a| !is_standard_z(a.normal));
+        }
+        EntityType::Hatch(e) => e.normal,
+        EntityType::Point(e) => e.normal,
+        _ => return false,
+    };
+    !is_standard_z(normal)
 }
 
 fn translate_entity(object: &mut EntityType, delta: Vector3) -> Result<(), Error> {
     match object {
-        EntityType::Line(e) => {
-            e.start = e.start + delta;
-            e.end = e.end + delta;
+        EntityType::Line(_)
+        | EntityType::Circle(_)
+        | EntityType::Arc(_)
+        | EntityType::Ellipse(_)
+        | EntityType::LwPolyline(_)
+        | EntityType::Polyline2D(_)
+        | EntityType::Polyline3D(_)
+        | EntityType::Spline(_)
+        | EntityType::Solid(_)
+        | EntityType::Face3D(_)
+        | EntityType::Point(_)
+        | EntityType::Ray(_)
+        | EntityType::XLine(_)
+        | EntityType::Text(_)
+        | EntityType::MText(_)
+        | EntityType::Insert(_)
+        | EntityType::Hatch(_) => {
+            // acadrust's `Entity::translate` applies WCS->OCS arbitrary-axis
+            // projection for all OCS entities (handling -Z and tilted normals
+            // accurately) and translates world-space XDATA along with the entity.
+            object.translate(delta);
+            Ok(())
         }
-        EntityType::Circle(e) => {
-            e.center = e.center + delta;
-        }
-        EntityType::Arc(e) => {
-            e.center = e.center + delta;
-        }
-        EntityType::Ellipse(e) => {
-            e.center = e.center + delta;
-        }
-        EntityType::LwPolyline(e) => {
-            for v in &mut e.vertices {
-                v.location = translate_v2(v.location, delta);
-            }
-            e.elevation += delta.z;
-        }
-        EntityType::Polyline2D(e) => {
-            for v in &mut e.vertices {
-                v.location = v.location + delta;
-            }
-            e.elevation += delta.z;
-        }
-        EntityType::Polyline3D(e) => {
-            for v in &mut e.vertices {
-                v.position = v.position + delta;
-            }
-        }
-        EntityType::Spline(e) => {
-            for p in &mut e.control_points {
-                *p = *p + delta;
-            }
-            for p in &mut e.fit_points {
-                *p = *p + delta;
-            }
-        }
-        EntityType::Solid(e) => {
-            e.first_corner = e.first_corner + delta;
-            e.second_corner = e.second_corner + delta;
-            e.third_corner = e.third_corner + delta;
-            e.fourth_corner = e.fourth_corner + delta;
-        }
-        EntityType::Face3D(e) => {
-            e.first_corner = e.first_corner + delta;
-            e.second_corner = e.second_corner + delta;
-            e.third_corner = e.third_corner + delta;
-            e.fourth_corner = e.fourth_corner + delta;
-        }
-        EntityType::Point(e) => {
-            e.location = e.location + delta;
-        }
-        EntityType::Ray(e) => {
-            e.base_point = e.base_point + delta;
-        }
-        EntityType::XLine(e) => {
-            e.base_point = e.base_point + delta;
-        }
-        EntityType::Text(e) => {
-            e.insertion_point = e.insertion_point + delta;
-            if let Some(a) = &mut e.alignment_point {
-                *a = *a + delta;
-            }
-        }
-        EntityType::MText(e) => {
-            e.insertion_point = e.insertion_point + delta;
-        }
-        EntityType::Insert(e) => {
-            e.insert_point = e.insert_point + delta;
-            for att in &mut e.attributes {
-                translate_attribute(att, delta);
-            }
-        }
-        EntityType::Hatch(e) => {
-            e.elevation += delta.z;
-            for p in &mut e.seed_points {
-                *p = translate_v2(*p, delta);
-            }
-            for line in &mut e.pattern.lines {
-                line.base_point = translate_v2(line.base_point, delta);
-            }
-            for path in &mut e.paths {
-                for edge in &mut path.edges {
-                    match edge {
-                        BoundaryEdge::Line(l) => {
-                            l.start = translate_v2(l.start, delta);
-                            l.end = translate_v2(l.end, delta);
-                        }
-                        BoundaryEdge::CircularArc(a) => {
-                            a.center = translate_v2(a.center, delta);
-                        }
-                        BoundaryEdge::EllipticArc(ea) => {
-                            ea.center = translate_v2(ea.center, delta);
-                        }
-                        BoundaryEdge::Spline(s) => {
-                            for cp in &mut s.control_points {
-                                cp.x += delta.x;
-                                cp.y += delta.y;
-                            }
-                            for fp in &mut s.fit_points {
-                                *fp = translate_v2(*fp, delta);
-                            }
-                        }
-                        BoundaryEdge::Polyline(p) => {
-                            for v in &mut p.vertices {
-                                v.x += delta.x;
-                                v.y += delta.y;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        other => {
-            return Err(Error::new(
-                ErrorCode::BadValue,
-                format!(
-                    "move is not supported on {} in an original DWG",
-                    kind_of(other)
-                ),
-            ))
-        }
+        other => Err(Error::new(
+            ErrorCode::BadValue,
+            format!(
+                "move is not supported on {} in an original DWG",
+                kind_of(other)
+            ),
+        )),
     }
-    Ok(())
 }
 
 fn translate_attribute(att: &mut AttributeEntity, delta: Vector3) {
@@ -2060,6 +2484,39 @@ fn rot_vec2(v: Vector2, sin: f64, cos: f64) -> Vector2 {
 }
 
 fn rotate_entity(object: &mut EntityType, about: [f64; 3], degrees: f64) -> Result<(), Error> {
+    if !matches!(
+        object,
+        EntityType::Line(_)
+            | EntityType::Circle(_)
+            | EntityType::Arc(_)
+            | EntityType::Ellipse(_)
+            | EntityType::LwPolyline(_)
+            | EntityType::Polyline2D(_)
+            | EntityType::Polyline3D(_)
+            | EntityType::Spline(_)
+            | EntityType::Solid(_)
+            | EntityType::Text(_)
+            | EntityType::MText(_)
+            | EntityType::Insert(_)
+            | EntityType::Hatch(_)
+    ) {
+        return Err(Error::new(
+            ErrorCode::BadValue,
+            format!(
+                "rotate is not supported on {} in an original DWG",
+                kind_of(object)
+            ),
+        ));
+    }
+    if has_non_standard_normal(object) {
+        let tf = DwgTransform::from_rotation_with_origin(
+            Vector3::UNIT_Z,
+            degrees.to_radians(),
+            Vector3::new(about[0], about[1], about[2]),
+        );
+        object.apply_transform(&tf);
+        return Ok(());
+    }
     let (sin, cos) = sin_cos_degrees(degrees);
     let rad = degrees.to_radians();
     match object {
@@ -2224,6 +2681,38 @@ fn scale_v2(v: Vector2, about: [f64; 3], factor: f64) -> Vector2 {
 }
 
 fn scale_entity(object: &mut EntityType, about: [f64; 3], factor: f64) -> Result<(), Error> {
+    if !matches!(
+        object,
+        EntityType::Line(_)
+            | EntityType::Circle(_)
+            | EntityType::Arc(_)
+            | EntityType::Ellipse(_)
+            | EntityType::LwPolyline(_)
+            | EntityType::Polyline2D(_)
+            | EntityType::Polyline3D(_)
+            | EntityType::Spline(_)
+            | EntityType::Solid(_)
+            | EntityType::Text(_)
+            | EntityType::MText(_)
+            | EntityType::Insert(_)
+            | EntityType::Hatch(_)
+    ) {
+        return Err(Error::new(
+            ErrorCode::BadValue,
+            format!(
+                "scale is not supported on {} in an original DWG",
+                kind_of(object)
+            ),
+        ));
+    }
+    if has_non_standard_normal(object) {
+        let tf = DwgTransform::from_scaling_with_origin(
+            Vector3::new(factor, factor, factor),
+            Vector3::new(about[0], about[1], about[2]),
+        );
+        object.apply_transform(&tf);
+        return Ok(());
+    }
     match object {
         EntityType::Line(e) => {
             e.start = scale_pt(e.start, about, factor);
@@ -2380,6 +2869,30 @@ fn scale_attribute(att: &mut AttributeEntity, about: [f64; 3], factor: f64) {
 /// Mirror geometry across the 2D line through `first` and `second`, preserving
 /// `MIRRTEXT 0` (text reads forwards) and `MIRRHATCH 0` (pattern angle stays).
 fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> Result<(), Error> {
+    if !matches!(
+        object,
+        EntityType::Line(_)
+            | EntityType::Circle(_)
+            | EntityType::Arc(_)
+            | EntityType::Ellipse(_)
+            | EntityType::LwPolyline(_)
+            | EntityType::Polyline2D(_)
+            | EntityType::Polyline3D(_)
+            | EntityType::Spline(_)
+            | EntityType::Solid(_)
+            | EntityType::Text(_)
+            | EntityType::MText(_)
+            | EntityType::Insert(_)
+            | EntityType::Hatch(_)
+    ) {
+        return Err(Error::new(
+            ErrorCode::BadValue,
+            format!(
+                "mirror is not supported on {} in an original DWG",
+                kind_of(object)
+            ),
+        ));
+    }
     let dx = second[0] - first[0];
     let dy = second[1] - first[1];
     let sq = dx * dx + dy * dy;
@@ -2389,6 +2902,18 @@ fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> 
             "first_point and second_point are the same point seen from above, which names no \
              mirror line",
         ));
+    }
+    if has_non_standard_normal(object) {
+        object.mirror_with_options(
+            Vector3::new(first[0], first[1], first[2]),
+            Vector3::new(second[0], second[1], second[2]),
+            MirrorOptions {
+                mirror_text: false,
+                mirror_hatch: false,
+                text_width: None,
+            },
+        );
+        return Ok(());
     }
     let cos2 = (dx * dx - dy * dy) / sq;
     let sin2 = 2.0 * dx * dy / sq;
@@ -2501,8 +3026,11 @@ fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> 
         }
         EntityType::Insert(e) => {
             e.insert_point = mp(e.insert_point);
+            // Reflecting an insert across a line at angle `axis` negates X scale
+            // (reversing local +X to -X) and adds a compensating half turn (+180°)
+            // to the mirrored rotation, matching AutoCAD and `transform.rs`.
             e.set_scale_unchecked(-e.x_scale(), e.y_scale(), e.z_scale());
-            e.rotation = mdeg(e.rotation.to_degrees()).to_radians();
+            e.rotation = normalize_degrees(mdeg(e.rotation.to_degrees()) + 180.0).to_radians();
             for att in &mut e.attributes {
                 att.insertion_point = mp(att.insertion_point);
                 if att.horizontal_alignment != HorizontalAlignment::Left
@@ -2580,10 +3108,131 @@ fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> 
     Ok(())
 }
 
-// ── Pre-/post-revision structural snapshot for diff self-check ────────────
+// ── DWG version header check & structural snapshot for diff self-check ────
 
-fn snapshot_drawing(drawing: &CadDocument, dwg_version: &str) -> DrawingSnapshot {
+/// Returns the exact 6-byte DWG header `DwgWriter` emits for `version`, or
+/// `None` if pinned acadrust cannot write that version without converting it.
+fn writable_header_bytes(version: DxfVersion) -> Option<[u8; 6]> {
+    match version {
+        DxfVersion::AC1009 => Some(*b"AC1009"),
+        DxfVersion::AC1012 => Some(*b"AC1012"),
+        DxfVersion::AC1014 => Some(*b"AC1014"),
+        DxfVersion::AC1015 => Some(*b"AC1015"),
+        DxfVersion::AC1018 => Some(*b"AC1018"),
+        DxfVersion::AC1021 => Some(*b"AC1021"),
+        DxfVersion::AC1024 => Some(*b"AC1024"),
+        DxfVersion::AC1027 => Some(*b"AC1027"),
+        DxfVersion::AC1032 => Some(*b"AC1032"),
+        _ => None,
+    }
+}
+
+fn check_decode_regression(
+    before: &DecodeReport,
+    after: &DecodeReport,
+    out: &mut Vec<UnexpectedChange>,
+) {
+    if before.decoded && !after.decoded {
+        out.push(UnexpectedChange {
+            kind: "DECODE".to_owned(),
+            handle: "0".to_owned(),
+            change: UnexpectedChangeKind::Changed,
+            detail: "revision no longer decoded cleanly after writing".to_owned(),
+        });
+    }
+    if after.skipped > before.skipped {
+        out.push(UnexpectedChange {
+            kind: "DECODE".to_owned(),
+            handle: "0".to_owned(),
+            change: UnexpectedChangeKind::Changed,
+            detail: format!(
+                "skipped records increased from {} to {} after writing",
+                before.skipped, after.skipped
+            ),
+        });
+    }
+    if after.recovered_errors > before.recovered_errors {
+        out.push(UnexpectedChange {
+            kind: "DECODE".to_owned(),
+            handle: "0".to_owned(),
+            change: UnexpectedChangeKind::Changed,
+            detail: format!(
+                "recovered decode errors increased from {} to {} after writing",
+                before.recovered_errors, after.recovered_errors
+            ),
+        });
+    }
+    if after.diagnostics_truncated && !before.diagnostics_truncated {
+        out.push(UnexpectedChange {
+            kind: "DECODE".to_owned(),
+            handle: "0".to_owned(),
+            change: UnexpectedChangeKind::Changed,
+            detail: "revision hit the decode diagnostic limit after writing".to_owned(),
+        });
+    }
+    for entry in &after.not_decoded {
+        let prev = before
+            .not_decoded
+            .iter()
+            .find(|b| b.kind == entry.kind)
+            .map(|b| b.count)
+            .unwrap_or(0);
+        if entry.count > prev {
+            out.push(UnexpectedChange {
+                kind: "DECODE".to_owned(),
+                handle: entry.kind.clone(),
+                change: UnexpectedChangeKind::Changed,
+                detail: format!(
+                    "undecoded `{}` records increased from {prev} to {} after writing",
+                    entry.kind, entry.count
+                ),
+            });
+        }
+    }
+}
+
+fn diff_named_table(
+    kind: &str,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+    out: &mut Vec<UnexpectedChange>,
+) {
+    for (key, orig) in before {
+        match after.get(key) {
+            None => out.push(UnexpectedChange {
+                kind: kind.to_owned(),
+                handle: key.clone(),
+                change: UnexpectedChangeKind::Removed,
+                detail: format!("untouched {kind} `{key}` was removed"),
+            }),
+            Some(now) if now != orig => out.push(UnexpectedChange {
+                kind: kind.to_owned(),
+                handle: key.clone(),
+                change: UnexpectedChangeKind::Changed,
+                detail: format!("untouched {kind} `{key}` changed in the revision"),
+            }),
+            Some(_) => {}
+        }
+    }
+    for key in after.keys() {
+        if !before.contains_key(key) {
+            out.push(UnexpectedChange {
+                kind: kind.to_owned(),
+                handle: key.clone(),
+                change: UnexpectedChangeKind::Added,
+                detail: format!("unexpected {kind} `{key}` appeared in the revision"),
+            });
+        }
+    }
+}
+
+fn snapshot_drawing(
+    drawing: &CadDocument,
+    dwg_version: &str,
+    decode: &DecodeReport,
+) -> DrawingSnapshot {
     let mut objects = BTreeMap::new();
+    let mut sub_handles = HashSet::new();
     let r2004_plus = drawing.version >= DxfVersion::AC1018;
     for entity in drawing.entities() {
         let handle = entity.common().handle.value();
@@ -2603,30 +3252,42 @@ fn snapshot_drawing(drawing: &CadDocument, dwg_version: &str) -> DrawingSnapshot
                 logical: logical_summary(entity),
             },
         );
-        if let EntityType::Insert(ins) = entity {
-            for att in &ins.attributes {
-                if !att.common.handle.is_null() {
-                    objects.insert(
-                        att.common.handle.value(),
-                        ObjectDigest {
-                            kind: "ATTRIB".to_owned(),
-                            owner: handle,
-                            raw_bytes: None,
-                            logical: format!(
-                                "ATTRIB layer={} tag={} value={} pos=({:.6},{:.6},{:.6})",
-                                att.common.layer,
-                                att.tag,
-                                att.value,
-                                att.insertion_point.x,
-                                att.insertion_point.y,
-                                att.insertion_point.z
-                            ),
-                        },
-                    );
+        match entity {
+            EntityType::Insert(ins) => {
+                for att in &ins.attributes {
+                    if !att.common.handle.is_null() {
+                        objects.insert(
+                            att.common.handle.value(),
+                            ObjectDigest {
+                                kind: "ATTRIB".to_owned(),
+                                owner: handle,
+                                raw_bytes: None,
+                                logical: attribute_logical_summary(att),
+                            },
+                        );
+                    }
+                }
+                if let Some(seq) = ins.seqend_handle {
+                    if !seq.is_null() {
+                        sub_handles.insert(seq.value());
+                    }
                 }
             }
+            EntityType::Polyline3D(p3) => {
+                for v in &p3.vertices {
+                    if !v.handle.is_null() {
+                        sub_handles.insert(v.handle.value());
+                    }
+                }
+            }
+            _ => {}
         }
     }
+    let non_graphical = drawing
+        .objects
+        .iter()
+        .map(|(h, obj)| (h.value(), non_graphical_digest(obj)))
+        .collect();
     let layers = drawing
         .layers
         .iter()
@@ -2634,20 +3295,299 @@ fn snapshot_drawing(drawing: &CadDocument, dwg_version: &str) -> DrawingSnapshot
             (
                 l.name.to_lowercase(),
                 LayerDigest {
+                    handle: l.handle.value(),
                     name: l.name.clone(),
                     color: format!("{:?}", l.color),
+                    color_name: l.color_name.clone(),
+                    book_name: l.book_name.clone(),
                     linetype: l.line_type.to_lowercase(),
                     lineweight: format!("{:?}", l.line_weight),
-                    flags: (l.flags.off, l.flags.frozen, l.flags.locked, l.is_plottable),
+                    flags: (
+                        l.flags.off,
+                        l.flags.frozen,
+                        l.flags.locked,
+                        l.flags.frozen_in_new_viewport,
+                        l.flags.xref_dependent,
+                        l.is_plottable,
+                    ),
+                    transparency: format!("{:?}", l.transparency),
                     description: l.description.clone(),
+                },
+            )
+        })
+        .collect();
+    let line_types = drawing
+        .line_types
+        .iter()
+        .map(|lt| (lt.name.to_lowercase(), format!("{lt:?}")))
+        .collect();
+    let text_styles = drawing
+        .text_styles
+        .iter()
+        .map(|ts| (ts.name.to_lowercase(), format!("{ts:?}")))
+        .collect();
+    let dim_styles = drawing
+        .dim_styles
+        .iter()
+        .map(|ds| (ds.name.to_lowercase(), format!("{ds:?}")))
+        .collect();
+    let block_records = drawing
+        .block_records
+        .iter()
+        .map(|br| {
+            (
+                br.name.to_lowercase(),
+                BlockRecordDigest {
+                    handle: br.handle.value(),
+                    name: br.name.clone(),
+                    flags: format!("{:?}", br.flags),
+                    layout_handle: br.layout.value(),
+                    entity_handles: br.entity_handles.iter().map(|h| h.value()).collect(),
                 },
             )
         })
         .collect();
     DrawingSnapshot {
         dwg_version: dwg_version.to_owned(),
+        decode: decode.clone(),
         objects,
+        sub_handles,
+        non_graphical,
         layers,
+        line_types,
+        text_styles,
+        dim_styles,
+        block_records,
+    }
+}
+
+fn non_graphical_digest(obj: &ObjectType) -> NonGraphicalDigest {
+    let (kind, owner, summary) = match obj {
+        ObjectType::Dictionary(d) => ("DICTIONARY".to_owned(), d.owner.value(), format!("{d:?}")),
+        ObjectType::Layout(l) => {
+            let mut clean = l.clone();
+            clean.raw_plot_settings_codes = None;
+            ("LAYOUT".to_owned(), l.owner.value(), format!("{clean:?}"))
+        }
+        ObjectType::XRecord(x) => {
+            let summary = if x.entries_complete {
+                format!(
+                    "XRecord(h={:?},o={:?},r={:?},xd={:?},name={:?},cf={:?},e={:?},refs={:?})",
+                    x.handle,
+                    x.owner,
+                    x.reactors,
+                    x.xdictionary_handle,
+                    x.name,
+                    x.cloning_flags,
+                    x.entries,
+                    x.object_references
+                )
+            } else {
+                format!(
+                    "XRecordRaw(h={:?},o={:?},raw={:?},e={:?})",
+                    x.handle, x.owner, x.raw_dwg_data, x.entries
+                )
+            };
+            ("XRECORD".to_owned(), x.owner.value(), summary)
+        }
+        ObjectType::Group(g) => ("GROUP".to_owned(), g.owner.value(), format!("{g:?}")),
+        ObjectType::MLineStyle(m) => ("MLINESTYLE".to_owned(), m.owner.value(), format!("{m:?}")),
+        ObjectType::ImageDefinition(i) => {
+            ("IMAGEDEF".to_owned(), i.owner.value(), format!("{i:?}"))
+        }
+        ObjectType::UnderlayDefinition(u) => (
+            "UNDERLAYDEF".to_owned(),
+            u.owner_handle.value(),
+            format!("{u:?}"),
+        ),
+        ObjectType::PlotSettings(p) => (
+            "PLOTSETTINGS".to_owned(),
+            p.owner.value(),
+            format!("{p:?}"),
+        ),
+        ObjectType::MultiLeaderStyle(m) => (
+            "MLEADERSTYLE".to_owned(),
+            m.owner_handle.value(),
+            format!("{m:?}"),
+        ),
+        ObjectType::TableStyle(t) => {
+            let mut clean = t.clone();
+            clean.raw_dxf_codes = None;
+            (
+                "TABLESTYLE".to_owned(),
+                t.owner_handle.value(),
+                format!("{clean:?}"),
+            )
+        }
+        ObjectType::TableContent(t) => {
+            let mut clean = t.clone();
+            clean.common.raw_record = None;
+            (
+                "TABLECONTENT".to_owned(),
+                t.common.owner_handle.value(),
+                format!("{clean:?}"),
+            )
+        }
+        ObjectType::TableTemplate(t) => {
+            let mut clean = t.clone();
+            clean.common.raw_record = None;
+            (
+                "TABLETEMPLATE".to_owned(),
+                t.common.owner_handle.value(),
+                format!("{clean:?}"),
+            )
+        }
+        ObjectType::Scale(s) => (
+            "SCALE".to_owned(),
+            s.owner_handle.value(),
+            format!("{s:?}"),
+        ),
+        ObjectType::ObjectContextData(c) => (
+            "OBJECTCONTEXTDATA".to_owned(),
+            c.owner_handle.value(),
+            format!("{c:?}"),
+        ),
+        ObjectType::SortEntitiesTable(s) => {
+            let entries: Vec<(u64, u64)> = s
+                .entries()
+                .map(|e| (e.entity_handle.value(), e.sort_handle.value()))
+                .collect();
+            (
+                "SORTENTSTABLE".to_owned(),
+                s.owner_handle.value(),
+                format!(
+                    "SortEntitiesTable(h={:?},o={:?},bo={:?},e={entries:?})",
+                    s.handle, s.owner_handle, s.block_owner_handle
+                ),
+            )
+        }
+        ObjectType::DictionaryVariable(d) => (
+            "DICTIONARYVAR".to_owned(),
+            d.owner_handle.value(),
+            format!("{d:?}"),
+        ),
+        ObjectType::VisualStyle(v) => {
+            ("VISUALSTYLE".to_owned(), v.owner.value(), format!("{v:?}"))
+        }
+        ObjectType::Material(m) => ("MATERIAL".to_owned(), m.owner.value(), format!("{m:?}")),
+        ObjectType::ImageDefinitionReactor(r) => (
+            "IMAGEDEF_REACTOR".to_owned(),
+            r.owner.value(),
+            format!("{r:?}"),
+        ),
+        ObjectType::GeoData(g) => ("GEODATA".to_owned(), g.owner.value(), format!("{g:?}")),
+        ObjectType::SpatialFilter(s) => (
+            "SPATIAL_FILTER".to_owned(),
+            s.owner.value(),
+            format!("{s:?}"),
+        ),
+        ObjectType::RasterVariables(r) => (
+            "RASTERVARIABLES".to_owned(),
+            r.owner.value(),
+            format!("{r:?}"),
+        ),
+        ObjectType::BookColor(b) => ("DBCOLOR".to_owned(), b.owner.value(), format!("{b:?}")),
+        ObjectType::PlaceHolder(p) => (
+            "ACDBPLACEHOLDER".to_owned(),
+            p.owner.value(),
+            format!("{p:?}"),
+        ),
+        ObjectType::DictionaryWithDefault(d) => (
+            "ACDBDICTIONARYWDFLT".to_owned(),
+            d.owner.value(),
+            format!("{d:?}"),
+        ),
+        ObjectType::WipeoutVariables(w) => (
+            "WIPEOUTVARIABLES".to_owned(),
+            w.owner.value(),
+            format!("{w:?}"),
+        ),
+        ObjectType::BlockVisibilityParameter(p) => (
+            "BLOCKVISIBILITYPARAMETER".to_owned(),
+            p.owner.value(),
+            format!("{p:?}"),
+        ),
+        ObjectType::DynamicBlock(d) => (
+            "DYNAMICBLOCK".to_owned(),
+            d.owner.value(),
+            format!("{d:?}"),
+        ),
+        ObjectType::Associative(a) => (
+            "ASSOCIATIVE".to_owned(),
+            a.owner.value(),
+            format!("{a:?}"),
+        ),
+        ObjectType::ClassObject(c) => (
+            "CLASSOBJECT".to_owned(),
+            c.owner.value(),
+            format!("{c:?}"),
+        ),
+        ObjectType::DataObject(d) => (
+            "DATAOBJECT".to_owned(),
+            d.owner.value(),
+            format!("{d:?}"),
+        ),
+        ObjectType::Field(f) => ("FIELD".to_owned(), f.owner.value(), format!("{f:?}")),
+        ObjectType::FieldList(f) => ("FIELDLIST".to_owned(), f.owner.value(), format!("{f:?}")),
+        ObjectType::RegisteredClass(r) => {
+            let summary = if !r.properties.is_empty() {
+                format!(
+                    "RegisteredClass(h={:?},o={:?},r={:?},xd={:?},dxf={:?},cpp={:?},p={:?},pl={:?},ids={:?})",
+                    r.handle,
+                    r.owner,
+                    r.reactors,
+                    r.xdictionary_handle,
+                    r.dxf_name,
+                    r.cpp_class_name,
+                    r.properties,
+                    r.payload,
+                    r.object_ids
+                )
+            } else {
+                format!(
+                    "RegisteredClassRaw(h={:?},o={:?},dxf={:?},raw={:?})",
+                    r.handle, r.owner, r.dxf_name, r.raw_dwg_data
+                )
+            };
+            ("REGISTEREDCLASS".to_owned(), r.owner.value(), summary)
+        }
+        ObjectType::DgnLineStyle(d) => (
+            "DGNLINESTYLE".to_owned(),
+            d.owner.value(),
+            format!("{d:?}"),
+        ),
+        ObjectType::ProxyObject(p) => (
+            "PROXYOBJECT".to_owned(),
+            p.owner.value(),
+            format!("{p:?}"),
+        ),
+        ObjectType::Arch(a) => {
+            let mut clean = a.clone();
+            clean.raw_dwg_data = None;
+            clean.raw_dwg_handle_bits = 0;
+            clean.raw_dwg_version = None;
+            clean.raw_dxf_codes = None;
+            ("ARCH".to_owned(), a.owner.value(), format!("{clean:?}"))
+        }
+        ObjectType::Unknown {
+            type_name,
+            handle,
+            owner,
+            raw_dwg_data,
+            raw_dxf_codes,
+            ..
+        } => (
+            type_name.clone(),
+            owner.value(),
+            format!(
+                "Unknown(t={type_name:?},h={handle:?},o={owner:?},raw={raw_dwg_data:?},dxf={raw_dxf_codes:?})"
+            ),
+        ),
+    };
+    NonGraphicalDigest {
+        kind,
+        owner,
+        summary,
     }
 }
 
@@ -2670,43 +3610,220 @@ fn is_compound(entity: &EntityType) -> bool {
         || matches!(entity, EntityType::MText(t) if t.background_fill_flags & 0x11 == 0x10)
 }
 
+fn xdata_summary(c: &EntityCommon) -> String {
+    let mut parts: Vec<String> = c
+        .extended_data
+        .records()
+        .iter()
+        .map(|rec| format!("{rec:?}"))
+        .collect();
+    parts.sort();
+    let raw_eed: Vec<String> = c
+        .extended_data
+        .raw_dwg_eed
+        .iter()
+        .map(|(h, bytes)| format!("raw({h:X}):{bytes:?}"))
+        .collect();
+    format!("xd=[{}] reed=[{}]", parts.join(","), raw_eed.join(","))
+}
+
+fn common_summary(kind: &str, c: &EntityCommon) -> String {
+    format!(
+        "{kind} layer={} color={:?} cname={:?} lt={} lts={:.6} lw={:?} inv={} tr={:?} {}",
+        c.layer,
+        c.color,
+        c.color_name,
+        c.linetype,
+        c.linetype_scale,
+        c.line_weight,
+        c.invisible,
+        c.transparency,
+        xdata_summary(c),
+    )
+}
+
+fn attribute_logical_summary(att: &AttributeEntity) -> String {
+    format!(
+        "{} tag={:?} value={:?} pos=({:.6},{:.6},{:.6}) align=({:.6},{:.6},{:.6}) \
+         ha={:?} va={:?} h={:.6} r={:.6} wf={:.6} obl={:.6} style={} flags={:?} \
+         n=({:.6},{:.6},{:.6}) mtext={:?}",
+        common_summary("ATTRIB", &att.common),
+        att.tag,
+        att.value,
+        att.insertion_point.x,
+        att.insertion_point.y,
+        att.insertion_point.z,
+        att.alignment_point.x,
+        att.alignment_point.y,
+        att.alignment_point.z,
+        att.horizontal_alignment,
+        att.vertical_alignment,
+        att.height,
+        att.rotation,
+        att.width_factor,
+        att.oblique_angle,
+        att.text_style,
+        att.flags,
+        att.normal.x,
+        att.normal.y,
+        att.normal.z,
+        att.embedded_mtext.as_ref().map(|m| (
+            &m.value,
+            m.insertion_point,
+            m.height,
+            m.rotation,
+            m.rectangle_width
+        )),
+    )
+}
+
 fn logical_summary(entity: &EntityType) -> String {
     let c = entity.common();
     let kind = kind_of(entity);
-    let base = format!("{kind} layer={} color={:?}", c.layer, c.color);
+    let base = common_summary(&kind, c);
     match entity {
         EntityType::Line(e) => format!(
-            "{base} ({:.6},{:.6},{:.6})->({:.6},{:.6},{:.6})",
-            e.start.x, e.start.y, e.start.z, e.end.x, e.end.y, e.end.z
+            "{base} ({:.6},{:.6},{:.6})->({:.6},{:.6},{:.6}) n=({:.6},{:.6},{:.6})",
+            e.start.x, e.start.y, e.start.z, e.end.x, e.end.y, e.end.z, e.normal.x, e.normal.y, e.normal.z
         ),
         EntityType::Circle(e) => format!(
-            "{base} ({:.6},{:.6},{:.6}) r={:.6}",
-            e.center.x, e.center.y, e.center.z, e.radius
+            "{base} ({:.6},{:.6},{:.6}) r={:.6} n=({:.6},{:.6},{:.6})",
+            e.center.x, e.center.y, e.center.z, e.radius, e.normal.x, e.normal.y, e.normal.z
         ),
         EntityType::Arc(e) => format!(
-            "{base} ({:.6},{:.6},{:.6}) r={:.6} a=({:.6},{:.6})",
-            e.center.x, e.center.y, e.center.z, e.radius, e.start_angle, e.end_angle
+            "{base} ({:.6},{:.6},{:.6}) r={:.6} a=({:.6},{:.6}) n=({:.6},{:.6},{:.6})",
+            e.center.x,
+            e.center.y,
+            e.center.z,
+            e.radius,
+            e.start_angle,
+            e.end_angle,
+            e.normal.x,
+            e.normal.y,
+            e.normal.z
+        ),
+        EntityType::Ellipse(e) => format!(
+            "{base} ({:.6},{:.6},{:.6}) maj=({:.6},{:.6},{:.6}) mr={:.6} p=({:.6},{:.6}) n=({:.6},{:.6},{:.6})",
+            e.center.x,
+            e.center.y,
+            e.center.z,
+            e.major_axis.x,
+            e.major_axis.y,
+            e.major_axis.z,
+            e.minor_axis_ratio,
+            e.start_parameter,
+            e.end_parameter,
+            e.normal.x,
+            e.normal.y,
+            e.normal.z
+        ),
+        EntityType::LwPolyline(e) => {
+            let verts: Vec<String> = e
+                .vertices
+                .iter()
+                .map(|v| {
+                    format!(
+                        "({:.6},{:.6},b={:.6},sw={:.6},ew={:.6})",
+                        v.location.x, v.location.y, v.bulge, v.start_width, v.end_width
+                    )
+                })
+                .collect();
+            format!(
+                "{base} closed={} cw={:.6} elev={:.6} n=({:.6},{:.6},{:.6}) v=[{}]",
+                e.is_closed,
+                e.constant_width,
+                e.elevation,
+                e.normal.x,
+                e.normal.y,
+                e.normal.z,
+                verts.join(",")
+            )
+        }
+        EntityType::Polyline2D(e) => {
+            let verts: Vec<String> = e
+                .vertices
+                .iter()
+                .map(|v| {
+                    format!(
+                        "({:.6},{:.6},{:.6},b={:.6},sw={:.6},ew={:.6})",
+                        v.location.x, v.location.y, v.location.z, v.bulge, v.start_width, v.end_width
+                    )
+                })
+                .collect();
+            format!(
+                "{base} flags={:?} sw={:.6} ew={:.6} elev={:.6} n=({:.6},{:.6},{:.6}) v=[{}]",
+                e.flags,
+                e.start_width,
+                e.end_width,
+                e.elevation,
+                e.normal.x,
+                e.normal.y,
+                e.normal.z,
+                verts.join(",")
+            )
+        }
+        EntityType::Polyline3D(e) => {
+            let verts: Vec<String> = e
+                .vertices
+                .iter()
+                .map(|v| format!("({:.6},{:.6},{:.6})", v.position.x, v.position.y, v.position.z))
+                .collect();
+            format!("{base} flags={:?} v=[{}]", e.flags, verts.join(","))
+        }
+        EntityType::Spline(e) => format!(
+            "{base} deg={} flags={:?} knots={:?} cp={:?} w={:?} fp={:?} bt={:?} et={:?}",
+            e.degree,
+            e.flags,
+            e.knots,
+            e.control_points,
+            e.weights,
+            e.fit_points,
+            e.begin_tangent,
+            e.end_tangent
+        ),
+        EntityType::Solid(e) => format!(
+            "{base} c1={:?} c2={:?} c3={:?} c4={:?} n={:?}",
+            e.first_corner, e.second_corner, e.third_corner, e.fourth_corner, e.normal
         ),
         EntityType::Text(e) => format!(
-            "{base} {:?} ({:.6},{:.6},{:.6}) h={:.6} r={:.6}",
+            "{base} {:?} pos=({:.6},{:.6},{:.6}) align={:?} ha={:?} va={:?} h={:.6} r={:.6} \
+             wf={:.6} obl={:.6} style={} gen={} n=({:.6},{:.6},{:.6})",
             e.value,
             e.insertion_point.x,
             e.insertion_point.y,
             e.insertion_point.z,
+            e.alignment_point,
+            e.horizontal_alignment,
+            e.vertical_alignment,
             e.height,
-            e.rotation
+            e.rotation,
+            e.width_factor,
+            e.oblique_angle,
+            e.style,
+            e.generation_flags,
+            e.normal.x,
+            e.normal.y,
+            e.normal.z
         ),
         EntityType::MText(e) => format!(
-            "{base} {:?} ({:.6},{:.6},{:.6}) h={:.6} r={:.6}",
+            "{base} {:?} pos=({:.6},{:.6},{:.6}) h={:.6} rw={:.6} r={:.6} att={:?} style={} \
+             n=({:.6},{:.6},{:.6})",
             e.value,
             e.insertion_point.x,
             e.insertion_point.y,
             e.insertion_point.z,
             e.height,
-            e.rotation
+            e.rectangle_width,
+            e.rotation,
+            e.attachment_point,
+            e.style,
+            e.normal.x,
+            e.normal.y,
+            e.normal.z
         ),
         EntityType::Insert(e) => format!(
-            "{base} block={} ({:.6},{:.6},{:.6}) s=({:.6},{:.6},{:.6}) r={:.6} atts={}",
+            "{base} block={} pos=({:.6},{:.6},{:.6}) s=({:.6},{:.6},{:.6}) r={:.6} \
+             n=({:.6},{:.6},{:.6}) grid=({},{},{:.6},{:.6}) atts={}",
             e.block_name,
             e.insert_point.x,
             e.insert_point.y,
@@ -2715,16 +3832,29 @@ fn logical_summary(entity: &EntityType) -> String {
             e.y_scale(),
             e.z_scale(),
             e.rotation,
+            e.normal.x,
+            e.normal.y,
+            e.normal.z,
+            e.column_count,
+            e.row_count,
+            e.column_spacing,
+            e.row_spacing,
             e.attributes.len()
         ),
-        EntityType::LwPolyline(e) => {
-            format!("{base} closed={} verts={}", e.is_closed, e.vertices.len())
-        }
-        EntityType::Polyline2D(e) => format!("{base} verts={}", e.vertices.len()),
-        EntityType::Polyline3D(e) => format!(
-            "{base} closed={} verts={}",
-            e.flags.closed,
-            e.vertices.len()
+        EntityType::Hatch(e) => format!(
+            "{base} solid={} pat={} ang={:.6} scale={:.6} elev={:.6} n={:?} paths={:?} seeds={:?}",
+            e.is_solid,
+            e.pattern.name,
+            e.pattern_angle,
+            e.pattern_scale,
+            e.elevation,
+            e.normal,
+            e.paths,
+            e.seed_points
+        ),
+        EntityType::Unknown(u) => format!(
+            "{base} code={} raw={:?}",
+            u.dwg_type_code, u.raw_dwg_data
         ),
         _ => base,
     }
@@ -2767,6 +3897,293 @@ pub(crate) fn raw_record_bytes_of(dwg: &Path, hex: &str) -> Option<Vec<u8>> {
         return u.raw_dwg_data.clone();
     }
     entity.common().raw_record.as_ref().map(|r| r.data.clone())
+}
+
+/// Only for tests: adds a locked true-color layer with custom linetype &
+/// lineweight to an original DWG so `change_layer` can prove it mutates only
+/// requested fields in place.
+#[cfg(test)]
+pub(crate) fn with_true_color_locked_layer(
+    dwg: &Path,
+    out: &Path,
+    layer_name: &str,
+    r: u8,
+    g: u8,
+    b: u8,
+) {
+    use acadrust::tables::{LineType, LineTypeElement};
+
+    let mut drawing = super::read_drawing(dwg).expect("the DWG reads");
+    super::strip_build_metadata(&mut drawing);
+    if !drawing
+        .line_types
+        .iter()
+        .any(|lt| lt.name.eq_ignore_ascii_case("DASHED"))
+    {
+        let mut lt = LineType::new("DASHED");
+        lt.elements.push(LineTypeElement::dash(5.0));
+        lt.elements.push(LineTypeElement::space(2.5));
+        lt.pattern_length = 7.5;
+        lt.set_handle(drawing.allocate_handle());
+        drawing.line_types.add(lt).expect("add DASHED");
+    }
+    let mut layer = DwgLayer::new(layer_name.to_owned());
+    layer.color = Color::Rgb { r, g, b };
+    layer.line_type = "DASHED".to_owned();
+    layer.line_weight = LineWeight::Value(35);
+    layer.flags.locked = true;
+    layer.set_handle(drawing.allocate_handle());
+    drawing.layers.add(layer).expect("add true-color layer");
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("write DWG");
+    std::fs::write(out, bytes).expect("save DWG");
+}
+
+/// Only for tests: inspects a layer's raw color, linetype, lineweight, and
+/// locked flag straight from a DWG.
+#[cfg(test)]
+pub(crate) fn layer_details_of(
+    dwg: &Path,
+    layer_name: &str,
+) -> Option<(String, String, String, bool)> {
+    let drawing = super::read_drawing(dwg).expect("the DWG reads");
+    let l = drawing
+        .layers
+        .iter()
+        .find(|l| l.name.eq_ignore_ascii_case(layer_name))?;
+    Some((
+        format!("{:?}", l.color),
+        l.line_type.clone(),
+        format!("{:?}", l.line_weight),
+        l.flags.locked,
+    ))
+}
+
+/// Only for tests: rewrites the first 6 bytes of a DWG copy to `header` (e.g.
+/// `b"AD1032"` or `b"AC1006"`) to verify exact 6-byte version header checks.
+#[cfg(test)]
+pub(crate) fn with_custom_header(dwg: &Path, out: &Path, header: &[u8; 6]) {
+    let mut bytes = std::fs::read(dwg).expect("read DWG");
+    assert!(bytes.len() >= 6);
+    bytes[..6].copy_from_slice(header);
+    std::fs::write(out, bytes).expect("save DWG");
+}
+
+/// Only for tests: adds a 3-vertex `Polyline3D` with custom XDATA to an
+/// original DWG and returns its hex handle.
+#[cfg(test)]
+pub(crate) fn with_polyline3d_original(dwg: &Path, out: &Path) -> String {
+    use acadrust::entities::Polyline3D;
+    use acadrust::tables::AppId;
+    use acadrust::xdata::{ExtendedDataRecord, XDataValue};
+
+    let mut drawing = super::read_drawing(dwg).expect("the DWG reads");
+    super::strip_build_metadata(&mut drawing);
+    if !drawing
+        .app_ids
+        .iter()
+        .any(|a| a.name.eq_ignore_ascii_case("TESTAPP"))
+    {
+        let mut app = AppId::new("TESTAPP");
+        app.set_handle(drawing.allocate_handle());
+        drawing.app_ids.add(app).expect("add TESTAPP");
+    }
+    let mut p3 = Polyline3D::from_points(vec![
+        Vector3::new(0.0, 0.0, 0.0),
+        Vector3::new(10.0, 0.0, 5.0),
+        Vector3::new(10.0, 10.0, 10.0),
+    ]);
+    p3.common.layer = LAYER_ZERO.to_owned();
+    let mut rec = ExtendedDataRecord::new("TESTAPP");
+    rec.add_value(XDataValue::String("KEEP-ME".to_owned()));
+    p3.common.extended_data.upsert_record(rec);
+    let handle = drawing
+        .add_entity(EntityType::Polyline3D(p3))
+        .expect("add Polyline3D");
+    let mut v_handles = Vec::new();
+    for _ in 0..3 {
+        v_handles.push(drawing.allocate_handle());
+    }
+    if let Some(EntityType::Polyline3D(added)) = drawing.get_entity_mut(handle) {
+        for (v, vh) in added.vertices.iter_mut().zip(v_handles) {
+            v.handle = vh;
+        }
+    }
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("write DWG");
+    std::fs::write(out, bytes).expect("save DWG");
+    handle_text(handle)
+}
+
+/// Only for tests: returns the vertex hex handles, positions, and whether
+/// `"TESTAPP"` xdata is still present on a `Polyline3D`.
+#[cfg(test)]
+pub(crate) fn polyline3d_details_of(
+    dwg: &Path,
+    hex: &str,
+) -> Option<(Vec<String>, Vec<[f64; 3]>, bool)> {
+    let drawing = super::read_drawing(dwg).expect("the DWG reads");
+    let handle = parse_hex_handle(hex).ok()?;
+    let EntityType::Polyline3D(p3) = drawing.get_entity(handle)? else {
+        return None;
+    };
+    let handles = p3.vertices.iter().map(|v| handle_text(v.handle)).collect();
+    let pts = p3
+        .vertices
+        .iter()
+        .map(|v| [v.position.x, v.position.y, v.position.z])
+        .collect();
+    let has_xdata = p3
+        .common
+        .extended_data
+        .records()
+        .iter()
+        .any(|r| r.application_name.eq_ignore_ascii_case("TESTAPP"));
+    Some((handles, pts, has_xdata))
+}
+
+/// Only for tests: creates an original DWG holding an insert on layer `0` with
+/// three attributes: a constant `TAG` (`"CONST"`), an editable `TAG` on locked
+/// layer `ATTR_LOCK` (`"LOCKED"`), and an editable `TAG` on layer `0` (`"FREE"`).
+/// Returns the insert's hex handle.
+#[cfg(test)]
+pub(crate) fn with_constant_and_locked_attrs(dwg: &Path, out: &Path) -> String {
+    use acadrust::tables::BlockRecord;
+
+    let mut drawing = super::read_drawing(dwg).expect("the DWG reads");
+    super::strip_build_metadata(&mut drawing);
+    if !drawing
+        .block_records
+        .iter()
+        .any(|b| b.name.eq_ignore_ascii_case("TESTBLK"))
+    {
+        let mut br = BlockRecord::new("TESTBLK");
+        br.set_handle(drawing.allocate_handle());
+        drawing.block_records.add(br).expect("add TESTBLK");
+    }
+    let mut locked = DwgLayer::new("ATTR_LOCK".to_owned());
+    locked.flags.locked = true;
+    locked.set_handle(drawing.allocate_handle());
+    drawing.layers.add(locked).expect("add ATTR_LOCK");
+
+    let mut ins = DwgInsert::new("TESTBLK", Vector3::new(50.0, 50.0, 0.0));
+    ins.common.layer = LAYER_ZERO.to_owned();
+
+    let mut a_const = AttributeEntity::new("TAG".to_owned(), "CONST".to_owned());
+    a_const.insertion_point = Vector3::new(50.0, 55.0, 0.0);
+    a_const.flags.constant = true;
+    a_const.common.layer = LAYER_ZERO.to_owned();
+
+    let mut a_locked = AttributeEntity::new("TAG".to_owned(), "LOCKED".to_owned());
+    a_locked.insertion_point = Vector3::new(50.0, 50.0, 0.0);
+    a_locked.common.layer = "ATTR_LOCK".to_owned();
+
+    let mut a_free = AttributeEntity::new("TAG".to_owned(), "FREE".to_owned());
+    a_free.insertion_point = Vector3::new(50.0, 45.0, 0.0);
+    a_free.common.layer = LAYER_ZERO.to_owned();
+
+    ins.attributes = vec![a_const, a_locked, a_free];
+    let handle = drawing
+        .add_entity(EntityType::Insert(ins))
+        .expect("add insert");
+    let att_handles = [
+        drawing.allocate_handle(),
+        drawing.allocate_handle(),
+        drawing.allocate_handle(),
+    ];
+    let seq = drawing.allocate_handle();
+    if let Some(EntityType::Insert(added)) = drawing.get_entity_mut(handle) {
+        for (a, ah) in added.attributes.iter_mut().zip(att_handles) {
+            a.common.handle = ah;
+            a.common.owner_handle = handle;
+        }
+        added.seqend_handle = Some(seq);
+    }
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("write DWG");
+    std::fs::write(out, bytes).expect("save DWG");
+    handle_text(handle)
+}
+
+/// Only for tests: adds an `Arc` with `-Z` normal `(0, 0, -1)` at OCS center
+/// `(10, 20, 0)` (= WCS `(-10, 20, 0)`) to an original DWG and returns its hex
+/// handle.
+#[cfg(test)]
+pub(crate) fn with_neg_z_arc_original(dwg: &Path, out: &Path) -> String {
+    use acadrust::entities::Arc as DwgArc;
+
+    let mut drawing = super::read_drawing(dwg).expect("the DWG reads");
+    super::strip_build_metadata(&mut drawing);
+    let mut arc = DwgArc::from_center_radius_angles(
+        Vector3::new(10.0, 20.0, 0.0),
+        5.0,
+        0.0,
+        std::f64::consts::FRAC_PI_2,
+    );
+    arc.normal = Vector3::new(0.0, 0.0, -1.0);
+    arc.common.layer = LAYER_ZERO.to_owned();
+    let handle = drawing.add_entity(EntityType::Arc(arc)).expect("add arc");
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("write DWG");
+    std::fs::write(out, bytes).expect("save DWG");
+    handle_text(handle)
+}
+
+/// Only for tests: returns the WCS center (via OCS->WCS arbitrary-axis matrix)
+/// and normal of an `Arc` at `hex`.
+#[cfg(test)]
+pub(crate) fn arc_world_center_and_normal(dwg: &Path, hex: &str) -> Option<([f64; 3], [f64; 3])> {
+    let drawing = super::read_drawing(dwg).expect("the DWG reads");
+    let handle = parse_hex_handle(hex).ok()?;
+    let EntityType::Arc(arc) = drawing.get_entity(handle)? else {
+        return None;
+    };
+    let n = arc.normal.normalize();
+    let ax = if n.x.abs() < 1.0 / 64.0 && n.y.abs() < 1.0 / 64.0 {
+        Vector3::UNIT_Y.cross(&n).normalize()
+    } else {
+        Vector3::UNIT_Z.cross(&n).normalize()
+    };
+    let ay = n.cross(&ax).normalize();
+    let wcs = ax * arc.center.x + ay * arc.center.y + n * arc.center.z;
+    Some((
+        [wcs.x, wcs.y, wcs.z],
+        [arc.normal.x, arc.normal.y, arc.normal.z],
+    ))
+}
+
+/// Only for tests: returns the hex handle of an entity owned by a non-space
+/// block definition in `dwg`.
+#[cfg(test)]
+pub(crate) fn block_definition_entity_handle(dwg: &Path) -> Option<String> {
+    let drawing = super::read_drawing(dwg).expect("the DWG reads");
+    let block_owners: HashSet<Handle> = drawing
+        .block_records
+        .iter()
+        .filter(|br| {
+            !br.name.eq_ignore_ascii_case("*Model_Space")
+                && !br.name.to_ascii_lowercase().starts_with("*paper_space")
+        })
+        .map(|br| br.handle)
+        .collect();
+    let found = drawing
+        .entities()
+        .find(|e| block_owners.contains(&e.common().owner_handle))
+        .map(|e| handle_text(e.common().handle));
+    found
+}
+
+/// Only for tests: reads AgentDrafter's carried ID and name directly from the
+/// entity at `hex` in `dwg`.
+#[cfg(test)]
+pub(crate) fn carried_id_and_name_of(dwg: &Path, hex: &str) -> (Option<String>, Option<String>) {
+    let drawing = super::read_drawing(dwg).expect("the DWG reads");
+    let Ok(handle) = parse_hex_handle(hex) else {
+        return (None, None);
+    };
+    let Some(entity) = drawing.get_entity(handle) else {
+        return (None, None);
+    };
+    (
+        ids::read_id(entity.common()),
+        ids::read_name(entity.common()),
+    )
 }
 
 // Keep unused imports clean; `attribute_text` / `read_properties` / `set_properties`

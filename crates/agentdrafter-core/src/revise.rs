@@ -15,11 +15,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+#[cfg(any(unix, windows))]
+use crate::build::file_id_of_file;
 #[cfg(not(any(unix, windows)))]
 use crate::build::is_same_file;
 use crate::build::FileId;
-#[cfg(any(unix, windows))]
-use crate::build::{file_id_of_file, file_id_of_path};
 use crate::change::array::{self, At, Place};
 use crate::change::operations::{
     op_error, read_change_set_for_original, AddTo, Body, Motion, OpPoint, Operation, Pattern,
@@ -32,7 +32,9 @@ use crate::dwg::{MutationHandles, RevisionSession, TargetSpace, UnexpectedChange
 use crate::error::{Error, ErrorCode};
 use crate::geometry::curve::Curve;
 use crate::geometry::Reader;
-use crate::model::DecodeReport;
+use crate::model::{DecodeReport, Object};
+#[cfg(any(unix, windows))]
+use crate::original::regular_file_id_no_follow;
 use crate::original::{
     create_temp_beside_kind, dwg_loaded_from_drawing, handle_id, is_dwg, is_dwg_file, on_disk_path,
     place_new_file, plural, stem_of, DwgLoaded, HANDLE_ID,
@@ -397,6 +399,35 @@ fn revise_inner(
     // Serialize revision bytes in the original's DWG version, re-read strictly,
     // and run the structural diff self-check.
     let (revision_bytes, unexpected_changes) = session.serialize_and_verify(&paths.dwg)?;
+
+    // Untouched-means-unchanged gate (ADR-0004): refuse to publish when the
+    // structural diff detects collateral changes outside the requested
+    // operations unless `allow_loss: true`.
+    if !unexpected_changes.is_empty() && !request.allow_loss {
+        let detail = unexpected_changes_refusal_message(source, &unexpected_changes);
+        let report = RevisionReport {
+            source: source.display().to_string(),
+            sheet: sheet_name,
+            dry_run: request.dry_run,
+            message: detail.clone(),
+            original: original_meta,
+            revision: None,
+            revision_dwg: None,
+            change_list: None,
+            pdf: None,
+            pdf_error: None,
+            plot: None,
+            units,
+            decode,
+            allowed_loss: false,
+            operations: outcomes,
+            unexpected_changes,
+            checks: None,
+        };
+        let error = Error::new(ErrorCode::DwgWrite, detail).in_file(source);
+        return Ok(Reply::partly(report, error));
+    }
+
     let revision_sha256 = fingerprint(&revision_bytes);
     let revision_file_name = paths
         .dwg
@@ -599,12 +630,13 @@ fn refuse_existing_or_original(
     candidate: &Path,
     what: &str,
 ) -> Result<(), Error> {
-    // Check if candidate names the original before checking existence.
+    // Check if candidate names the original without reopening `source` or
+    // following symlinks (ADR-0004).
     let same_as_source = {
         #[cfg(any(unix, windows))]
         {
             let _ = source;
-            source_id.is_some() && file_id_of_path(candidate) == source_id
+            source_id.is_some() && regular_file_id_no_follow(candidate) == source_id
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -650,9 +682,15 @@ fn refuse_existing_or_original(
     }
 }
 
+struct StagedTemp {
+    path: PathBuf,
+    id: Option<FileId>,
+}
+
 /// Writes temp files beside each destination and atomically places them using
-/// non-clobbering renames. Cleans up all placed files on failure so no partial
-/// revision is ever left behind.
+/// non-clobbering renames. On failure, rolls back only files whose current
+/// non-followed file identity still matches the file we placed, and reports
+/// any rollback issues in the returned error.
 fn place_revision_files(
     dwg_path: &Path,
     dwg_bytes: &[u8],
@@ -670,52 +708,67 @@ fn place_revision_files(
     ) {
         Ok(t) => t,
         Err(e) => {
-            let _ = fs::remove_file(&dwg_tmp);
-            return Err(e);
+            return Err(with_rollback_notes(
+                e,
+                rollback_files(&[], &[&dwg_tmp.path]),
+            ))
         }
     };
     let pdf_tmp = match (pdf_path, pdf_bytes) {
         (Some(path), Some(bytes)) => match write_temp(path, bytes, "pdf", "revision PDF") {
             Ok(t) => Some((path, t)),
             Err(e) => {
-                let _ = fs::remove_file(&dwg_tmp);
-                let _ = fs::remove_file(&changes_tmp);
-                return Err(e);
+                return Err(with_rollback_notes(
+                    e,
+                    rollback_files(&[], &[&dwg_tmp.path, &changes_tmp.path]),
+                ));
             }
         },
         _ => None,
     };
 
-    if let Err(e) = place_new_file(&dwg_tmp, dwg_path, "revision DWG", ErrorCode::OutputExists) {
-        let _ = fs::remove_file(&changes_tmp);
+    if let Err(e) = place_new_file(
+        &dwg_tmp.path,
+        dwg_path,
+        "revision DWG",
+        ErrorCode::OutputExists,
+    ) {
+        let mut unplaced = vec![changes_tmp.path.as_path()];
         if let Some((_, t)) = &pdf_tmp {
-            let _ = fs::remove_file(t);
+            unplaced.push(t.path.as_path());
         }
-        return Err(e);
+        return Err(with_rollback_notes(e, rollback_files(&[], &unplaced)));
     }
     if let Err(e) = place_new_file(
-        &changes_tmp,
+        &changes_tmp.path,
         changes_path,
         "revision change list",
         ErrorCode::OutputExists,
     ) {
-        let _ = fs::remove_file(dwg_path);
+        let mut unplaced = Vec::new();
         if let Some((_, t)) = &pdf_tmp {
-            let _ = fs::remove_file(t);
+            unplaced.push(t.path.as_path());
         }
-        return Err(e);
+        return Err(with_rollback_notes(
+            e,
+            rollback_files(&[(dwg_path, dwg_tmp.id)], &unplaced),
+        ));
     }
     if let Some((path, tmp)) = pdf_tmp {
-        if let Err(e) = place_new_file(&tmp, path, "revision PDF", ErrorCode::OutputExists) {
-            let _ = fs::remove_file(dwg_path);
-            let _ = fs::remove_file(changes_path);
-            return Err(e);
+        if let Err(e) = place_new_file(&tmp.path, path, "revision PDF", ErrorCode::OutputExists) {
+            return Err(with_rollback_notes(
+                e,
+                rollback_files(
+                    &[(dwg_path, dwg_tmp.id), (changes_path, changes_tmp.id)],
+                    &[],
+                ),
+            ));
         }
     }
     Ok(())
 }
 
-fn write_temp(path: &Path, bytes: &[u8], kind: &str, what: &str) -> Result<PathBuf, Error> {
+fn write_temp(path: &Path, bytes: &[u8], kind: &str, what: &str) -> Result<StagedTemp, Error> {
     let write_err = |e: io::Error| {
         Error::new(
             ErrorCode::WriteFailed,
@@ -724,13 +777,72 @@ fn write_temp(path: &Path, bytes: &[u8], kind: &str, what: &str) -> Result<PathB
         .in_file(path)
     };
     let (tmp, mut file) = create_temp_beside_kind(path, kind).map_err(write_err)?;
+    #[cfg(any(unix, windows))]
+    let id = file_id_of_file(&file);
+    #[cfg(not(any(unix, windows)))]
+    let id: Option<FileId> = None;
     let wrote = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
     if let Err(e) = wrote {
-        let _ = fs::remove_file(&tmp);
-        return Err(write_err(e));
+        let mut err = write_err(e);
+        if let Err(rm) = fs::remove_file(&tmp) {
+            if rm.kind() != io::ErrorKind::NotFound {
+                err.message.push_str(&format!(
+                    "; could not remove temporary file `{}`: {rm}",
+                    tmp.display()
+                ));
+            }
+        }
+        return Err(err);
     }
-    Ok(tmp)
+    Ok(StagedTemp { path: tmp, id })
+}
+
+fn rollback_files(placed: &[(&Path, Option<FileId>)], unplaced: &[&Path]) -> Vec<String> {
+    let mut notes = Vec::new();
+    for &tmp in unplaced {
+        if let Err(e) = fs::remove_file(tmp) {
+            if e.kind() != io::ErrorKind::NotFound {
+                notes.push(format!(
+                    "could not remove temporary file `{}`: {e}",
+                    tmp.display()
+                ));
+            }
+        }
+    }
+    for &(dest, expected_id) in placed {
+        #[cfg(any(unix, windows))]
+        let same = expected_id.is_some() && regular_file_id_no_follow(dest) == expected_id;
+        #[cfg(not(any(unix, windows)))]
+        let same = {
+            let _ = expected_id;
+            fs::symlink_metadata(dest).is_ok_and(|m| m.is_file())
+        };
+        if !same {
+            notes.push(format!(
+                "left `{}` in place during rollback because its file identity changed",
+                dest.display()
+            ));
+            continue;
+        }
+        if let Err(e) = fs::remove_file(dest) {
+            if e.kind() != io::ErrorKind::NotFound {
+                notes.push(format!(
+                    "could not remove `{}` during rollback: {e}",
+                    dest.display()
+                ));
+            }
+        }
+    }
+    notes
+}
+
+fn with_rollback_notes(mut err: Error, notes: Vec<String>) -> Error {
+    if !notes.is_empty() {
+        err.message
+            .push_str(&format!("; rollback notes: {}", notes.join("; ")));
+    }
+    err
 }
 
 // ── Operation dispatch & target/snap resolution ───────────────────────────
@@ -789,6 +901,7 @@ fn resolve_target(
             if sheet.eq_ignore_ascii_case(sheet_name) {
                 if let Some(hex) = id.strip_prefix(HANDLE_ID).or_else(|| {
                     (id.len() > HANDLE_ID.len()
+                        && id.is_char_boundary(HANDLE_ID.len())
                         && id[..HANDLE_ID.len()].eq_ignore_ascii_case(HANDLE_ID))
                     .then(|| &id[HANDLE_ID.len()..])
                 }) {
@@ -881,6 +994,35 @@ fn resolve_target(
             }
         }
     }
+}
+
+fn resolve_unique_targets(
+    session: &RevisionSession,
+    record: &DwgLoaded,
+    targets: &[(Target, String)],
+    sheet_name: &str,
+    op: &Operation,
+) -> Result<Vec<ResolvedTarget>, Error> {
+    let mut resolved = Vec::with_capacity(targets.len());
+    let mut seen_handles = HashSet::with_capacity(targets.len());
+    for (target, field) in targets {
+        let found = resolve_target(session, record, target, sheet_name, op, field)?;
+        if !seen_handles.insert(found.handle.clone()) {
+            return Err(op_error(
+                op.index,
+                op.spec.name,
+                ErrorCode::BadValue,
+                format!(
+                    "object `{}` (handle `{}`) is listed more than once in the target list",
+                    found.id, found.handle
+                ),
+                field,
+            ));
+        }
+        check_unlocked(session, &found.handle, &found.id, op, field)?;
+        resolved.push(found);
+    }
+    Ok(resolved)
 }
 
 fn check_unlocked(
@@ -1275,12 +1417,7 @@ fn apply_revision_op(
         }
         Body::Transform { targets, by } => {
             let record = ensure_record(session, cached, source, sheet_name)?;
-            let mut resolved = Vec::with_capacity(targets.len());
-            for (target, field) in targets {
-                let found = resolve_target(session, record, target, sheet_name, op, field)?;
-                check_unlocked(session, &found.handle, &found.id, op, field)?;
-                resolved.push(found);
-            }
+            let resolved = resolve_unique_targets(session, record, targets, sheet_name, op)?;
             let mut snapped = Vec::new();
             let mut all_handles = MutationHandles::default();
             let summary = match by {
@@ -1345,12 +1482,7 @@ fn apply_revision_op(
         }
         Body::Copy { targets, pattern } => {
             let record = ensure_record(session, cached, source, sheet_name)?;
-            let mut resolved = Vec::with_capacity(targets.len());
-            for (target, field) in targets {
-                resolved.push(resolve_target(
-                    session, record, target, sheet_name, op, field,
-                )?);
-            }
+            let resolved = resolve_unique_targets(session, record, targets, sheet_name, op)?;
             let mut snapped = Vec::new();
             let mut copies = Vec::new();
             let mut all_handles = MutationHandles::default();
@@ -1449,13 +1581,35 @@ fn apply_revision_op(
                                     "path",
                                 )
                             })?;
+                            let path_obj = &record.record.sheet.objects[path_idx];
+                            if !matches!(
+                                path_obj,
+                                Object::Line(_)
+                                    | Object::Polyline(_)
+                                    | Object::Arc(_)
+                                    | Object::Circle(_)
+                                    | Object::Ellipse(_)
+                                    | Object::Spline(_)
+                            ) {
+                                return Err(op_error(
+                                    index,
+                                    op_name,
+                                    ErrorCode::BadValue,
+                                    format!(
+                                        "path `{}` is not a curve (only line, polyline, arc, \
+                                         circle, ellipse, and spline can be array paths)",
+                                        path_found.id
+                                    ),
+                                    "path",
+                                ));
+                            }
                             let fonts = SheetFonts::find(&record.record.sheet, settings);
                             let reader = Reader {
                                 sheet: &record.record.sheet,
                                 fonts: &fonts,
                             };
                             let curves: Vec<Curve> = reader
-                                .parts(&record.record.sheet.objects[path_idx])
+                                .parts(path_obj)
                                 .into_iter()
                                 .map(|p| p.curve)
                                 .collect();
@@ -1577,7 +1731,7 @@ fn apply_revision_op(
                     )
                 })?;
             let handles = session
-                .change_layer(&updated)
+                .change_layer_fields(&updated, keys)
                 .map_err(|e| op_error(index, op_name, e.code, e.message, "name"))?;
             Ok(RevisionOperationOutcome {
                 index,
@@ -1651,6 +1805,9 @@ fn decode_refusal_message(source: &Path, decode: &DecodeReport) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| source.display().to_string());
     let mut parts = Vec::new();
+    if let Some(reason) = &decode.read_past_damage {
+        parts.push(format!("read past damage ({reason})"));
+    }
     if !decode.not_decoded.is_empty() {
         let details: Vec<String> = decode
             .not_decoded
@@ -1697,6 +1854,28 @@ fn decode_refusal_message(source: &Path, decode: &DecodeReport) -> String {
          `--allow-loss` (or `allow_loss: true`) to allow revising this drawing and record the \
          accepted loss in the revision report (ADR-0004)",
         parts.join(", ")
+    )
+}
+
+fn unexpected_changes_refusal_message(source: &Path, unexpected: &[UnexpectedChange]) -> String {
+    let name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| source.display().to_string());
+    let preview: Vec<String> = unexpected
+        .iter()
+        .take(5)
+        .map(|u| format!("{} {} ({})", u.kind, u.handle, u.detail))
+        .collect();
+    let extra = if unexpected.len() > 5 { ", ..." } else { "" };
+    format!(
+        "refused to revise {name} because writing the revision introduced {} unexpected \
+         change{} outside the requested operations ({}{extra}); nothing was written. Pass \
+         `--allow-loss` (or `allow_loss: true`) to allow saving this revision and record these \
+         changes in the report (ADR-0004)",
+        unexpected.len(),
+        plural(unexpected.len()),
+        preview.join("; ")
     )
 }
 

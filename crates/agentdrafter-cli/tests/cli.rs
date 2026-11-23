@@ -776,3 +776,44 @@ fn read_mirror_flag_rejects_another_option_as_its_path() {
     assert!(!dir.join("--no-mirror").exists());
     assert!(!dir.join("--other").exists());
 }
+
+#[test]
+fn change_value_flags_reject_option_like_values() {
+    let dir = scratch("change-flags");
+    copy_example(&dir);
+    let (code, json) = agentdrafter(&["build", "one-line.yaml"], &dir);
+    assert_eq!(code, 0, "{json}");
+    fs::write(
+        dir.join("cs.json"),
+        r#"{"operations": [{"op": "add_line", "from": [0, 0, 0], "to": [10, 0, 0]}]}"#,
+    )
+    .unwrap();
+
+    for args in [
+        &[
+            "change",
+            "one-line.dwg",
+            "cs.json",
+            "--plot-styles",
+            "--dry-run",
+        ][..],
+        &["change", "one-line.dwg", "cs.json", "--output", "--dry-run"],
+        &[
+            "change",
+            "one-line.dwg",
+            "cs.json",
+            "--plot-style",
+            "--no-pdf",
+        ],
+        &["change", "one-line.dwg", "cs.json", "--fonts", "--dry-run"],
+        &["change", "one-line.dwg", "cs.json", "--output"],
+        &["change", "one-line.dwg", "cs.json", "--plot-styles"],
+    ] {
+        let (code, json) = agentdrafter(args, &dir);
+        assert_eq!(code, 2, "{args:?}: {json}");
+        assert_eq!(json["ok"], false, "{args:?}: {json}");
+        assert_eq!(json["error"]["code"], "usage", "{args:?}: {json}");
+    }
+    assert!(!dir.join("--dry-run").exists());
+    assert!(!dir.join("one-line.rev1.dwg").exists());
+}

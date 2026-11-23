@@ -697,3 +697,800 @@ fn command_dispatch_distinguishes_dwg_folder_from_dwg_file_and_refuses_original_
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn rollback_checks_file_identity_before_unlinking_and_reports_notes() {
+    let dir = scratch("rollback_id");
+    let dest = dir.join("rev.dwg");
+    let staged = write_temp(&dest, b"ours", "rev", "revision DWG").unwrap();
+    place_new_file(&staged.path, &dest, "revision DWG", ErrorCode::OutputExists).unwrap();
+
+    // Case 1: file at dest still has our FileId -> rollback removes it cleanly.
+    let notes = rollback_files(&[(&dest, staged.id)], &[]);
+    assert!(notes.is_empty(), "unexpected rollback notes: {notes:?}");
+    assert!(!dest.exists(), "rollback should remove our placed file");
+
+    // Case 2: file at dest is replaced by a different file -> rollback must NOT
+    // delete the unrelated file, and must return a note.
+    let staged2 = write_temp(&dest, b"ours-2", "rev", "revision DWG").unwrap();
+    place_new_file(
+        &staged2.path,
+        &dest,
+        "revision DWG",
+        ErrorCode::OutputExists,
+    )
+    .unwrap();
+    let other = dir.join("other.dwg");
+    fs::write(&other, b"someone-else").unwrap();
+    fs::rename(&other, &dest).unwrap();
+
+    #[cfg(any(unix, windows))]
+    {
+        let notes = rollback_files(&[(&dest, staged2.id)], &[]);
+        assert!(
+            !notes.is_empty(),
+            "rollback must report when file identity changed"
+        );
+        assert_eq!(
+            fs::read(&dest).unwrap(),
+            b"someone-else",
+            "rollback must never unlink an unrelated file swapped into place"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn change_layer_in_place_preserves_unmodeled_true_color_linetype_and_lineweight() {
+    let dir = scratch("true_color_layer");
+    let base = build_made_up_original(&dir, "BASE");
+    let orig = dir.join("TC-1.dwg");
+    dwg::with_true_color_locked_layer(&base, &orig, "TRUECOL", 12, 134, 210);
+    let settings = Settings::default().without_system_fonts();
+
+    let reply = revise_with(
+        &ReviseRequest {
+            set: orig,
+            change_set: json!({
+                "operations": [
+                    {"op": "change_layer", "name": "TRUECOL", "set": {"locked": false}}
+                ]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(reply.ok, "unlocking true-color layer failed: {reply:?}");
+    let rev_path = PathBuf::from(reply.result.unwrap().revision_dwg.unwrap());
+    let (color, lt, lw, locked) = dwg::layer_details_of(&rev_path, "TRUECOL").expect("layer");
+    assert_eq!(color, "Rgb { r: 12, g: 134, b: 210 }");
+    assert!(lt.eq_ignore_ascii_case("DASHED"), "got linetype {lt}");
+    assert_eq!(lw, "Value(35)");
+    assert!(!locked);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn refuses_non_exact_six_byte_dwg_header_like_ad1032() {
+    let dir = scratch("header_6_bytes");
+    let base = build_made_up_original(&dir, "BASE");
+    let ad = dir.join("AD-1.dwg");
+    dwg::with_custom_header(&base, &ad, b"AD1032");
+    let before = dir_files(&dir);
+    let settings = Settings::default().without_system_fonts();
+
+    let reply = revise_with(
+        &ReviseRequest {
+            set: ad,
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [0, 0, 0], "to": [5, 0, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(
+        !reply.ok,
+        "AD1032 must be refused rather than silently rewritten as AC1032"
+    );
+    assert!(
+        matches!(
+            reply.error.as_ref().unwrap().code,
+            ErrorCode::DwgWrite | ErrorCode::DwgRead
+        ),
+        "{:?}",
+        reply.error
+    );
+    assert_eq!(dir_files(&dir), before, "no files may be written");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn damaged_dwg_refused_without_allow_loss_and_revises_with_allow_loss() {
+    let dir = scratch("damaged_dwg");
+    let base = build_made_up_original(&dir, "BASE");
+    let damaged = dir.join("DMG-1.dwg");
+    let _damaged_handle = dwg::with_a_damaged_line(&base, &damaged);
+    let before = dir_files(&dir);
+    let settings = Settings::default().without_system_fonts();
+    let cs = json!({
+        "operations": [{"op": "add_line", "from": [0, 0, 0], "to": [10, 0, 0]}]
+    });
+
+    // Without allow_loss -> refused with IncompleteDecode and 0 files written.
+    let refused = revise_with(
+        &ReviseRequest {
+            set: damaged.clone(),
+            change_set: cs.clone(),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(
+        !refused.ok,
+        "damaged DWG must be refused without allow_loss"
+    );
+    assert_eq!(
+        refused.error.as_ref().unwrap().code,
+        ErrorCode::IncompleteDecode,
+        "{refused:?}"
+    );
+    let refused_report = refused.result.expect("partial report on decode refusal");
+    assert!(!refused_report.decode.decoded);
+    assert!(
+        refused_report.decode.read_past_damage.is_some()
+            || !refused_report.decode.not_decoded.is_empty()
+            || refused_report.decode.skipped > 0
+            || refused_report.decode.recovered_errors > 0
+    );
+    assert_eq!(dir_files(&dir), before);
+
+    // With allow_loss -> succeeds and records decode loss in .changes.json.
+    let allowed = revise_with(
+        &ReviseRequest {
+            set: damaged,
+            change_set: cs,
+            dry_run: false,
+            output: None,
+            allow_loss: true,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(
+        allowed.ok,
+        "damaged DWG should revise with allow_loss: {allowed:?}"
+    );
+    let rep = allowed.result.unwrap();
+    assert!(rep.allowed_loss);
+    assert!(!rep.decode.decoded);
+    let cl_json: Value =
+        serde_json::from_str(&fs::read_to_string(rep.change_list.unwrap()).unwrap()).unwrap();
+    assert_eq!(cl_json["allowed_loss"], true);
+    assert_eq!(cl_json["decode_report"]["decoded"], false);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn polyline3d_points_change_preserves_xdata_and_copy_allocates_distinct_vertex_handles() {
+    let dir = scratch("p3d");
+    let base = build_made_up_original(&dir, "BASE");
+    let orig = dir.join("P3D-1.dwg");
+    let p3_handle = dwg::with_polyline3d_original(&base, &orig);
+    let p3_id = format!("P3D-1/handle:{p3_handle}");
+    let settings = Settings::default().without_system_fonts();
+
+    let reply = revise_with(
+        &ReviseRequest {
+            set: orig,
+            change_set: json!({
+                "operations": [
+                    {
+                        "op": "change",
+                        "target": {"id": p3_id},
+                        "set": {
+                            "points": [
+                                [0, 0, 0],
+                                [20, 0, 5],
+                                [20, 20, 10],
+                                [0, 20, 15]
+                            ]
+                        }
+                    },
+                    {
+                        "op": "copy",
+                        "target": {"id": p3_id},
+                        "by": [100, 0, 0]
+                    }
+                ]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(reply.ok, "Polyline3D edit + copy failed: {reply:?}");
+    let rep = reply.result.unwrap();
+    assert!(
+        rep.unexpected_changes.is_empty(),
+        "{:?}",
+        rep.unexpected_changes
+    );
+    let rev_dwg = PathBuf::from(rep.revision_dwg.unwrap());
+    let copy_handle = rep.operations[1].copies[0].handle.clone();
+
+    let (src_vh, src_pts, src_xd) =
+        dwg::polyline3d_details_of(&rev_dwg, &p3_handle).expect("edited Polyline3D");
+    assert!(
+        src_xd,
+        "custom TESTAPP xdata must survive Polyline3D points edit"
+    );
+    assert_eq!(src_pts.len(), 4);
+    assert_eq!(src_pts[1], [20.0, 0.0, 5.0]);
+    assert_eq!(src_pts[3], [0.0, 20.0, 15.0]);
+
+    let (cpy_vh, cpy_pts, _) =
+        dwg::polyline3d_details_of(&rev_dwg, &copy_handle).expect("copied Polyline3D");
+    assert_eq!(cpy_pts.len(), 4);
+    assert_eq!(cpy_pts[0], [100.0, 0.0, 0.0]);
+    assert_eq!(cpy_pts[3], [100.0, 20.0, 15.0]);
+    let all_handles: HashSet<&String> = src_vh.iter().chain(cpy_vh.iter()).collect();
+    assert_eq!(
+        all_handles.len(),
+        src_vh.len() + cpy_vh.len(),
+        "vertex handles must be distinct between source ({src_vh:?}) and copy ({cpy_vh:?})"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn copy_strips_raw_dwg_eed_id_and_block_def_handle_is_refused() {
+    let dir = scratch("eed_and_block_def");
+    let yaml = dir.join("CARRIED.yaml");
+    fs::write(
+        &yaml,
+        "units: mm\n\
+         objects:\n\
+         \x20\x20- line: {id: my_line, name: named_line, from: [0, 0, 0], to: [10, 0, 0]}\n",
+    )
+    .unwrap();
+    let orig = dir.join("CARRIED.dwg");
+    let settings = Settings::default().without_system_fonts();
+    build_with(
+        &BuildRequest {
+            description: yaml,
+            output: Some(orig.clone()),
+            overwrite: true,
+        },
+        &settings,
+    )
+    .expect("build CARRIED.dwg");
+
+    // Copy the carried-ID/name line; verify the clone does NOT inherit the old
+    // ID or name even after a full DWG round-trip (raw_dwg_eed stripped!).
+    let reply = revise_with(
+        &ReviseRequest {
+            set: orig,
+            change_set: json!({
+                "operations": [
+                    {"op": "copy", "target": {"id": "CARRIED/my_line"}, "by": [0, 20, 0]}
+                ]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(reply.ok, "copy failed: {reply:?}");
+    let rep = reply.result.unwrap();
+    let rev_dwg = PathBuf::from(rep.revision_dwg.unwrap());
+    let copy_handle = rep.operations[0].copies[0].handle.clone();
+    assert_eq!(
+        dwg::carried_id_and_name_of(&rev_dwg, &copy_handle),
+        (None, None),
+        "copy must not inherit carried id or name from raw_dwg_eed"
+    );
+
+    // Targeting a block-definition entity handle must be refused cleanly.
+    let with_blk = build_made_up_original(&dir, "BLKREF");
+    let blk_ent_hex =
+        dwg::block_definition_entity_handle(&with_blk).expect("INSTR block has a circle entity");
+    let before = dir_files(&dir);
+    let refused = revise_with(
+        &ReviseRequest {
+            set: with_blk,
+            change_set: json!({
+                "operations": [
+                    {"op": "delete", "target": {"id": format!("BLKREF/handle:{blk_ent_hex}")}}
+                ]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(
+        !refused.ok,
+        "block-definition entity handle must be refused"
+    );
+    assert!(
+        matches!(
+            refused.error.as_ref().unwrap().code,
+            ErrorCode::UnknownName | ErrorCode::BadValue
+        ),
+        "{:?}",
+        refused.error
+    );
+    assert_eq!(dir_files(&dir), before);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mirror_asymmetric_insert_and_move_neg_z_arc_roundtrip_accurately() {
+    let dir = scratch("mirror_and_ocs");
+    let blocks = dir.join("asym_blocks.yaml");
+    fs::write(
+        &blocks,
+        "units: mm\n\
+         blocks:\n\
+         \x20\x20ARROW:\n\
+         \x20\x20\x20\x20base_point: [0, 0, 0]\n\
+         \x20\x20\x20\x20objects:\n\
+         \x20\x20\x20\x20\x20\x20- line: {from: [0, 0, 0], to: [10, 0, 0]}\n\
+         \x20\x20\x20\x20\x20\x20- line: {from: [10, 0, 0], to: [10, 4, 0]}\n",
+    )
+    .unwrap();
+    let yaml = dir.join("ASYM.yaml");
+    fs::write(
+        &yaml,
+        "units: mm\n\
+         block_library: asym_blocks.yaml\n\
+         objects:\n\
+         \x20\x20- insert: {block: ARROW, position: [20, 10, 0], rotation: 30}\n",
+    )
+    .unwrap();
+    let built = dir.join("ASYM_built.dwg");
+    let settings = Settings::default().without_system_fonts();
+    build_with(
+        &BuildRequest {
+            description: yaml,
+            output: Some(built.clone()),
+            overwrite: true,
+        },
+        &settings,
+    )
+    .unwrap();
+    let orig = dir.join("ASYM.dwg");
+    dwg::as_someone_elses(&built, &orig);
+    let _ = fs::remove_file(&built);
+
+    let loaded = crate::original::read_dwg_record(&orig, false).unwrap();
+    let ins_id = loaded.record.objects[0].id.clone();
+
+    let reply = revise_with(
+        &ReviseRequest {
+            set: orig,
+            change_set: json!({
+                "operations": [
+                    {
+                        "op": "mirror",
+                        "target": {"id": ins_id},
+                        "first_point": [0, 0, 0],
+                        "second_point": [100, 0, 0],
+                        "erase_source": true
+                    }
+                ]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(reply.ok, "mirror insert failed: {reply:?}");
+    let rev_dwg = PathBuf::from(reply.result.unwrap().revision_dwg.unwrap());
+    let after = crate::original::read_dwg_record(&rev_dwg, false).unwrap();
+    match &after.record.sheet.objects[0] {
+        Object::Insert(ins) => {
+            assert!((ins.position.x - 20.0).abs() < 1e-6);
+            assert!((ins.position.y - -10.0).abs() < 1e-6);
+            assert!(ins.mirrored, "mirrored insert must have mirrored=true");
+            assert!((ins.scale - 1.0).abs() < 1e-6, "scale={}", ins.scale);
+            // Reflecting 30° across 0° (X axis) with negated X scale yields
+            // (2*0 - 30 + 180) mod 360 = 150°.
+            assert!(
+                (ins.rotation - 150.0).abs() < 1e-6,
+                "expected 150 deg, got {}",
+                ins.rotation
+            );
+        }
+        other => panic!("expected Insert, got {other:?}"),
+    }
+
+    // Moving an arc with -Z normal translates its world center accurately.
+    let base = build_made_up_original(&dir, "BASE");
+    let arc_orig = dir.join("NEGZ.dwg");
+    let arc_hex = dwg::with_neg_z_arc_original(&base, &arc_orig);
+    let (wcs_before, norm_before) = dwg::arc_world_center_and_normal(&arc_orig, &arc_hex).unwrap();
+    assert!((wcs_before[0] - -10.0).abs() < 1e-6);
+    assert!((wcs_before[1] - 20.0).abs() < 1e-6);
+    assert!((norm_before[2] - -1.0).abs() < 1e-6);
+
+    let arc_reply = revise_with(
+        &ReviseRequest {
+            set: arc_orig,
+            change_set: json!({
+                "operations": [
+                    {"op": "move", "target": {"id": format!("NEGZ/handle:{arc_hex}")}, "by": [5, 10, 0]}
+                ]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(arc_reply.ok, "move -Z arc failed: {arc_reply:?}");
+    let arc_rev = PathBuf::from(arc_reply.result.unwrap().revision_dwg.unwrap());
+    let (wcs_after, norm_after) = dwg::arc_world_center_and_normal(&arc_rev, &arc_hex).unwrap();
+    assert!(
+        (wcs_after[0] - -5.0).abs() < 1e-6 && (wcs_after[1] - 30.0).abs() < 1e-6,
+        "expected WCS (-5, 30, 0), got {wcs_after:?}"
+    );
+    assert!((norm_after[2] - -1.0).abs() < 1e-6);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn constant_and_locked_layer_attributes_and_locked_copies_refused() {
+    let dir = scratch("attr_and_copy_locks");
+    let base = build_made_up_original(&dir, "BASE");
+    let orig = dir.join("ATTLOCK.dwg");
+    let ins_hex = dwg::with_constant_and_locked_attrs(&base, &orig);
+    let ins_id = format!("ATTLOCK/handle:{ins_hex}");
+    let settings = Settings::default().without_system_fonts();
+
+    // Occurrence 1 skips the constant attribute and hits the locked-layer attribute -> Locked!
+    let r_locked = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [
+                    {"op": "set_attribute", "target": {"id": ins_id}, "tag": "TAG", "occurrence": 1, "value": "NO"}
+                ]
+            }),
+            dry_run: true,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(!r_locked.ok);
+    assert_eq!(r_locked.error.unwrap().code, ErrorCode::Locked);
+
+    // Occurrence 2 hits the unlocked editable attribute -> succeeds!
+    let r_ok = revise_with(
+        &ReviseRequest {
+            set: orig,
+            change_set: json!({
+                "operations": [
+                    {"op": "set_attribute", "target": {"id": ins_id}, "tag": "TAG", "occurrence": 2, "value": "UPDATED"}
+                ]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r_ok.ok, "occurrence 1 should succeed: {r_ok:?}");
+
+    // Copy, array, and keep-source mirror on a locked-layer object must all be refused.
+    let loaded = crate::original::read_dwg_record(&base, false).unwrap();
+    let locked_id = loaded.record.objects[7].id.clone();
+    for cs in [
+        json!({"operations": [{"op": "copy", "target": {"id": locked_id}, "by": [10, 0, 0]}]}),
+        json!({"operations": [{"op": "array", "kind": "rectangular", "target": {"id": locked_id}, "rows": 1, "columns": 2, "row_spacing": 10, "column_spacing": 10}]}),
+        json!({"operations": [{"op": "mirror", "target": {"id": locked_id}, "first_point": [0, 0, 0], "second_point": [10, 0, 0], "erase_source": false}]}),
+    ] {
+        let r = revise_with(
+            &ReviseRequest {
+                set: base.clone(),
+                change_set: cs.clone(),
+                dry_run: true,
+                output: None,
+                allow_loss: false,
+                plot_style: None,
+                no_pdf: true,
+            },
+            &settings,
+        );
+        assert!(!r.ok, "expected locked refusal for {cs}");
+        assert_eq!(r.error.unwrap().code, ErrorCode::Locked);
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn duplicate_transform_and_copy_targets_refused_atomically() {
+    let dir = scratch("dup_targets");
+    let yaml = dir.join("DUPT.yaml");
+    fs::write(
+        &yaml,
+        "units: mm\n\
+         objects:\n\
+         \x20\x20- line: {id: l1, name: dup_line, from: [0, 0, 0], to: [10, 0, 0]}\n",
+    )
+    .unwrap();
+    let orig = dir.join("DUPT.dwg");
+    let settings = Settings::default().without_system_fonts();
+    build_with(
+        &BuildRequest {
+            description: yaml,
+            output: Some(orig.clone()),
+            overwrite: true,
+        },
+        &settings,
+    )
+    .unwrap();
+    let before = dir_files(&dir);
+
+    for cs in [
+        json!({
+            "operations": [{
+                "op": "rotate",
+                "targets": [{"id": "DUPT/l1"}, {"name": "dup_line"}],
+                "base_point": [0, 0, 0],
+                "angle": 90
+            }]
+        }),
+        json!({
+            "operations": [{
+                "op": "copy",
+                "targets": [{"id": "DUPT/l1"}, {"name": "dup_line"}],
+                "by": [5, 0, 0]
+            }]
+        }),
+    ] {
+        let r = revise_with(
+            &ReviseRequest {
+                set: orig.clone(),
+                change_set: cs,
+                dry_run: false,
+                output: None,
+                allow_loss: false,
+                plot_style: None,
+                no_pdf: true,
+            },
+            &settings,
+        );
+        assert!(!r.ok, "duplicate targets must be refused");
+        assert_eq!(r.error.unwrap().code, ErrorCode::BadValue);
+    }
+    assert_eq!(dir_files(&dir), before);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn name_only_add_and_rename_keep_handle_id_and_unicode_id_does_not_panic() {
+    let dir = scratch("name_and_unicode");
+    let orig = build_made_up_original(&dir, "NAME-1");
+    let loaded = crate::original::read_dwg_record(&orig, false).unwrap();
+    let orig_line_id = loaded.record.objects[0].id.clone();
+    let orig_line_hex = loaded.record.dwg.as_ref().unwrap().handles[0].clone();
+    let settings = Settings::default().without_system_fonts();
+
+    // 1. Multi-byte UTF-8 ID whose byte slice at HANDLE_ID.len() is mid-char must
+    //    return UnknownName cleanly without panicking!
+    let uni = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "delete", "target": {"id": "NAME-1/ééééé"}}]
+            }),
+            dry_run: true,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(!uni.ok);
+    assert_eq!(uni.error.unwrap().code, ErrorCode::UnknownName);
+
+    // 2. Add a name-only line, snap to it in the next op, and rename an existing
+    //    handle-ID object; neither should get an empty carried ID.
+    let reply = revise_with(
+        &ReviseRequest {
+            set: orig,
+            change_set: json!({
+                "operations": [
+                    {"op": "add_line", "name": "guide_line", "from": [0, 10, 0], "to": [20, 10, 0]},
+                    {
+                        "op": "add_line",
+                        "from": {"snap": {"name": "guide_line", "snap": "endpoint", "which": "to"}},
+                        "to": [20, 30, 0]
+                    },
+                    {"op": "change", "target": {"id": orig_line_id}, "set": {"name": "renamed_orig"}}
+                ]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(reply.ok, "name-only add + snap + rename failed: {reply:?}");
+    let rep = reply.result.unwrap();
+    let rev_dwg = PathBuf::from(rep.revision_dwg.unwrap());
+    let added_hex = rep.operations[0].handle.as_ref().unwrap();
+    assert_eq!(
+        dwg::carried_id_and_name_of(&rev_dwg, added_hex),
+        (None, Some("guide_line".to_owned()))
+    );
+    assert_eq!(
+        dwg::carried_id_and_name_of(&rev_dwg, &orig_line_hex),
+        (None, Some("renamed_orig".to_owned()))
+    );
+    let after = crate::original::read_dwg_record(&rev_dwg, false).unwrap();
+    let found_guide = after
+        .record
+        .objects
+        .iter()
+        .find(|o| o.name.as_deref() == Some("guide_line"))
+        .expect("guide_line present");
+    assert!(
+        found_guide.id.contains("/handle:"),
+        "expected stable handle ID, got {}",
+        found_guide.id
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn schema_accepts_original_change_set_and_set_dispatch_refuses_null_or_false_original_keys() {
+    let dir = scratch("schema_and_keys");
+    let change_cmd = find_command("change").unwrap();
+    let schema = change_cmd.input_schema();
+    let validator = jsonschema::validator_for(&schema).expect("valid change input schema");
+
+    // Original-DWG change set omitting `sheet` and passing explicit null `output`/`plot_style`
+    // must pass JSON Schema validation.
+    let valid_original = json!({
+        "set": "drawing.dwg",
+        "change_set": {
+            "operations": [
+                {"op": "add_line", "from": [0, 0, 0], "to": [10, 0, 0]},
+                {"op": "add_layer", "name": "NEW_LAYER", "color": 2}
+            ]
+        },
+        "output": null,
+        "plot_style": null
+    });
+    assert!(
+        validator.is_valid(&valid_original),
+        "schema rejected valid original-DWG change request: {:?}",
+        validator.iter_errors(&valid_original).collect::<Vec<_>>()
+    );
+
+    // Drawing-set dispatch must refuse even null/false original-only keys!
+    let set_dir = dir.join("SET");
+    fs::create_dir_all(&set_dir).unwrap();
+    fs::write(
+        set_dir.join("set.yaml"),
+        "units: mm\noutput: dwg\nrows: rows.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        set_dir.join("tpl.yaml"),
+        "units: mm\nobjects:\n  - line: {id: base, from: [0, 0, 0], to: [10, 0, 0]}\n",
+    )
+    .unwrap();
+    fs::write(
+        set_dir.join("rows.yaml"),
+        "rows:\n  - sheet: S-1\n    template: tpl.yaml\n",
+    )
+    .unwrap();
+    let settings = Settings::default().without_system_fonts();
+    for (key, val) in [
+        ("output", json!(false)),
+        ("output", json!(null)),
+        ("plot_styles", json!(null)),
+        ("allow_loss", json!(false)),
+        ("no_pdf", json!(false)),
+        ("plot_style", json!(null)),
+    ] {
+        let mut input = json!({
+            "set": set_dir.display().to_string(),
+            "change_set": {"operations": [{"op": "add_line", "sheet": "S-1", "from": [0, 1, 0], "to": [5, 1, 0]}]},
+            "dry_run": true
+        });
+        input[key] = val.clone();
+        let reply = change_cmd.run(input, &settings, Interface::Cli);
+        assert!(
+            !reply.ok,
+            "drawing-set change must refuse `{key}: {val}` with Usage"
+        );
+        assert_eq!(reply.error.unwrap().code, ErrorCode::Usage);
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn array_path_refuses_non_curve_insert() {
+    let dir = scratch("array_path_insert");
+    let orig = build_made_up_original(&dir, "PATH-1");
+    let loaded = crate::original::read_dwg_record(&orig, false).unwrap();
+    let line_id = loaded.record.objects[0].id.clone();
+    let insert_id = loaded.record.objects[6].id.clone();
+    let settings = Settings::default().without_system_fonts();
+
+    let reply = revise_with(
+        &ReviseRequest {
+            set: orig,
+            change_set: json!({
+                "operations": [{
+                    "op": "array",
+                    "kind": "path",
+                    "target": {"id": line_id},
+                    "path": {"id": insert_id},
+                    "count": 3
+                }]
+            }),
+            dry_run: true,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(!reply.ok, "ARRAYPATH must refuse an Insert as path");
+    assert_eq!(reply.error.unwrap().code, ErrorCode::BadValue);
+
+    let _ = fs::remove_dir_all(&dir);
+}
