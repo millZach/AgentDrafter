@@ -2109,7 +2109,8 @@ fn original_undo_refuses_hand_edited_missing_symlink_and_original_file() {
     assert!(!u.ok);
     assert_eq!(u.error.as_ref().unwrap().code, ErrorCode::ChangedByHand);
     assert!(u.error.unwrap().message.contains("SAFE-UNDO.rev1.dwg"));
-    assert!(rev_chg.is_file() && rev_pdf.is_file());
+    assert_eq!(fs::read(&rev_chg).unwrap(), rev_chg_bytes);
+    assert_eq!(fs::read(&rev_pdf).unwrap(), rev_pdf_bytes);
     fs::write(&rev_dwg, &rev_dwg_bytes).unwrap();
 
     // 2. Deleted revision change list -> refused with ChangedByHand, nothing deleted.
@@ -2121,7 +2122,8 @@ fn original_undo_refuses_hand_edited_missing_symlink_and_original_file() {
     });
     assert!(!u2.ok);
     assert_eq!(u2.error.as_ref().unwrap().code, ErrorCode::ChangedByHand);
-    assert!(rev_dwg.is_file() && rev_pdf.is_file());
+    assert_eq!(fs::read(&rev_dwg).unwrap(), rev_dwg_bytes);
+    assert_eq!(fs::read(&rev_pdf).unwrap(), rev_pdf_bytes);
     fs::write(&rev_chg, &rev_chg_bytes).unwrap();
 
     // 3. Revision PDF replaced with a symlink -> refused without following/removing symlink.
@@ -2294,8 +2296,9 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
     );
     assert!(j_rep.can_undo.is_empty());
 
-    // 2. Apply a real revision (entry 2, lands as rev1.dwg again), then kill
-    //    `undo` mid-commit after moving rev1.dwg aside, before `done`.
+    // 2. Apply a real revision WITH PDF (entry 2, lands as rev1.dwg +
+    //    rev1.changes.json + rev1.pdf), then kill `undo` mid-commit after
+    //    moving rev1.dwg aside, before `done`.
     let r = revise_with(
         &ReviseRequest {
             set: orig.clone(),
@@ -2304,7 +2307,7 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
             output: None,
             allow_loss: false,
             plot_style: None,
-            no_pdf: true,
+            no_pdf: false,
         },
         &settings,
     );
@@ -2314,10 +2317,13 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
     let rev1_bytes = fs::read(&rev1_dwg).unwrap();
     let rev1_chg = PathBuf::from(rep.change_list.unwrap());
     let rev1_chg_bytes = fs::read(&rev1_chg).unwrap();
+    let rev1_pdf = PathBuf::from(rep.pdf.unwrap());
+    let rev1_pdf_bytes = fs::read(&rev1_pdf).unwrap();
 
-    // Undo has 2 undo states (stage + place) + 2 file removals (move aside).
-    // Stop at step 6 (after undo states are placed and rev1.dwg is moved aside).
-    STOP_AT.with(|s| s.set(Some(6)));
+    // Undo has 3 undo states (stage: 1,2,3; place: 4,5,6) + 3 file removals
+    // (move aside: 7,8,9). Stop at step 7 (after undo states are placed and
+    // rev1.dwg is moved aside).
+    STOP_AT.with(|s| s.set(Some(7)));
     let undo_panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         undo(&UndoRequest {
             set: orig.clone(),
@@ -2328,8 +2334,8 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
     STOP_AT.with(|s| s.set(None));
     assert!(undo_panicked.is_err(), "STOP_AT should unwind mid-undo");
 
-    // Next `journal` rolls back the pending undo and restores rev1.dwg &
-    // rev1.changes.json byte-for-byte from undo-states/!
+    // Next `journal` rolls back the pending undo and restores ALL THREE outputs
+    // (rev1.dwg, rev1.changes.json, rev1.pdf) byte-for-byte from undo-states/!
     let j2 = journal(&JournalRequest { set: orig.clone() });
     assert!(j2.ok, "{j2:?}");
     let rb2 = j2.rolled_back.expect("pending undo must be rolled back");
@@ -2337,6 +2343,7 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
     assert_eq!(rb2.kind, Some(EntryKind::Undo));
     assert_eq!(fs::read(&rev1_dwg).unwrap(), rev1_bytes);
     assert_eq!(fs::read(&rev1_chg).unwrap(), rev1_chg_bytes);
+    assert_eq!(fs::read(&rev1_pdf).unwrap(), rev1_pdf_bytes);
     assert_eq!(j2.result.unwrap().can_undo, vec![2]);
 
     // 3. Pending `accept` + torn last line -> rolled back and torn line cut off;
@@ -2693,6 +2700,418 @@ fn dwg_extension_folder_still_routes_to_drawing_set_journal_undo_and_accept() {
         Interface::Cli,
     );
     assert!(a.ok, "{a:?}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn original_dry_run_undo_and_accept_refuse_pending_and_never_write() {
+    use crate::change::original_journal::test_pending_journal_path;
+    use crate::change::{accept_with, undo, AcceptRequest, UndoRequest, STOP_AT};
+
+    let dir = scratch("orig_dry_run_undo_accept_pending");
+    let orig = build_made_up_original(&dir, "DRY-PEND");
+    let orig_bytes = fs::read(&orig).unwrap();
+    let settings = Settings::default().without_system_fonts();
+
+    // Before any journal exists: undo/accept (both dry-run and real) create NO
+    // `.agentdrafter/` folder or lock file.
+    for dry in [true, false] {
+        let u = undo(&UndoRequest {
+            set: orig.clone(),
+            change_set: 1,
+            dry_run: dry,
+        });
+        assert!(!u.ok);
+        assert_eq!(u.error.unwrap().code, ErrorCode::UnknownName);
+        let a = accept_with(
+            &AcceptRequest {
+                set: orig.clone(),
+                despite_failed_checks: true,
+                newest_seen: None,
+                dry_run: dry,
+            },
+            &settings,
+            Interface::Cli,
+        );
+        assert!(!a.ok);
+        assert_eq!(a.error.unwrap().code, ErrorCode::NothingToAccept);
+        assert!(
+            !dir.join(".agentdrafter").exists(),
+            "must not create .agentdrafter/ on unjournaled original (dry={dry})"
+        );
+    }
+
+    // Create a real revision first, then leave a pending revision on disk.
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+
+    // Stop second revision mid-commit after placing rev2.dwg.
+    STOP_AT.with(|s| s.set(Some(3)));
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        revise_with(
+            &ReviseRequest {
+                set: orig.clone(),
+                change_set: json!({
+                    "operations": [{"op": "add_line", "from": [1, 2, 0], "to": [10, 2, 0]}]
+                }),
+                dry_run: false,
+                output: None,
+                allow_loss: false,
+                plot_style: None,
+                no_pdf: true,
+            },
+            &settings,
+        )
+    }));
+    STOP_AT.with(|s| s.set(None));
+    assert!(panicked.is_err());
+
+    let jpath = test_pending_journal_path(&orig).unwrap();
+    let pending_journal = fs::read(&jpath).unwrap();
+    let rev2_dwg = dir.join("DRY-PEND.rev2.dwg");
+    assert!(rev2_dwg.is_file());
+    let rev2_bytes = fs::read(&rev2_dwg).unwrap();
+
+    // `undo --dry-run` (direct AND via Command::run) refuses with RollbackFailed
+    // and leaves journal + partial rev2.dwg byte-for-byte untouched!
+    let dry_u = undo(&UndoRequest {
+        set: orig.clone(),
+        change_set: 1,
+        dry_run: true,
+    });
+    assert!(!dry_u.ok);
+    assert!(dry_u.rolled_back.is_none());
+    assert_eq!(dry_u.error.unwrap().code, ErrorCode::RollbackFailed);
+    assert_eq!(fs::read(&jpath).unwrap(), pending_journal);
+    assert_eq!(fs::read(&rev2_dwg).unwrap(), rev2_bytes);
+
+    let dry_u_cmd = find_command("undo").unwrap().run(
+        json!({"set": orig.to_string_lossy(), "change_set": 1, "dry_run": true}),
+        &settings,
+        Interface::Cli,
+    );
+    assert!(!dry_u_cmd.ok);
+    assert!(dry_u_cmd.rolled_back.is_none());
+    assert_eq!(dry_u_cmd.error.unwrap().code, ErrorCode::RollbackFailed);
+    assert_eq!(fs::read(&jpath).unwrap(), pending_journal);
+    assert_eq!(fs::read(&rev2_dwg).unwrap(), rev2_bytes);
+
+    // `accept --dry-run` (direct AND via Command::run) refuses with RollbackFailed
+    // and leaves journal + partial rev2.dwg byte-for-byte untouched!
+    let dry_a = accept_with(
+        &AcceptRequest {
+            set: orig.clone(),
+            despite_failed_checks: true,
+            newest_seen: None,
+            dry_run: true,
+        },
+        &settings,
+        Interface::Cli,
+    );
+    assert!(!dry_a.ok);
+    assert!(dry_a.rolled_back.is_none());
+    assert_eq!(dry_a.error.unwrap().code, ErrorCode::RollbackFailed);
+    assert_eq!(fs::read(&jpath).unwrap(), pending_journal);
+    assert_eq!(fs::read(&rev2_dwg).unwrap(), rev2_bytes);
+
+    let dry_a_cmd = find_command("accept").unwrap().run(
+        json!({"set": orig.to_string_lossy(), "despite_failed_checks": true, "dry_run": true}),
+        &settings,
+        Interface::Cli,
+    );
+    assert!(!dry_a_cmd.ok);
+    assert!(dry_a_cmd.rolled_back.is_none());
+    assert_eq!(dry_a_cmd.error.unwrap().code, ErrorCode::RollbackFailed);
+    assert_eq!(fs::read(&jpath).unwrap(), pending_journal);
+    assert_eq!(fs::read(&rev2_dwg).unwrap(), rev2_bytes);
+    assert_eq!(fs::read(&orig).unwrap(), orig_bytes);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn original_recovery_cleanup_is_scoped_and_never_touches_bystanders() {
+    use crate::change::original_journal::test_original_key;
+    use crate::change::{journal, JournalRequest, STOP_AT};
+
+    let dir = scratch("orig_scoped_cleanup");
+    let orig_a = build_made_up_original(&dir, "SCOPE-A");
+    let orig_b = build_made_up_original(&dir, "SCOPE-B");
+    let settings = Settings::default().without_system_fonts();
+
+    // Plant bystander files in the same folder that share the old unscoped
+    // `.agentdrafter-entry-1-` prefix AND another original's entry-1 temp!
+    let master_bystander = dir.join(".agentdrafter-entry-1-master.dwg");
+    fs::write(&master_bystander, b"important-master-dwg").unwrap();
+    let key_b = test_original_key(&fs::canonicalize(&orig_b).unwrap());
+    let orig_b_tmp = dir.join(format!(
+        ".agentdrafter-orig-{key_b}-entry-1-f0-deadbeef.rev.tmp"
+    ));
+    fs::write(&orig_b_tmp, b"other-original-in-flight").unwrap();
+
+    // Kill revision entry 1 on SCOPE-A mid-commit.
+    STOP_AT.with(|s| s.set(Some(3)));
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        revise_with(
+            &ReviseRequest {
+                set: orig_a.clone(),
+                change_set: json!({
+                    "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]
+                }),
+                dry_run: false,
+                output: None,
+                allow_loss: false,
+                plot_style: None,
+                no_pdf: true,
+            },
+            &settings,
+        )
+    }));
+    STOP_AT.with(|s| s.set(None));
+    assert!(panicked.is_err());
+
+    // Recover SCOPE-A -> must clean up SCOPE-A's own temp/partial files while
+    // leaving `.agentdrafter-entry-1-master.dwg` and SCOPE-B's temp untouched!
+    let j = journal(&JournalRequest { set: orig_a });
+    assert!(j.ok, "{j:?}");
+    assert!(j.rolled_back.is_some());
+    assert_eq!(
+        fs::read(&master_bystander).unwrap(),
+        b"important-master-dwg",
+        "recovery must never delete a .dwg file matching an entry prefix"
+    );
+    assert_eq!(
+        fs::read(&orig_b_tmp).unwrap(),
+        b"other-original-in-flight",
+        "recovery of SCOPE-A must never delete SCOPE-B's temp file"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn original_journal_and_prune_refuse_symlinks_without_modifying_targets() {
+    use crate::change::original_journal::test_pending_journal_path;
+    use crate::change::{journal, undo, JournalRequest, UndoRequest};
+
+    let dir = scratch("orig_journal_symlinks");
+    let orig = build_made_up_original(&dir, "SYM-1");
+    let orig_bytes = fs::read(&orig).unwrap();
+    let settings = Settings::default().without_system_fonts();
+
+    // 1. Symlinked `journal.jsonl` pointing at the original DWG itself ->
+    //    `change` and `journal` refuse cleanly without modifying the original!
+    let jpath = test_pending_journal_path(&orig).unwrap();
+    let jdir = jpath.parent().unwrap();
+    fs::create_dir_all(jdir).unwrap();
+    std::os::unix::fs::symlink(&orig, &jpath).unwrap();
+
+    let j_res = journal(&JournalRequest { set: orig.clone() });
+    assert!(!j_res.ok, "symlinked journal.jsonl must be refused");
+    assert_eq!(j_res.error.unwrap().code, ErrorCode::ReadFailed);
+
+    let ch_res = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [5, 1, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(!ch_res.ok, "change with symlinked journal.jsonl must fail");
+    assert_eq!(
+        fs::read(&orig).unwrap(),
+        orig_bytes,
+        "original DWG must never be modified through a symlinked journal.jsonl"
+    );
+    fs::remove_file(&jpath).unwrap();
+
+    // 2. Real revision succeeds, then replace `undo-states` with a symlink to
+    //    the drawing folder containing the original and a bystander file ->
+    //    pruning / undo must NEVER delete anything inside the target folder!
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [5, 1, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+    let bystander_hex = dir.join("0".repeat(64));
+    fs::write(&bystander_hex, b"must-survive").unwrap();
+    let undo_states_dir = jdir.join("undo-states");
+    let _ = fs::remove_dir_all(&undo_states_dir);
+    std::os::unix::fs::symlink(&dir, &undo_states_dir).unwrap();
+
+    // Undo refuses because `undo-states` is a symlink, and deletes nothing!
+    let u = undo(&UndoRequest {
+        set: orig.clone(),
+        change_set: 1,
+        dry_run: false,
+    });
+    assert!(!u.ok, "undo with symlinked undo-states must be refused");
+    assert_eq!(fs::read(&orig).unwrap(), orig_bytes);
+    assert_eq!(fs::read(&bystander_hex).unwrap(), b"must-survive");
+
+    // Another revision triggers `prune_original_at` — symlinked `undo-states`
+    // must be skipped completely so neither `orig` nor `bystander_hex` is deleted!
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 2, 0], "to": [5, 2, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "{r2:?}");
+    assert_eq!(fs::read(&orig).unwrap(), orig_bytes);
+    assert_eq!(fs::read(&bystander_hex).unwrap(), b"must-survive");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn original_cross_folder_output_stamps_issued_on_render_and_plot() {
+    use crate::change::{accept_with, AcceptRequest};
+    use crate::plot::{plot_with, PlotRequest};
+    use crate::render::{render_with, RenderRequest};
+    use crate::stamp::{check_stale, StaleRequest};
+
+    let dir = scratch("orig_cross_folder_stamp");
+    let drawings_dir = dir.join("drawings");
+    let out_dir = dir.join("issued-out");
+    fs::create_dir_all(&drawings_dir).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+    let orig = build_made_up_original(&drawings_dir, "CROSS-100");
+    let rev_dwg = out_dir.join("R.dwg");
+    let settings = Settings::default().without_system_fonts();
+
+    let r = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [2, 2, 0], "to": [12, 2, 0]}]
+            }),
+            dry_run: false,
+            output: Some(rev_dwg.clone()),
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r.ok, "{r:?}");
+
+    // Before accept: render of `<out_dir>/R.dwg` is NOT issued.
+    let png_before = out_dir.join("before.png");
+    let ren_before = render_with(
+        &RenderRequest {
+            output: Some(png_before),
+            ..RenderRequest::new(rev_dwg.clone())
+        },
+        &settings,
+    )
+    .unwrap();
+    assert!(!ren_before.stamp.revision.as_ref().unwrap().issued);
+
+    // Accept the original in `<drawings_dir>/CROSS-100.dwg`.
+    let acc = accept_with(
+        &AcceptRequest {
+            set: orig,
+            despite_failed_checks: true,
+            newest_seen: Some(1),
+            dry_run: false,
+        },
+        &settings,
+        Interface::Cli,
+    );
+    assert!(acc.ok, "{acc:?}");
+
+    // Render and plot of `<out_dir>/R.dwg` (in a DIFFERENT folder!) both carry
+    // `issued: true` and `check_stale` confirms `issued: true`!
+    let png_after = out_dir.join("after.png");
+    let ren_after = render_with(
+        &RenderRequest {
+            output: Some(png_after.clone()),
+            ..RenderRequest::new(rev_dwg.clone())
+        },
+        &settings,
+    )
+    .unwrap();
+    let png_rev = ren_after.stamp.revision.as_ref().unwrap();
+    assert!(
+        png_rev.issued,
+        "cross-folder PNG must be issued: {png_rev:?}"
+    );
+    assert_eq!(png_rev.accept, Some(2));
+    assert!(
+        check_stale(&StaleRequest {
+            output: png_after,
+            source: None,
+        })
+        .unwrap()
+        .issued
+    );
+
+    let pdf_after = out_dir.join("after.pdf");
+    let plt_after = plot_with(
+        &PlotRequest {
+            source: rev_dwg,
+            output: Some(pdf_after.clone()),
+            overwrite: true,
+            plot_style: None,
+        },
+        &settings,
+    )
+    .unwrap();
+    let pdf_rev = plt_after.stamp.revision.as_ref().unwrap();
+    assert!(
+        pdf_rev.issued,
+        "cross-folder PDF must be issued: {pdf_rev:?}"
+    );
+    assert_eq!(pdf_rev.accept, Some(2));
+    assert!(
+        check_stale(&StaleRequest {
+            output: pdf_after,
+            source: None,
+        })
+        .unwrap()
+        .issued
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }

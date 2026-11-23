@@ -193,6 +193,12 @@ pub struct RevisionChangeListFile {
     /// Format version (1), reserved for forward compatibility with journal/undo/accept.
     pub format: u32,
     pub original: RevisionFile,
+    /// Canonical path of the original DWG when this revision was saved outside
+    /// the original's folder, so read-only issued-stamp lookup can locate the
+    /// original's journal without mutating anything. Omitted when the revision
+    /// lives inside the original's folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_path: Option<String>,
     pub revision: RevisionFile,
     pub sheet: String,
     pub units: Option<Unit>,
@@ -583,9 +589,15 @@ fn prepare_revision(
         }
     }
 
+    let original_path = if oj.is_inside_orig_dir(&paths.dwg) {
+        None
+    } else {
+        Some(oj.resolved_source.to_string_lossy().into_owned())
+    };
     let change_list_file = RevisionChangeListFile {
         format: 1,
         original: original_meta.clone(),
+        original_path,
         revision: revision_meta.clone(),
         sheet: sheet_name.clone(),
         units,

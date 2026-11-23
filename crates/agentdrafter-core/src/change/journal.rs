@@ -720,6 +720,11 @@ pub(super) fn read_journal_at(path: &Path) -> Result<Option<JournalRead>, Error>
             .in_file(path))
         }
     };
+    parse_journal_bytes(path, &bytes).map(Some)
+}
+
+/// Parses raw bytes read from a journal file at `path`.
+pub(super) fn parse_journal_bytes(path: &Path, bytes: &[u8]) -> Result<JournalRead, Error> {
     let split = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     let (head, tail) = bytes.split_at(split);
     let mut text = String::from_utf8(head.to_vec()).map_err(|e| {
@@ -755,11 +760,11 @@ pub(super) fn read_journal_at(path: &Path) -> Result<Option<JournalRead>, Error>
             }
         }
     }
-    Ok(Some(JournalRead {
+    Ok(JournalRead {
         text,
         entries,
         torn,
-    }))
+    })
 }
 
 /// One line of the journal: an entry, or the state it came to.
@@ -902,6 +907,40 @@ pub(super) fn lock_at(path: &Path) -> Result<File, Error> {
         .truncate(false)
         .open(path)
         .map_err(|e| failed("open", e.to_string()))?;
+    acquire_lock(file, path)
+}
+
+/// Holds the per-original journal lock at `<base>/.agentdrafter/originals/<key>/journal.lock`,
+/// refusing symlinks anywhere in the directory chain or on the lock file itself,
+/// and refusing any lock file whose identity matches `source_id`.
+pub(super) fn lock_original(
+    base: &Path,
+    key: &str,
+    lock_path: &Path,
+    source_id: Option<crate::build::FileId>,
+) -> Result<File, Error> {
+    let failed = |what: &str, why: String| {
+        Error::new(
+            ErrorCode::WriteFailed,
+            format!("could not {what} the original's journal lock: {why}; nothing was changed"),
+        )
+        .in_file(lock_path)
+    };
+    crate::original::ensure_real_dir_chain(base, &[".agentdrafter", "originals", key])
+        .map_err(|e| failed("make the folder of", e.to_string()))?;
+    let file = crate::original::open_no_follow_write(lock_path, true, source_id)
+        .map_err(|e| failed("open", e.to_string()))?;
+    acquire_lock(file, lock_path)
+}
+
+fn acquire_lock(file: File, path: &Path) -> Result<File, Error> {
+    let failed = |why: String| {
+        Error::new(
+            ErrorCode::WriteFailed,
+            format!("could not take the journal lock: {why}; nothing was changed"),
+        )
+        .in_file(path)
+    };
     let start = Instant::now();
     loop {
         match file.try_lock() {
@@ -910,15 +949,12 @@ pub(super) fn lock_at(path: &Path) -> Result<File, Error> {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(TryLockError::WouldBlock) => {
-                return Err(failed(
-                    "take",
-                    format!(
-                        "another process has held it for {} seconds, adding to the journal",
-                        LOCK_WAIT.as_secs()
-                    ),
-                ))
+                return Err(failed(format!(
+                    "another process has held it for {} seconds, adding to the journal",
+                    LOCK_WAIT.as_secs()
+                )))
             }
-            Err(TryLockError::Error(e)) => return Err(failed("take", e.to_string())),
+            Err(TryLockError::Error(e)) => return Err(failed(e.to_string())),
         }
     }
 }
@@ -1358,6 +1394,12 @@ pub(super) fn prune(folder: &Path, entries: &[Entry]) {
 
 /// Like [`prune`], pruning the undo-states folder at `store`.
 pub(super) fn prune_at(store: &Path, entries: &[Entry]) {
+    let Ok(meta) = fs::symlink_metadata(store) else {
+        return;
+    };
+    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+        return;
+    }
     let fates = fates(entries);
     let needed: BTreeSet<&str> = entries
         .iter()
@@ -1374,6 +1416,105 @@ pub(super) fn prune_at(store: &Path, entries: &[Entry]) {
         }
     }
     let _ = fs::remove_dir(store);
+}
+
+/// Safely prunes an original DWG's `undo-states` folder:
+/// - verifies `.agentdrafter`, `originals`, `<key>`, and `undo-states` are all
+///   real non-symlink directories;
+/// - only unlinks regular non-symlink files whose filename is a 64-hex-char
+///   SHA-256 digest not needed by any active/pending entry AND whose `FileId`
+///   does not match `source_id` (ADR-0004).
+pub(super) fn prune_original_at(
+    base: &Path,
+    key: &str,
+    entries: &[Entry],
+    source_id: Option<crate::build::FileId>,
+) {
+    if !matches!(
+        crate::original::verify_real_dir_chain(
+            base,
+            &[".agentdrafter", "originals", key, "undo-states"]
+        ),
+        Ok(true)
+    ) {
+        return;
+    }
+    let store = base
+        .join(".agentdrafter")
+        .join("originals")
+        .join(key)
+        .join("undo-states");
+    let fates = fates(entries);
+    let needed: BTreeSet<&str> = entries
+        .iter()
+        .filter(|e| keeps_state(e, &fates) || e.state == Some(CommitState::Pending))
+        .flat_map(|e| e.files.iter().filter_map(|f| f.before.as_deref()))
+        .collect();
+    let Ok(listed) = fs::read_dir(&store) else {
+        return;
+    };
+    for item in listed.flatten() {
+        let name = item.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if !crate::original::is_sha256_hex(name_str) || needed.contains(name_str) {
+            continue;
+        }
+        let path = item.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            continue;
+        }
+        #[cfg(any(unix, windows))]
+        {
+            if source_id.is_some() && crate::original::regular_file_id_no_follow(&path) == source_id
+            {
+                continue;
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        let _ = source_id;
+        let _ = fs::remove_file(&path);
+    }
+    let _ = fs::remove_dir(&store);
+}
+
+/// Safely reads an undo state for an original DWG without following symlinks
+/// anywhere in `.agentdrafter/originals/<key>/undo-states/<sha256>`.
+pub(super) fn undo_state_original_at(
+    base: &Path,
+    key: &str,
+    source: &Path,
+    source_id: Option<crate::build::FileId>,
+    print: &str,
+) -> Option<Vec<u8>> {
+    if !crate::original::is_sha256_hex(print) {
+        return None;
+    }
+    if !matches!(
+        crate::original::verify_real_dir_chain(
+            base,
+            &[".agentdrafter", "originals", key, "undo-states"]
+        ),
+        Ok(true)
+    ) {
+        return None;
+    }
+    let path = base
+        .join(".agentdrafter")
+        .join("originals")
+        .join(key)
+        .join("undo-states")
+        .join(print);
+    match crate::original::read_regular_no_follow(source, source_id, &path) {
+        Ok(crate::original::NoFollowRead::File(bytes)) if fingerprint(&bytes) == print => {
+            Some(bytes)
+        }
+        _ => None,
+    }
 }
 
 /// The bytes of the file at `path`, or `None` when there is none.

@@ -12,17 +12,19 @@
 //! - The original DWG itself is NEVER written to, modified, or unlinked by
 //!   `change`, `undo`, `accept`, or crash recovery.
 //! - Symbolic links and Windows reparse points are NEVER followed, modified,
-//!   or removed.
-//! - `--dry-run` on `change` never acquires a write lock or creates
-//!   `.agentdrafter/originals/`, and refuses if an unfinished pending entry or
-//!   torn last line exists.
+//!   or removed (including `.agentdrafter`, `originals`, `<safe-stem>`,
+//!   `undo-states`, `journal.jsonl`, `journal.lock`, and revision files).
+//! - `--dry-run` on `change`, `undo`, and `accept` never acquires a write lock,
+//!   never runs crash recovery, never creates `.agentdrafter/originals/`, and
+//!   refuses if an unfinished pending entry or torn last line exists.
 //! - `journal` on an original with no journal yet returns an empty report
 //!   without creating any folder or file.
 //! - Issued-stamp lookup for `render` and `plot` is strictly read-only.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
@@ -32,25 +34,30 @@ use crate::build::{is_same_file, FileId};
 use crate::check::check_dwg_bytes;
 use crate::error::{Error, ErrorCode};
 use crate::interface::Interface;
-use crate::original::{is_dwg, on_disk_path, read_regular_no_follow, stem_of, NoFollowRead};
+use crate::original::{
+    ensure_real_dir_chain, is_dwg, on_disk_path, read_regular_no_follow,
+    read_regular_no_follow_with_id, stem_of, verify_real_dir_chain, NoFollowRead,
+    NoFollowReadWithId,
+};
 use crate::reply::Reply;
+use crate::revise::REVISION_CHANGES_EXTENSION;
 use crate::settings::Settings;
 use crate::stamp::fingerprint;
 
 use super::accept::{
-    failed_words, issued, moved_on, relative_to, rule_text, AcceptReport, AcceptRequest,
-    StampRevision,
+    failed_words, issued, moved_on, rule_text, AcceptReport, AcceptRequest, StampRevision,
 };
 use super::commit::{
-    add_line, commit_new_files, commit_with_options, cut_back, moved_aside, restore_with_options,
-    Ahead, Before, NewFile, Replacement,
+    add_line_original, commit_new_files, commit_original_replacements, cut_back_checked,
+    moved_aside_original, restore_original, Ahead, Before, ExpectedTarget, NewFile, OriginalGuard,
+    Replacement,
 };
 use super::journal::{
     build_journal_report, code_text, fates, in_place, keeps_state, left_pending, line_of, listed,
-    lock_at, next_number, pending, prune_at, read_entries_at, read_journal_at, read_text_at,
-    state_line, undo_state_at, CheckFailed, CommitState, Entry, EntryKind, FileIssued, FileState,
-    JournalReport, JournalRequest, ObjectChanged, OriginalRevisionMeta, Refusal, SheetFailed,
-    KEPT_UNDO_STATES,
+    lock_original, next_number, parse_journal_bytes, pending, prune_original_at, state_line,
+    undo_state_original_at, CheckFailed, CommitState, Entry, EntryKind, FileIssued, FileState,
+    JournalRead, JournalReport, JournalRequest, ObjectChanged, OriginalRevisionMeta, Refusal,
+    SheetFailed, KEPT_UNDO_STATES,
 };
 use super::recover::{kind_words, RolledBack};
 use super::undo::{
@@ -66,9 +73,15 @@ pub const ORIGINALS_JOURNAL_FOLDER: &str = ".agentdrafter/originals";
 pub(crate) struct OriginalJournal {
     /// The original DWG path as requested by the caller (for display).
     pub source: PathBuf,
+    /// Canonical on-disk path of the original DWG.
+    pub resolved_source: PathBuf,
+    /// Canonical parent folder of the original DWG.
+    pub orig_dir_real: PathBuf,
     /// Canonical sheet name of the original (its on-disk stem).
     pub sheet: String,
-    /// Parent folder of `source` (relative/display base for paths).
+    /// Collision-free folder key (`<readable>-<hash12>`).
+    pub key: String,
+    /// Parent folder of `source` as requested by the caller (for display).
     pub base_dir: PathBuf,
     /// `<dir>/journal.jsonl`
     pub journal_file: PathBuf,
@@ -121,6 +134,53 @@ pub(crate) fn original_key(resolved: &Path) -> String {
     }
 }
 
+/// Resolves `path` to a real absolute path by canonicalizing its deepest
+/// existing ancestor (usually its parent folder) and re-appending remaining
+/// components verbatim — never lexically collapsing `..` across symlinks.
+fn resolve_output_real(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name() else {
+        return fs::canonicalize(path)
+            .or_else(|_| std::path::absolute(path))
+            .unwrap_or_else(|_| path.to_path_buf());
+    };
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if let Ok(canon_parent) = fs::canonicalize(parent) {
+        return canon_parent.join(file_name);
+    }
+    let mut tail = vec![file_name.to_os_string()];
+    let mut cur = parent;
+    loop {
+        if let Ok(canon) = fs::canonicalize(cur) {
+            let mut out = canon;
+            for part in tail.into_iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        let Some(name) = cur.file_name() else {
+            break;
+        };
+        tail.push(name.to_os_string());
+        match cur.parent().filter(|p| !p.as_os_str().is_empty()) {
+            Some(p) => cur = p,
+            None => {
+                if let Ok(cwd) = std::env::current_dir().and_then(fs::canonicalize) {
+                    let mut out = cwd;
+                    for part in tail.into_iter().rev() {
+                        out.push(part);
+                    }
+                    return out;
+                }
+                break;
+            }
+        }
+    }
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 impl OriginalJournal {
     /// Constructs an [`OriginalJournal`] from an original DWG already opened
     /// and resolved via [`on_disk_path`]. Never creates any folder or file.
@@ -132,13 +192,25 @@ impl OriginalJournal {
             .filter(|p| !p.as_os_str().is_empty())
             .map(Path::to_path_buf)
             .unwrap_or_default();
-        let dir = base_dir.join(ORIGINALS_JOURNAL_FOLDER).join(key);
+        let orig_dir_real = resolved
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .and_then(|p| fs::canonicalize(p).ok().or_else(|| Some(p.to_path_buf())))
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .and_then(fs::canonicalize)
+                    .unwrap_or_else(|_| PathBuf::from("."))
+            });
+        let dir = base_dir.join(ORIGINALS_JOURNAL_FOLDER).join(&key);
         let journal_file = dir.join("journal.jsonl");
         let lock_file = dir.join("journal.lock");
         let undo_states_dir = dir.join("undo-states");
         Self {
             source: source.to_path_buf(),
+            resolved_source: resolved.to_path_buf(),
+            orig_dir_real,
             sheet,
+            key,
             base_dir,
             journal_file,
             lock_file,
@@ -166,29 +238,70 @@ impl OriginalJournal {
         Ok(Self::from_opened(source, &resolved, source_id))
     }
 
-    /// Acquires this original's exclusive journal lock (`journal.lock`),
-    /// creating its `.agentdrafter/originals/<key>/` folder if needed.
-    pub(crate) fn lock(&self) -> Result<File, Error> {
-        lock_at(&self.lock_file)
-    }
-
-    /// Computes a path relative to `self.base_dir` (with `/` separators) for
-    /// recording in `journal.jsonl`.
-    pub(crate) fn rel_path(&self, path: &Path) -> String {
-        if self.base_dir.is_absolute() == path.is_absolute() {
-            relative_to(&self.base_dir, path)
+    fn base_dir_for_fs(&self) -> &Path {
+        if self.base_dir.as_os_str().is_empty() {
+            Path::new(".")
         } else {
-            let base_abs = if self.base_dir.as_os_str().is_empty() {
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-            } else {
-                std::path::absolute(&self.base_dir).unwrap_or_else(|_| self.base_dir.clone())
-            };
-            let path_abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-            relative_to(&base_abs, &path_abs)
+            &self.base_dir
         }
     }
 
-    /// Resolves a path recorded in `journal.jsonl` against `self.base_dir`.
+    fn guard(&self) -> OriginalGuard<'_> {
+        OriginalGuard {
+            key: &self.key,
+            base_dir: self.base_dir_for_fs(),
+            source: &self.source,
+            source_id: self.source_id,
+        }
+    }
+
+    /// Acquires this original's exclusive journal lock (`journal.lock`),
+    /// verifying every directory component is a real directory (not a symlink)
+    /// and creating `.agentdrafter/originals/<key>/` if needed.
+    pub(crate) fn lock(&self) -> Result<File, Error> {
+        lock_original(
+            self.base_dir_for_fs(),
+            &self.key,
+            &self.lock_file,
+            self.source_id,
+        )
+    }
+
+    /// Whether `path`, resolved against its real canonical parent directory,
+    /// lies inside the original DWG's canonical folder.
+    pub(crate) fn is_inside_orig_dir(&self, path: &Path) -> bool {
+        resolve_output_real(path)
+            .strip_prefix(&self.orig_dir_real)
+            .is_ok()
+    }
+
+    /// Computes the path to record in `journal.jsonl` for an output file:
+    /// - if the resolved output path (canonical parent + filename, never
+    ///   collapsing `..` across symlinks) lies inside `self.orig_dir_real`,
+    ///   returns its clean relative path from `self.orig_dir_real` with `/`
+    ///   separators;
+    /// - otherwise returns the resolved canonical absolute path so `journal`,
+    ///   `undo`, `accept`, and crash recovery resolve it accurately from any
+    ///   working directory.
+    pub(crate) fn rel_path(&self, path: &Path) -> String {
+        let resolved = resolve_output_real(path);
+        if let Ok(rel) = resolved.strip_prefix(&self.orig_dir_real) {
+            let parts: Vec<String> = rel
+                .components()
+                .filter_map(|c| match c {
+                    Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect();
+            if !parts.is_empty() {
+                return parts.join("/");
+            }
+        }
+        resolved.to_string_lossy().into_owned()
+    }
+
+    /// Resolves a path recorded in `journal.jsonl`: absolute paths are returned
+    /// verbatim; relative paths are joined onto `self.base_dir`.
     pub(crate) fn resolve_file(&self, rel: &str) -> PathBuf {
         let p = Path::new(rel);
         if p.is_absolute() || self.base_dir.as_os_str().is_empty() {
@@ -198,11 +311,151 @@ impl OriginalJournal {
         }
     }
 
+    /// Verifies the directory chain `.agentdrafter/originals/<key>` contains no
+    /// symlinks and checks whether `journal.jsonl` exists as a safe regular
+    /// file distinct from the original DWG.
+    fn journal_exists_checked(&self) -> Result<bool, Error> {
+        let dir_exists = verify_real_dir_chain(
+            self.base_dir_for_fs(),
+            &[".agentdrafter", "originals", &self.key],
+        )
+        .map_err(|e| {
+            Error::new(
+                ErrorCode::ReadFailed,
+                format!("cannot inspect the original's journal folder: {e}"),
+            )
+            .in_file(&self.journal_file)
+        })?;
+        if !dir_exists {
+            return Ok(false);
+        }
+        match fs::symlink_metadata(&self.journal_file) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(Error::new(
+                ErrorCode::ReadFailed,
+                format!("could not inspect the original's journal: {e}"),
+            )
+            .in_file(&self.journal_file)),
+            Ok(meta) if meta.file_type().is_symlink() => Err(Error::new(
+                ErrorCode::ReadFailed,
+                format!(
+                    "`{}` is a symbolic link; AgentDrafter never follows a symbolic link as a \
+                     journal",
+                    self.journal_file.display()
+                ),
+            )
+            .in_file(&self.journal_file)),
+            Ok(meta) if !meta.file_type().is_file() => Err(Error::new(
+                ErrorCode::ReadFailed,
+                format!("`{}` is not a regular file", self.journal_file.display()),
+            )
+            .in_file(&self.journal_file)),
+            Ok(_) => {
+                #[cfg(any(unix, windows))]
+                {
+                    let jid = crate::original::regular_file_id_no_follow(&self.journal_file);
+                    if self.source_id.is_some() && jid == self.source_id {
+                        return Err(Error::new(
+                            ErrorCode::BadValue,
+                            format!(
+                                "`{}` is the original DWG itself, which is never used as a journal \
+                                 (ADR-0004)",
+                                self.journal_file.display()
+                            ),
+                        )
+                        .in_file(&self.journal_file));
+                    }
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    /// Reads `journal.jsonl` strictly without following symlinks on any folder
+    /// component or on `journal.jsonl` itself, and refusing any file matching
+    /// the original DWG.
+    fn read_journal(&self) -> Result<Option<JournalRead>, Error> {
+        let dir_exists = verify_real_dir_chain(
+            self.base_dir_for_fs(),
+            &[".agentdrafter", "originals", &self.key],
+        )
+        .map_err(|e| {
+            Error::new(
+                ErrorCode::ReadFailed,
+                format!("cannot read the original's journal folder: {e}"),
+            )
+            .in_file(&self.journal_file)
+        })?;
+        if !dir_exists {
+            return Ok(None);
+        }
+        match read_regular_no_follow(&self.source, self.source_id, &self.journal_file) {
+            Ok(NoFollowRead::Missing) => Ok(None),
+            Ok(NoFollowRead::File(bytes)) => {
+                parse_journal_bytes(&self.journal_file, &bytes).map(Some)
+            }
+            Ok(NoFollowRead::Symlink) => Err(Error::new(
+                ErrorCode::ReadFailed,
+                format!(
+                    "`{}` is a symbolic link; AgentDrafter never follows a symbolic link as a \
+                     journal",
+                    self.journal_file.display()
+                ),
+            )
+            .in_file(&self.journal_file)),
+            Ok(NoFollowRead::NotRegular) => Err(Error::new(
+                ErrorCode::ReadFailed,
+                format!("`{}` is not a regular file", self.journal_file.display()),
+            )
+            .in_file(&self.journal_file)),
+            Ok(NoFollowRead::SameAsOriginal) => Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "`{}` is the original DWG itself, which is never used as a journal (ADR-0004)",
+                    self.journal_file.display()
+                ),
+            )
+            .in_file(&self.journal_file)),
+            Err(e) => Err(Error::new(
+                ErrorCode::ReadFailed,
+                format!("could not read the original's journal: {e}"),
+            )
+            .in_file(&self.journal_file)),
+        }
+    }
+
+    fn read_text(&self) -> Result<Option<(String, Vec<Entry>)>, Error> {
+        let Some(read) = self.read_journal()? else {
+            return Ok(None);
+        };
+        if let Some(torn) = read.torn {
+            return Err(Error::new(
+                ErrorCode::ReadFailed,
+                format!(
+                    "line {} of the original's journal was written only in part, by a process \
+                     that stopped while it wrote it",
+                    torn.line
+                ),
+            )
+            .at_position(torn.line, 1)
+            .in_file(&self.journal_file));
+        }
+        Ok(Some((read.text, read.entries)))
+    }
+
+    fn read_entries(&self) -> Result<Vec<Entry>, Error> {
+        Ok(self.read_text()?.map_or_else(Vec::new, |(_, e)| e))
+    }
+
+    fn prune(&self, entries: &[Entry]) {
+        prune_original_at(self.base_dir_for_fs(), &self.key, entries, self.source_id);
+    }
+
     /// Read-only check for `--dry-run`: refuses if the original's journal holds
     /// an unfinished pending entry or a torn last line, without acquiring any
     /// lock or creating any directory.
     pub(crate) fn refuse_unfinished(&self) -> Result<(), Error> {
-        let Some(read) = read_journal_at(&self.journal_file)? else {
+        let Some(read) = self.read_journal()? else {
             return Ok(());
         };
         let what = match (pending(&read.entries), &read.torn) {
@@ -237,7 +490,7 @@ impl OriginalJournal {
     /// lock or creating any directory when no journal exists or nothing is
     /// pending/torn.
     pub(crate) fn recover(&self) -> Result<Option<RolledBack>, Error> {
-        let Some(read) = read_journal_at(&self.journal_file)? else {
+        let Some(read) = self.read_journal()? else {
             return Ok(None);
         };
         if pending(&read.entries).is_none() && read.torn.is_none() {
@@ -250,14 +503,14 @@ impl OriginalJournal {
     /// Recovers any unfinished pending entry or torn last line while the caller
     /// already holds `self.lock()`.
     pub(crate) fn recover_locked(&self, _locked: &File) -> Result<Option<RolledBack>, Error> {
-        let Some(read) = read_journal_at(&self.journal_file)? else {
+        let Some(read) = self.read_journal()? else {
             return Ok(None);
         };
         let Some(entry) = pending(&read.entries) else {
             let Some(torn) = read.torn else {
                 return Ok(None);
             };
-            cut_back(&self.journal_file, torn.at).map_err(|e| {
+            cut_back_checked(&self.journal_file, torn.at, self.source_id).map_err(|e| {
                 self.cannot(
                     None,
                     &format!(
@@ -333,14 +586,19 @@ impl OriginalJournal {
             .iter()
             .map(|f| self.resolve_file(f))
             .collect();
-        let restored =
-            restore_with_options(entry.entry, &before, &self.undo_states_dir, &made, false)
-                .map_err(|e| {
-                    self.cannot(
-                        Some(entry),
-                        &format!("{}; nothing more was changed", e.message),
-                    )
-                })?;
+        let restored = restore_original(
+            entry.entry,
+            &before,
+            &self.undo_states_dir,
+            &made,
+            self.guard(),
+        )
+        .map_err(|e| {
+            self.cannot(
+                Some(entry),
+                &format!("{}; nothing more was changed", e.message),
+            )
+        })?;
 
         let rest = |what: String| {
             self.cannot(
@@ -352,7 +610,7 @@ impl OriginalJournal {
             )
         };
         if let Some(torn) = read.torn {
-            cut_back(&self.journal_file, torn.at).map_err(|e| {
+            cut_back_checked(&self.journal_file, torn.at, self.source_id).map_err(|e| {
                 rest(format!(
                     "line {} of the journal, written only in part after it, could not be cut off \
                      ({e})",
@@ -368,7 +626,7 @@ impl OriginalJournal {
                 after: r.back.clone(),
             })
             .collect();
-        add_line(
+        add_line_original(
             &self.journal_file,
             &state_line(
                 Some(&read.text),
@@ -377,10 +635,11 @@ impl OriginalJournal {
                 files,
             ),
             &format!("the line that marks entry {} rolled back", entry.entry),
+            self.guard(),
         )
         .map_err(|e| rest(e.message))?;
-        if let Ok(entries) = read_entries_at(&self.journal_file) {
-            prune_at(&self.undo_states_dir, &entries);
+        if let Ok(entries) = self.read_entries() {
+            self.prune(&entries);
         }
 
         let files: Vec<FileUndone> = restored
@@ -441,7 +700,7 @@ impl OriginalJournal {
         meta: OriginalRevisionMeta,
         new_files: &[(&Path, &[u8], &'static str)],
     ) -> Result<u64, Error> {
-        let (text, entries_before) = read_text_at(&self.journal_file)?.unzip();
+        let (text, entries_before) = self.read_text()?.unzip();
         let entries_before = entries_before.unwrap_or_default();
         if let Some(entry) = pending(&entries_before) {
             return Err(left_pending(entry));
@@ -504,15 +763,15 @@ impl OriginalJournal {
                 folders_made: &[],
             },
             &placed_specs,
-            self.source_id,
+            self.guard(),
         );
         if committed.is_ok() {
             let mut entries = entries_before;
             entry.state = Some(CommitState::Done);
             entries.push(entry);
-            prune_at(&self.undo_states_dir, &entries);
-        } else if let Ok(entries) = read_entries_at(&self.journal_file) {
-            prune_at(&self.undo_states_dir, &entries);
+            self.prune(&entries);
+        } else if let Ok(entries) = self.read_entries() {
+            self.prune(&entries);
         }
         committed?;
         Ok(number)
@@ -527,7 +786,7 @@ impl OriginalJournal {
         change_set: &Value,
         error: &Error,
     ) -> Option<u64> {
-        let read = read_text_at(&self.journal_file).ok()?;
+        let read = self.read_text().ok()?;
         let (text, entries) = read.unzip();
         let entries = entries.unwrap_or_default();
         if pending(&entries).is_some() {
@@ -549,7 +808,7 @@ impl OriginalJournal {
             ..Entry::new(number, EntryKind::FailedAttempt)
         };
         let line = line_of(text.as_deref(), &entry);
-        add_line(&self.journal_file, &line, "a failed attempt")
+        add_line_original(&self.journal_file, &line, "a failed attempt", self.guard())
             .ok()
             .map(|()| number)
     }
@@ -609,7 +868,8 @@ impl OriginalJournal {
                 .flatten()
                 .map(String::as_str)
                 .collect();
-            if found.is_none() && moved_aside(entry.entry, &path, j, &prints) {
+            if found.is_none() && moved_aside_original(entry.entry, self.guard(), &path, j, &prints)
+            {
                 continue;
             }
             let how = if found.is_some() {
@@ -654,7 +914,7 @@ pub(super) fn journal_original(request: &JournalRequest) -> Reply<JournalReport>
         Ok(rb) => rb,
         Err(error) => return Reply::from(Err(error)),
     };
-    let entries = match read_entries_at(&oj.journal_file) {
+    let entries = match oj.read_entries() {
         Ok(entries) => entries,
         Err(error) => return Reply::from(Err(error)).after(rolled_back),
     };
@@ -682,24 +942,42 @@ pub(super) fn undo_original(request: &UndoRequest) -> Reply<UndoReport> {
         Ok(oj) => oj,
         Err(error) => return Reply::from(Err(error)),
     };
-    // Acquire lock only on non-dry-run when a journal exists; recover under
-    // the lock so no concurrent revision can interleave.
-    let (locked, rolled_back) = if !request.dry_run && oj.journal_file.exists() {
-        let lock = match oj.lock() {
-            Ok(l) => l,
-            Err(error) => return Reply::from(Err(error)),
-        };
-        match oj.recover_locked(&lock) {
-            Ok(rb) => (Some(lock), rb),
-            Err(error) => return Reply::from(Err(error)),
+    if request.dry_run {
+        if let Err(error) = oj.refuse_unfinished() {
+            return Reply::from(Err(error));
         }
-    } else {
-        match oj.recover() {
-            Ok(rb) => (None, rb),
-            Err(error) => return Reply::from(Err(error)),
+        return Reply::from(undo_original_inner(&oj, request, None));
+    }
+    // Never create `.agentdrafter/originals/` or `journal.lock` when no
+    // journal exists yet.
+    match oj.journal_exists_checked() {
+        Ok(false) => {
+            let empty = BTreeMap::new();
+            return Reply::from(Err(Error::new(
+                ErrorCode::UnknownName,
+                format!(
+                    "the original's journal has no entry {}; {}",
+                    request.change_set,
+                    can_undo(&[], &empty)
+                ),
+            )
+            .at_field("change_set")));
         }
+        Ok(true) => {}
+        Err(error) => return Reply::from(Err(error)),
+    }
+    // Hold `journal.lock` continuously across recovery -> reading journal ->
+    // verifying files -> committing undo -> pruning so no concurrent revision
+    // can interleave.
+    let lock = match oj.lock() {
+        Ok(l) => l,
+        Err(error) => return Reply::from(Err(error)),
     };
-    Reply::from(undo_original_inner(&oj, request, locked.as_ref())).after(rolled_back)
+    let rolled_back = match oj.recover_locked(&lock) {
+        Ok(rb) => rb,
+        Err(error) => return Reply::from(Err(error)),
+    };
+    Reply::from(undo_original_inner(&oj, request, Some(&lock))).after(rolled_back)
 }
 
 fn undo_original_inner(
@@ -707,7 +985,7 @@ fn undo_original_inner(
     request: &UndoRequest,
     locked: Option<&File>,
 ) -> Result<UndoReport, Error> {
-    let (text, entries) = read_text_at(&oj.journal_file)?.unzip();
+    let (text, entries) = oj.read_text()?.unzip();
     let entries = entries.unwrap_or_default();
     if let Some(entry) = pending(&entries) {
         return Err(left_pending(entry));
@@ -859,14 +1137,16 @@ fn undo_original_inner(
         }
     }
 
-    // Read and verify every file without following symlinks and refusing the
-    // original DWG itself (ADR-0004).
+    // Read and verify every file without following symlinks, refusing the
+    // original DWG itself (ADR-0004), and capturing each file's opened `FileId`
+    // for pre-unlink re-verification.
     let mut now_bytes: Vec<Option<Vec<u8>>> = Vec::with_capacity(plans.len());
     let mut now_prints: Vec<Option<String>> = Vec::with_capacity(plans.len());
+    let mut now_targets: Vec<ExpectedTarget> = Vec::with_capacity(plans.len());
     for plan in &plans {
         let full = oj.resolve_file(&plan.path);
-        match read_regular_no_follow(&oj.source, oj.source_id, &full) {
-            Ok(NoFollowRead::SameAsOriginal) => {
+        match read_regular_no_follow_with_id(&oj.source, oj.source_id, &full) {
+            Ok(NoFollowReadWithId::SameAsOriginal) => {
                 return Err(Error::new(
                     ErrorCode::BadValue,
                     format!(
@@ -878,7 +1158,7 @@ fn undo_original_inner(
                 .in_file(&full)
                 .at_field("change_set"));
             }
-            Ok(NoFollowRead::Symlink) => {
+            Ok(NoFollowReadWithId::Symlink) => {
                 return Err(Error::new(
                     ErrorCode::ChangedByHand,
                     format!(
@@ -891,7 +1171,7 @@ fn undo_original_inner(
                 .in_file(&full)
                 .at_field("change_set"));
             }
-            Ok(NoFollowRead::NotRegular) => {
+            Ok(NoFollowReadWithId::NotRegular) => {
                 return Err(Error::new(
                     ErrorCode::ChangedByHand,
                     format!(
@@ -903,7 +1183,7 @@ fn undo_original_inner(
                 .in_file(&full)
                 .at_field("change_set"));
             }
-            Ok(NoFollowRead::File(bytes)) => {
+            Ok(NoFollowReadWithId::File(bytes, file_id)) => {
                 let print = Some(fingerprint(&bytes));
                 if print != plan.left {
                     let how = if plan.left.is_none() {
@@ -919,8 +1199,9 @@ fn undo_original_inner(
                 }
                 now_prints.push(print);
                 now_bytes.push(Some(bytes));
+                now_targets.push(ExpectedTarget::Existing(file_id));
             }
-            Ok(NoFollowRead::Missing) => {
+            Ok(NoFollowReadWithId::Missing) => {
                 if plan.left.is_some() {
                     changed.push(format!(
                         "`{}` (taken away since change set {} left it)",
@@ -930,6 +1211,7 @@ fn undo_original_inner(
                 }
                 now_prints.push(None);
                 now_bytes.push(None);
+                now_targets.push(ExpectedTarget::Absent);
             }
             Err(e) => {
                 return Err(Error::new(
@@ -959,25 +1241,40 @@ fn undo_original_inner(
     }
 
     let mut replacements: Vec<Replacement> = Vec::new();
+    let mut replacement_targets: Vec<ExpectedTarget> = Vec::new();
     let mut states: Vec<FileState> = Vec::new();
     let mut files: Vec<FileUndone> = Vec::new();
     let mut undo_state_blobs: Vec<(String, Vec<u8>)> = Vec::new();
-    for ((plan, print), current_bytes) in plans.iter().zip(&now_prints).zip(now_bytes) {
+    for (((plan, print), current_bytes), target_id) in plans
+        .iter()
+        .zip(&now_prints)
+        .zip(now_bytes)
+        .zip(now_targets)
+    {
         if *print == plan.target {
             continue;
         }
         let target_bytes = match &plan.target {
-            Some(target) => Some(undo_state_at(&oj.undo_states_dir, target).ok_or_else(|| {
-                Error::new(
-                    ErrorCode::ReadFailed,
-                    format!(
-                        "change set {wanted} cannot be undone: the undo state of `{}` is missing \
-                         or damaged; nothing was changed",
-                        oj.resolve_file(&plan.path).display()
-                    ),
+            Some(target) => Some(
+                undo_state_original_at(
+                    oj.base_dir_for_fs(),
+                    &oj.key,
+                    &oj.source,
+                    oj.source_id,
+                    target,
                 )
-                .in_file(&oj.undo_states_dir.join(target))
-            })?),
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::ReadFailed,
+                        format!(
+                            "change set {wanted} cannot be undone: the undo state of `{}` is \
+                             missing or damaged; nothing was changed",
+                            oj.resolve_file(&plan.path).display()
+                        ),
+                    )
+                    .in_file(&oj.undo_states_dir.join(target))
+                })?,
+            ),
             None => None,
         };
         if let (Some(p), Some(b)) = (print, current_bytes) {
@@ -1002,6 +1299,7 @@ fn undo_original_inner(
             bytes: target_bytes,
             what: "a revision file the undo removes",
         });
+        replacement_targets.push(target_id);
     }
 
     let undid: Vec<u64> = stack.iter().rev().map(|e| e.entry).collect();
@@ -1019,30 +1317,78 @@ fn undo_original_inner(
         });
     }
 
-    // Commit write-ahead undo while holding the journal lock: save current
-    // revision files' bytes into `undo-states/` first so a killed undo can be
-    // rolled back byte-for-byte, then remove the revision files, then mark
-    // done and prune undo states.
-    let _owned_lock;
-    let _locked_ref = match locked {
-        Some(l) => l,
-        None => {
-            _owned_lock = oj.lock()?;
-            &_owned_lock
-        }
-    };
+    debug_assert!(
+        locked.is_some(),
+        "non-dry-run undo must hold journal.lock from before reading the journal"
+    );
+    let _ = locked;
+
+    // Ensure `undo-states` is a real non-symlink directory before staging
+    // backup undo states into it.
+    if !undo_state_blobs.is_empty() {
+        ensure_real_dir_chain(
+            oj.base_dir_for_fs(),
+            &[".agentdrafter", "originals", &oj.key, "undo-states"],
+        )
+        .map_err(|e| {
+            Error::new(
+                ErrorCode::WriteFailed,
+                format!("could not verify the original's undo-states folder: {e}"),
+            )
+            .in_file(&oj.undo_states_dir)
+        })?;
+    }
+
     let number = next_number(&entries);
     let mut placing: Vec<Replacement> = Vec::new();
+    let mut placing_targets: Vec<ExpectedTarget> = Vec::new();
     for (print, bytes) in undo_state_blobs {
         let state_path = oj.undo_states_dir.join(&print);
-        if state_path.is_file() || placing.iter().any(|r| r.path == state_path) {
+        if placing.iter().any(|r| r.path == state_path) {
             continue;
         }
-        placing.push(Replacement {
-            path: state_path,
-            bytes: Some(bytes),
-            what: "an undo state",
-        });
+        match read_regular_no_follow(&oj.source, oj.source_id, &state_path) {
+            Ok(NoFollowRead::File(existing)) if fingerprint(&existing) == print => continue,
+            Ok(NoFollowRead::Missing) => {
+                placing.push(Replacement {
+                    path: state_path,
+                    bytes: Some(bytes),
+                    what: "an undo state",
+                });
+                placing_targets.push(ExpectedTarget::Absent);
+            }
+            Ok(NoFollowRead::File(_)) => {
+                // Corrupt undo state file: refuse rather than silently overwriting.
+                return Err(Error::new(
+                    ErrorCode::WriteFailed,
+                    format!(
+                        "existing undo state `{}` does not match its SHA-256; nothing was changed",
+                        state_path.display()
+                    ),
+                )
+                .in_file(&state_path));
+            }
+            Ok(NoFollowRead::Symlink | NoFollowRead::NotRegular | NoFollowRead::SameAsOriginal) => {
+                return Err(Error::new(
+                    ErrorCode::WriteFailed,
+                    format!(
+                        "unsafe entry at undo state `{}`; nothing was changed",
+                        state_path.display()
+                    ),
+                )
+                .in_file(&state_path));
+            }
+            Err(e) => {
+                return Err(Error::new(
+                    ErrorCode::WriteFailed,
+                    format!(
+                        "could not inspect undo state `{}`: {e}",
+                        state_path.display()
+                    ),
+                )
+                .in_file(&state_path));
+            }
+        }
     }
     let before: Vec<Before> = states
         .iter()
@@ -1052,6 +1398,7 @@ fn undo_original_inner(
         })
         .collect();
     placing.extend(replacements);
+    placing_targets.extend(replacement_targets);
     let mut undo_entry = Entry {
         undid: undid.clone(),
         files: states,
@@ -1061,7 +1408,7 @@ fn undo_original_inner(
     let pending_line = line_of(text.as_deref(), &undo_entry);
     let done_line = state_line(None, number, CommitState::Done, Vec::new());
 
-    let committed = commit_with_options(
+    let committed = commit_original_replacements(
         &Ahead {
             journal: &oj.journal_file,
             entry: number,
@@ -1072,15 +1419,16 @@ fn undo_original_inner(
             folders_made: &[],
         },
         &placing,
-        false,
+        &placing_targets,
+        oj.guard(),
     );
     if committed.is_ok() {
         let mut entries_after = entries;
         undo_entry.state = Some(CommitState::Done);
         entries_after.push(undo_entry);
-        prune_at(&oj.undo_states_dir, &entries_after);
-    } else if let Ok(entries_now) = read_entries_at(&oj.journal_file) {
-        prune_at(&oj.undo_states_dir, &entries_now);
+        oj.prune(&entries_after);
+    } else if let Ok(entries_now) = oj.read_entries() {
+        oj.prune(&entries_now);
     }
     committed?;
 
@@ -1112,22 +1460,49 @@ pub(super) fn accept_original(
         Ok(oj) => oj,
         Err(error) => return Reply::from(Err(error)),
     };
-    let (locked, rolled_back) = if !request.dry_run && oj.journal_file.exists() {
-        let lock = match oj.lock() {
-            Ok(l) => l,
-            Err(error) => return Reply::from(Err(error)),
+    if request.dry_run {
+        if let Err(error) = oj.refuse_unfinished() {
+            return Reply::from(Err(error));
+        }
+        return match accept_original_inner(&oj, request, settings, via, None) {
+            Ok(OriginalAccepted::Done(report)) => Reply::from(Ok(report)),
+            Ok(OriginalAccepted::ChecksFailed(report, error)) => Reply::partly(report, error),
+            Err(error) => Reply::from(Err(error)),
         };
-        match oj.recover_locked(&lock) {
-            Ok(rb) => (Some(lock), rb),
-            Err(error) => return Reply::from(Err(error)),
+    }
+    // Never create `.agentdrafter/originals/` or `journal.lock` when no
+    // journal exists yet.
+    match oj.journal_exists_checked() {
+        Ok(false) => {
+            if let Some(seen) = request.newest_seen {
+                if seen != 0 {
+                    return Reply::from(Err(moved_on(&[], seen, 0)));
+                }
+            }
+            return Reply::from(Err(Error::new(
+                ErrorCode::NothingToAccept,
+                format!(
+                    "there is nothing to accept: no revision of `{}` is in place to issue; \
+                     nothing was issued",
+                    oj.source.display()
+                ),
+            )));
         }
-    } else {
-        match oj.recover() {
-            Ok(rb) => (None, rb),
-            Err(error) => return Reply::from(Err(error)),
-        }
+        Ok(true) => {}
+        Err(error) => return Reply::from(Err(error)),
+    }
+    // Hold `journal.lock` continuously across recovery -> reading journal ->
+    // verifying revision DWGs -> checking -> committing accept so no concurrent
+    // revision can interleave.
+    let lock = match oj.lock() {
+        Ok(l) => l,
+        Err(error) => return Reply::from(Err(error)),
     };
-    let reply = match accept_original_inner(&oj, request, settings, via, locked.as_ref()) {
+    let rolled_back = match oj.recover_locked(&lock) {
+        Ok(rb) => rb,
+        Err(error) => return Reply::from(Err(error)),
+    };
+    let reply = match accept_original_inner(&oj, request, settings, via, Some(&lock)) {
         Ok(OriginalAccepted::Done(report)) => Reply::from(Ok(report)),
         Ok(OriginalAccepted::ChecksFailed(report, error)) => Reply::partly(report, error),
         Err(error) => Reply::from(Err(error)),
@@ -1142,7 +1517,7 @@ fn accept_original_inner(
     via: Interface,
     locked: Option<&File>,
 ) -> Result<OriginalAccepted, Error> {
-    let (text, entries) = read_text_at(&oj.journal_file)?.unzip();
+    let (text, entries) = oj.read_text()?.unzip();
     let entries = entries.unwrap_or_default();
     if let Some(entry) = pending(&entries) {
         return Err(left_pending(entry));
@@ -1328,14 +1703,12 @@ fn accept_original_inner(
         return Ok(OriginalAccepted::Done(report));
     }
 
-    let _owned_lock;
-    let _locked_ref = match locked {
-        Some(l) => l,
-        None => {
-            _owned_lock = oj.lock()?;
-            &_owned_lock
-        }
-    };
+    debug_assert!(
+        locked.is_some(),
+        "non-dry-run accept must hold journal.lock from before reading the journal"
+    );
+    let _ = locked;
+
     let number = next_number(&entries);
     if number != newest + 1 {
         return Err(Error::new(
@@ -1358,7 +1731,7 @@ fn accept_original_inner(
     let pending_line = line_of(text.as_deref(), &accept_entry);
     let done_line = state_line(None, number, CommitState::Done, Vec::new());
 
-    commit_with_options(
+    commit_original_replacements(
         &Ahead {
             journal: &oj.journal_file,
             entry: number,
@@ -1369,7 +1742,8 @@ fn accept_original_inner(
             folders_made: &[],
         },
         &[],
-        false,
+        &[],
+        oj.guard(),
     )?;
 
     report.journal_entry = Some(number);
@@ -1412,42 +1786,104 @@ fn original_issues_words(report: &AcceptReport) -> String {
 
 /// Strictly read-only lookup for `render <rev.dwg>` and `plot <rev.dwg>`:
 /// checks whether `dwg` (with bytes `bytes`) matches a finished `accept` entry
-/// in its parent folder's `.agentdrafter/originals/*/journal.jsonl`.
+/// in either:
+/// 1. its parent folder's `.agentdrafter/originals/*/journal.jsonl`, or
+/// 2. when `--output` placed the revision outside the original's folder, the
+///    original's journal referenced by the sibling `<rev>.changes.json`
+///    `original_path` field.
 ///
-/// Never acquires a lock, never modifies or creates any file or directory.
+/// Never acquires a lock, never traverses symlinks, and never modifies or
+/// creates any file or directory.
 pub(super) fn issued_of_revision_dwg(dwg: &Path, bytes: &[u8]) -> Option<StampRevision> {
     let parent = dwg
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let originals_dir = parent.join(ORIGINALS_JOURNAL_FOLDER);
-    if !originals_dir.is_dir() {
+
+    let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
+
+    // 1. Journals directly beside `dwg` under `<parent>/.agentdrafter/originals/*/`.
+    if matches!(
+        verify_real_dir_chain(parent, &[".agentdrafter", "originals"]),
+        Ok(true)
+    ) {
+        let originals_dir = parent.join(ORIGINALS_JOURNAL_FOLDER);
+        if let Ok(read_dir) = fs::read_dir(&originals_dir) {
+            let mut subdirs: Vec<PathBuf> = read_dir
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink()))
+                .map(|e| e.path())
+                .collect();
+            subdirs.sort();
+            for sub in subdirs {
+                candidates.push((parent.to_path_buf(), sub.join("journal.jsonl")));
+            }
+        }
+    }
+
+    // 2. Cross-folder revision: inspect sibling `<rev>.changes.json` (read-only,
+    //    non-symlink) for `original_path`.
+    if let Some(stem) = dwg.file_stem().map(|s| s.to_string_lossy().into_owned()) {
+        let changes_path = dwg.with_file_name(format!("{stem}.{REVISION_CHANGES_EXTENSION}"));
+        if let Ok(NoFollowRead::File(changes_bytes)) =
+            read_regular_no_follow(dwg, None, &changes_path)
+        {
+            if let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&changes_bytes) {
+                if let Some(orig_str) = map.get("original_path").and_then(Value::as_str) {
+                    let orig_path = Path::new(orig_str);
+                    let orig_dir = orig_path
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(Path::new("."));
+                    let key = original_key(orig_path);
+                    if matches!(
+                        verify_real_dir_chain(orig_dir, &[".agentdrafter", "originals", &key]),
+                        Ok(true)
+                    ) {
+                        let jpath = orig_dir
+                            .join(ORIGINALS_JOURNAL_FOLDER)
+                            .join(&key)
+                            .join("journal.jsonl");
+                        if !candidates.iter().any(|(_, p)| p == &jpath) {
+                            candidates.push((orig_dir.to_path_buf(), jpath));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if candidates.is_empty() {
         return None;
     }
-    let mut subdirs: Vec<PathBuf> = fs::read_dir(&originals_dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    subdirs.sort();
 
     let print = fingerprint(bytes);
     let file_name = dwg.file_name().map(|n| n.to_string_lossy().into_owned());
     let mut best: Option<Entry> = None;
 
-    for sub in subdirs {
-        let journal_path = sub.join("journal.jsonl");
-        let Ok(Some(read)) = read_journal_at(&journal_path) else {
+    for (orig_dir, journal_path) in candidates {
+        let Ok(NoFollowRead::File(jbytes)) = read_regular_no_follow(dwg, None, &journal_path)
+        else {
+            continue;
+        };
+        let Ok(read) = parse_journal_bytes(&journal_path, &jbytes) else {
             continue;
         };
         let found = read.entries.iter().rev().find(|e| {
             e.kind == EntryKind::Accept
                 && e.finished()
                 && e.revision.iter().any(|f| {
-                    f.sha256 == print
-                        && (file_name.as_deref() == Some(f.path.as_str())
-                            || is_same_file(&parent.join(&f.path), dwg))
+                    if f.sha256 != print {
+                        return false;
+                    }
+                    let recorded_path = Path::new(&f.path);
+                    let resolved = if recorded_path.is_absolute() {
+                        recorded_path.to_path_buf()
+                    } else {
+                        orig_dir.join(recorded_path)
+                    };
+                    is_same_file(&resolved, dwg)
+                        || (orig_dir == parent && file_name.as_deref() == Some(f.path.as_str()))
                 })
         });
         if let Some(entry) = found {
@@ -1475,6 +1911,3 @@ pub(crate) fn test_pending_journal_path(source: &Path) -> Result<PathBuf, Error>
 pub(crate) fn test_original_key(resolved: &Path) -> String {
     original_key(resolved)
 }
-
-/// Ensures `io` is not unused when no OS-specific helper uses it directly.
-const _: fn() -> io::ErrorKind = || io::ErrorKind::NotFound;

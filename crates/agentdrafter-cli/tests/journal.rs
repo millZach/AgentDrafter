@@ -298,3 +298,153 @@ fn journal_and_undo_take_their_arguments_or_say_how() {
     assert!(json["result"]["commands"]["journal"]["usage"].is_string());
     assert!(json["result"]["commands"]["undo"]["usage"].is_string());
 }
+
+#[test]
+fn original_relative_output_works_across_different_working_directories() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("cli-journal")
+        .join("original-relative-output");
+    let _ = fs::remove_dir_all(&dir);
+    let drawings = dir.join("drawings");
+    let run_a = dir.join("run_a");
+    let run_b = dir.join("run_b");
+    let out_dir = run_a.join("out");
+    fs::create_dir_all(&drawings).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+    fs::create_dir_all(&run_b).unwrap();
+
+    // Build a made-up original DWG inside `drawings/A.dwg`.
+    fs::write(
+        drawings.join("A.yaml"),
+        "units: mm\npaper: [100, 100]\nobjects:\n  - line: {id: base, from: [5, 5, 0], to: [95, 5, 0]}\n",
+    )
+    .unwrap();
+    let (code, json) = agentdrafter(&["build", "A.yaml"], &drawings, None);
+    assert_eq!(code, 0, "{json}");
+    let orig_bytes = fs::read(drawings.join("A.dwg")).unwrap();
+
+    let edit = r#"{"operations": [{"op": "add_line", "from": [10, 20, 0], "to": [50, 20, 0]}]}"#;
+    fs::write(run_a.join("edits.json"), edit).unwrap();
+
+    // 1. From `run_a`, revise `../drawings/A.dwg` with relative `--output out/R1.dwg`!
+    let (code, json) = agentdrafter(
+        &[
+            "change",
+            "../drawings/A.dwg",
+            "edits.json",
+            "--output",
+            "out/R1.dwg",
+            "--no-pdf",
+        ],
+        &run_a,
+        None,
+    );
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["journal_entry"], 1);
+    assert!(out_dir.join("R1.dwg").is_file());
+    assert!(out_dir.join("R1.changes.json").is_file());
+
+    // 2. From a COMPLETELY DIFFERENT working directory (`run_b`), run `journal`
+    //    and `undo` on `../drawings/A.dwg` — must find and remove `run_a/out/R1.*`!
+    let (code, json) = agentdrafter(&["journal", "../drawings/A.dwg"], &run_b, None);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["can_undo"], json!([1]));
+
+    let (code, json) = agentdrafter(&["undo", "../drawings/A.dwg", "1"], &run_b, None);
+    assert_eq!(code, 0, "{json}");
+    assert!(!out_dir.join("R1.dwg").exists(), "R1.dwg must be removed");
+    assert!(
+        !out_dir.join("R1.changes.json").exists(),
+        "R1.changes.json must be removed"
+    );
+    assert_eq!(fs::read(drawings.join("A.dwg")).unwrap(), orig_bytes);
+
+    // 3. Revise again from `run_a` to `--output out/R2.dwg`, accept from `run_b`,
+    //    and render `R2.dwg` from `run_b` -> stamp must say `issued: true`!
+    let (code, json) = agentdrafter(
+        &[
+            "change",
+            "../drawings/A.dwg",
+            "edits.json",
+            "--output",
+            "out/R2.dwg",
+            "--no-pdf",
+        ],
+        &run_a,
+        None,
+    );
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["journal_entry"], 3);
+
+    let (code, json) = agentdrafter(
+        &["accept", "../drawings/A.dwg", "--newest-seen", "3"],
+        &run_b,
+        None,
+    );
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["journal_entry"], 4);
+
+    let (code, json) = agentdrafter(
+        &[
+            "render",
+            "../run_a/out/R2.dwg",
+            "--output",
+            "R2.png",
+            "--no-system-fonts",
+        ],
+        &run_b,
+        None,
+    );
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(
+        json["result"]["stamp"]["revision"]["issued"], true,
+        "{json}"
+    );
+    assert_eq!(json["result"]["stamp"]["revision"]["accept"], 4);
+
+    // 4. Crash recovery across working directories: kill `change` mid-commit in
+    //    `run_a` with `--output out/R3.dwg`, then recover from `run_b`!
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentdrafter"))
+        .args([
+            "change",
+            "../drawings/A.dwg",
+            "edits.json",
+            "--output",
+            "out/R3.dwg",
+            "--no-pdf",
+        ])
+        .current_dir(&run_a)
+        .env("AGENTDRAFTER_TEST_STOP_COMMIT_AT", "3")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (said, heard) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = said.send(line);
+        }
+    });
+    let line = heard
+        .recv_timeout(Duration::from_secs(120))
+        .expect("original change stops at seam");
+    assert!(
+        line.starts_with("agentdrafter: stopped the commit at step 3, once "),
+        "{line}"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(out_dir.join("R3.dwg").is_file());
+
+    let (code, json) = agentdrafter(&["journal", "../drawings/A.dwg"], &run_b, None);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["rolled_back"]["entry"], 5);
+    assert!(
+        !out_dir.join("R3.dwg").exists(),
+        "partial R3.dwg must be cleaned up by recovery from another CWD"
+    );
+    assert_eq!(fs::read(drawings.join("A.dwg")).unwrap(), orig_bytes);
+
+    let _ = fs::remove_dir_all(&dir);
+}
