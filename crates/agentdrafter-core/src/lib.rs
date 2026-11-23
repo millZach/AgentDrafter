@@ -127,9 +127,9 @@ pub use change::{
 };
 pub use change::{
     journal, undo, CommitState, Entry, EntryKind, FileState, FileUndone, JournalEntry,
-    JournalReport, JournalRequest, Refusal, RollBack, RolledBack, SheetFailed, UndoAction,
-    UndoReport, UndoRequest, UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, LOCK_FILE,
-    UNDO_STATES_FOLDER,
+    JournalReport, JournalRequest, OriginalRevisionMeta, Refusal, RollBack, RolledBack,
+    SheetFailed, UndoAction, UndoReport, UndoRequest, UndoState, JOURNAL_FILE, KEPT_UNDO_STATES,
+    LOCK_FILE, ORIGINALS_JOURNAL_FOLDER, UNDO_STATES_FOLDER,
 };
 pub use check::{
     check, check_with, BlockPart, CheckReport, CheckRequest, CheckedObject, Finding, Rule, Sides,

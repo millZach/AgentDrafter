@@ -2,7 +2,7 @@
 
 The journal is the record, in a drawing set's own folder, of every change set and every failed attempt (see [`CONTEXT.md`](../CONTEXT.md)). A later session, in a new process, reads it to see what was done, and undoes a change set from it as one, across every sheet it touched. It travels with the set's folder and needs no git: the folder need not be a repository.
 
-`agentdrafter journal <drawing-set-folder>` prints the journal, `agentdrafter undo <drawing-set-folder> <change-set> [--dry-run]` undoes a change set, and `agentdrafter accept <drawing-set-folder>` issues the working revision ([below](#accept)), each as one line of JSON. They are thin layers over the core's `journal`, `undo` and `accept_with`, which take and return plain data (ADR-0007).
+`agentdrafter journal <drawing-set-folder | original.dwg>` prints the journal, `agentdrafter undo <drawing-set-folder | original.dwg> <change-set> [--dry-run]` undoes a change set, and `agentdrafter accept <drawing-set-folder | original.dwg>` issues the working revision ([below](#accept)), each as one line of JSON. They are thin layers over the core's `journal`, `undo` and `accept_with`, which take and return plain data (ADR-0007). For revisions of an original DWG, each original keeps its own write-ahead journal beside it under `.agentdrafter/originals/<safe-stem>/` (`docs/revisions.md#journal-undo-accept-and-issued-stamps`).
 
 ## Where it is
 

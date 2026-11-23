@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,8 @@ use crate::change::operations::{
     op_error, read_change_set_for_original, AddTo, Body, Motion, OpPoint, Operation, Pattern,
     Table, TableOp, Target, TransformBy,
 };
-use crate::change::SnapResolved;
+use crate::change::original_journal::OriginalJournal;
+use crate::change::{HowChanged, ObjectChanged, OriginalRevisionMeta, SnapResolved};
 use crate::check::{check_dwg_bytes, CheckReport};
 use crate::description::{parse_added_object_json, parse_layer_patch_json, parse_new_layer_json};
 use crate::dwg::{
@@ -39,8 +40,8 @@ use crate::model::{DecodeReport, Object};
 #[cfg(any(unix, windows))]
 use crate::original::regular_file_id_no_follow;
 use crate::original::{
-    create_temp_beside_kind, dwg_loaded_from_drawing, handle_id, is_dwg, is_dwg_file, on_disk_path,
-    place_new_file, plural, stem_of, DwgLoaded, HANDLE_ID,
+    dwg_loaded_from_drawing, handle_id, is_dwg, is_dwg_file, on_disk_path, plural, DwgLoaded,
+    HANDLE_ID,
 };
 use crate::plot::{plot_dwg_bytes, plot_style, PlotReport};
 use crate::query::snap::one_point;
@@ -124,6 +125,10 @@ pub struct RevisionReport {
     pub sheet: String,
     /// Whether this was a dry run, which wrote nothing.
     pub dry_run: bool,
+    /// The journal entry that records this revision (or failed attempt);
+    /// `undo` takes a revision by it. Absent for a dry run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal_entry: Option<u64>,
     /// What the revision did (or would do, or why it was refused), in words.
     pub message: String,
     /// Metadata of the original DWG, read once and never modified.
@@ -247,24 +252,160 @@ pub fn revise(request: &ReviseRequest) -> Reply<RevisionReport> {
 /// Applies a change set to an original DWG, writing a new revision DWG (in the
 /// original's exact DWG version), its `.changes.json` change list & report, and
 /// (unless `no_pdf` or `dry_run`) its revision PDF. Never modifies the original.
+///
+/// On non-dry-run calls, acquires the original's journal lock, rolls back any
+/// unfinished pending commit first (reporting `rolled_back`), commits the
+/// revision write-ahead (`pending` -> atomic file placement -> `done`), and
+/// records a `failed_attempt` entry on refusal or error. On `--dry-run`, takes
+/// no write lock, writes no journal entry, and refuses if an unfinished
+/// pending commit exists.
 pub fn revise_with(request: &ReviseRequest, settings: &Settings) -> Reply<RevisionReport> {
-    match revise_inner(request, settings) {
-        Ok(reply) => reply,
-        Err(error) => Reply::from(Err(error)),
-    }
-}
-
-fn revise_inner(
-    request: &ReviseRequest,
-    settings: &Settings,
-) -> Result<Reply<RevisionReport>, Error> {
     let source = request.set.as_path();
     if !is_dwg_file(source) {
-        return Err(
-            Error::usage("revising an original requires a `.dwg` file, not a folder")
-                .in_file(source),
-        );
+        return Reply::from(Err(Error::usage(
+            "revising an original requires a `.dwg` file, not a folder",
+        )
+        .in_file(source)));
     }
+
+    // Single read of the original DWG: open once, capture identity, read bytes.
+    let mut source_file = match File::open(source) {
+        Ok(f) => f,
+        Err(e) => {
+            return Reply::from(Err(Error::new(
+                ErrorCode::ReadFailed,
+                format!("could not read the DWG: {e}"),
+            )
+            .in_file(source)));
+        }
+    };
+    #[cfg(any(unix, windows))]
+    let source_id = file_id_of_file(&source_file);
+    #[cfg(not(any(unix, windows)))]
+    let source_id: Option<FileId> = None;
+    let mut original_bytes = Vec::new();
+    if let Err(e) = source_file.read_to_end(&mut original_bytes) {
+        return Reply::from(Err(Error::new(
+            ErrorCode::ReadFailed,
+            format!("could not read the DWG: {e}"),
+        )
+        .in_file(source)));
+    }
+    drop(source_file);
+
+    let resolved_source = on_disk_path(source, source_id);
+    let oj = OriginalJournal::from_opened(source, &resolved_source, source_id);
+
+    if request.dry_run {
+        if let Err(error) = oj.refuse_unfinished() {
+            return Reply::from(Err(error));
+        }
+        return match prepare_revision(
+            request,
+            settings,
+            &oj,
+            &resolved_source,
+            &original_bytes,
+            source_id,
+        ) {
+            Ok(PreparedRevision::Ready(ready)) => Reply::from(Ok(ready.report)),
+            Ok(PreparedRevision::Refused(report, error)) => Reply::partly(*report, error),
+            Err(error) => Reply::from(Err(error)),
+        };
+    }
+
+    // Hold the original's journal lock across crash recovery -> revision
+    // computation -> atomic file placement -> journal `done` (or failed attempt).
+    let locked = match oj.lock() {
+        Ok(lock) => lock,
+        Err(error) => return Reply::from(Err(error)),
+    };
+    let rolled_back = match oj.recover_locked(&locked) {
+        Ok(rb) => rb,
+        Err(error) => return Reply::from(Err(error)),
+    };
+
+    let reply = match prepare_revision(
+        request,
+        settings,
+        &oj,
+        &resolved_source,
+        &original_bytes,
+        source_id,
+    ) {
+        Ok(PreparedRevision::Ready(mut ready)) => {
+            let mut new_files: Vec<(&Path, &[u8], &'static str)> = vec![
+                (&ready.paths.dwg, &ready.revision_bytes, "revision DWG"),
+                (
+                    &ready.paths.changes,
+                    &ready.change_list_bytes,
+                    "revision change list",
+                ),
+            ];
+            if let (Some(pdf_path), Some(pdf_bytes)) =
+                (ready.paths.pdf.as_deref(), ready.pdf_bytes.as_deref())
+            {
+                new_files.push((pdf_path, pdf_bytes, "revision PDF"));
+            }
+            let objects = objects_changed_from_outcomes(&ready.report.operations);
+            let rev_meta = ready
+                .report
+                .revision
+                .as_ref()
+                .expect("ready revision has metadata");
+            let meta = OriginalRevisionMeta {
+                original_file: ready.report.original.file.clone(),
+                original_sha256: ready.report.original.sha256.clone(),
+                dwg_version: rev_meta.dwg_version.clone(),
+                revision_dwg: oj.rel_path(&ready.paths.dwg),
+                revision_sha256: rev_meta.sha256.clone(),
+                allowed_loss: ready.report.allowed_loss,
+            };
+            match oj.commit_revision(&locked, &request.change_set, objects, meta, &new_files) {
+                Ok(entry_num) => {
+                    ready.report.journal_entry = Some(entry_num);
+                    Reply::from(Ok(ready.report))
+                }
+                Err(error) => {
+                    let _ = oj.record_failed_attempt(&locked, &request.change_set, &error);
+                    Reply::from(Err(error))
+                }
+            }
+        }
+        Ok(PreparedRevision::Refused(mut report, error)) => {
+            report.journal_entry = oj.record_failed_attempt(&locked, &request.change_set, &error);
+            Reply::partly(*report, error)
+        }
+        Err(error) => {
+            let _ = oj.record_failed_attempt(&locked, &request.change_set, &error);
+            Reply::from(Err(error))
+        }
+    };
+    reply.after(rolled_back)
+}
+
+enum PreparedRevision {
+    Ready(Box<ReadyRevision>),
+    Refused(Box<RevisionReport>, Error),
+}
+
+struct ReadyRevision {
+    paths: OutputPaths,
+    revision_bytes: Vec<u8>,
+    change_list_bytes: Vec<u8>,
+    pdf_bytes: Option<Vec<u8>>,
+    report: RevisionReport,
+}
+
+fn prepare_revision(
+    request: &ReviseRequest,
+    settings: &Settings,
+    oj: &OriginalJournal,
+    resolved_source: &Path,
+    original_bytes: &[u8],
+    source_id: Option<FileId>,
+) -> Result<PreparedRevision, Error> {
+    let source = request.set.as_path();
 
     // Validate plot style early (even in dry-run) so bad plot-style options fail
     // cleanly before doing any work.
@@ -281,31 +422,8 @@ fn revise_inner(
         Some(plot_style(request.plot_style.as_deref(), settings)?)
     };
 
-    // Single read of the original DWG: open once, capture identity, read bytes.
-    let mut source_file = File::open(source).map_err(|e| {
-        Error::new(
-            ErrorCode::ReadFailed,
-            format!("could not read the DWG: {e}"),
-        )
-        .in_file(source)
-    })?;
-    #[cfg(any(unix, windows))]
-    let source_id = file_id_of_file(&source_file);
-    #[cfg(not(any(unix, windows)))]
-    let source_id: Option<FileId> = None;
-    let mut original_bytes = Vec::new();
-    source_file.read_to_end(&mut original_bytes).map_err(|e| {
-        Error::new(
-            ErrorCode::ReadFailed,
-            format!("could not read the DWG: {e}"),
-        )
-        .in_file(source)
-    })?;
-    drop(source_file);
-
-    let original_sha256 = fingerprint(&original_bytes);
-    let resolved_source = on_disk_path(source, source_id);
-    let sheet_name = stem_of(&resolved_source);
+    let original_sha256 = fingerprint(original_bytes);
+    let sheet_name = oj.sheet.clone();
     let original_file_name = resolved_source
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -315,7 +433,7 @@ fn revise_inner(
     let paths = resolve_output_paths(source, source_id, request.output.as_deref(), request.no_pdf)?;
 
     // Strictly parse the original DWG into an in-place revision session.
-    let mut session = RevisionSession::open(&original_bytes, source)?;
+    let mut session = RevisionSession::open(original_bytes, source)?;
     let original_meta = RevisionFile {
         file: original_file_name,
         sha256: original_sha256,
@@ -337,6 +455,7 @@ fn revise_inner(
             source: source.display().to_string(),
             sheet: sheet_name,
             dry_run: request.dry_run,
+            journal_entry: None,
             message: detail.clone(),
             original: original_meta,
             revision: None,
@@ -354,7 +473,7 @@ fn revise_inner(
             checks: None,
         };
         let error = Error::new(ErrorCode::IncompleteDecode, detail).in_file(source);
-        return Ok(Reply::partly(report, error));
+        return Ok(PreparedRevision::Refused(Box::new(report), error));
     }
 
     // Refuse drawing-set-only change-set keys (`fixes`, `guide`) on originals.
@@ -408,7 +527,7 @@ fn revise_inner(
     // Serialize revision bytes in the original's DWG version, re-read strictly,
     // and run the structural diff self-check.
     let verified = session.serialize_and_verify(&paths.dwg)?;
-    if let Some(refusal) = enforce_verification_gates(
+    if let Some((report, error)) = enforce_verification_gates(
         source,
         &sheet_name,
         request.dry_run,
@@ -419,7 +538,7 @@ fn revise_inner(
         &outcomes,
         &verified,
     ) {
-        return Ok(refusal);
+        return Ok(PreparedRevision::Refused(Box::new(report), error));
     }
     let revision_bytes = verified.bytes;
     let unexpected_changes = verified.unexpected_changes;
@@ -487,17 +606,6 @@ fn revise_inner(
     })?;
     change_list_bytes.push(b'\n');
 
-    if !request.dry_run {
-        place_revision_files(
-            &paths.dwg,
-            &revision_bytes,
-            &paths.changes,
-            &change_list_bytes,
-            paths.pdf.as_deref().filter(|_| pdf_bytes.is_some()),
-            pdf_bytes.as_deref(),
-        )?;
-    }
-
     let message = revision_message(
         source,
         &paths.dwg,
@@ -514,6 +622,7 @@ fn revise_inner(
         source: source.display().to_string(),
         sheet: sheet_name,
         dry_run: request.dry_run,
+        journal_entry: None,
         message,
         original: original_meta,
         revision: Some(revision_meta),
@@ -530,7 +639,43 @@ fn revise_inner(
         unexpected_changes,
         checks,
     };
-    Ok(Reply::from(Ok(report)))
+    Ok(PreparedRevision::Ready(Box::new(ReadyRevision {
+        paths,
+        revision_bytes,
+        change_list_bytes,
+        pdf_bytes,
+        report,
+    })))
+}
+
+fn objects_changed_from_outcomes(outcomes: &[RevisionOperationOutcome]) -> Vec<ObjectChanged> {
+    let mut out: Vec<ObjectChanged> = Vec::new();
+    for outcome in outcomes {
+        if !outcome.copies.is_empty() {
+            for copy in &outcome.copies {
+                out.push(ObjectChanged {
+                    id: copy.id.clone(),
+                    how: HowChanged::Added,
+                });
+            }
+            continue;
+        }
+        let Some(id) = outcome.id.as_ref() else {
+            continue;
+        };
+        let how = if outcome.op == "delete" {
+            HowChanged::Deleted
+        } else if outcome.op.starts_with("add_") || outcome.op == "insert_block" {
+            HowChanged::Added
+        } else {
+            HowChanged::Changed
+        };
+        out.push(ObjectChanged {
+            id: id.clone(),
+            how,
+        });
+    }
+    out
 }
 
 // ── Output path selection & safe non-clobbering placement ─────────────────
@@ -677,169 +822,6 @@ fn refuse_existing_or_original(
         )
         .in_file(candidate)),
     }
-}
-
-struct StagedTemp {
-    path: PathBuf,
-    id: Option<FileId>,
-}
-
-/// Writes temp files beside each destination and atomically places them using
-/// non-clobbering renames. On failure, rolls back only files whose current
-/// non-followed file identity still matches the file we placed, and reports
-/// any rollback issues in the returned error.
-fn place_revision_files(
-    dwg_path: &Path,
-    dwg_bytes: &[u8],
-    changes_path: &Path,
-    changes_bytes: &[u8],
-    pdf_path: Option<&Path>,
-    pdf_bytes: Option<&[u8]>,
-) -> Result<(), Error> {
-    let dwg_tmp = write_temp(dwg_path, dwg_bytes, "rev", "revision DWG")?;
-    let changes_tmp = match write_temp(
-        changes_path,
-        changes_bytes,
-        "changes",
-        "revision change list",
-    ) {
-        Ok(t) => t,
-        Err(e) => {
-            return Err(with_rollback_notes(
-                e,
-                rollback_files(&[], &[&dwg_tmp.path]),
-            ))
-        }
-    };
-    let pdf_tmp = match (pdf_path, pdf_bytes) {
-        (Some(path), Some(bytes)) => match write_temp(path, bytes, "pdf", "revision PDF") {
-            Ok(t) => Some((path, t)),
-            Err(e) => {
-                return Err(with_rollback_notes(
-                    e,
-                    rollback_files(&[], &[&dwg_tmp.path, &changes_tmp.path]),
-                ));
-            }
-        },
-        _ => None,
-    };
-
-    if let Err(e) = place_new_file(
-        &dwg_tmp.path,
-        dwg_path,
-        "revision DWG",
-        ErrorCode::OutputExists,
-    ) {
-        let mut unplaced = vec![changes_tmp.path.as_path()];
-        if let Some((_, t)) = &pdf_tmp {
-            unplaced.push(t.path.as_path());
-        }
-        return Err(with_rollback_notes(e, rollback_files(&[], &unplaced)));
-    }
-    if let Err(e) = place_new_file(
-        &changes_tmp.path,
-        changes_path,
-        "revision change list",
-        ErrorCode::OutputExists,
-    ) {
-        let mut unplaced = Vec::new();
-        if let Some((_, t)) = &pdf_tmp {
-            unplaced.push(t.path.as_path());
-        }
-        return Err(with_rollback_notes(
-            e,
-            rollback_files(&[(dwg_path, dwg_tmp.id)], &unplaced),
-        ));
-    }
-    if let Some((path, tmp)) = pdf_tmp {
-        if let Err(e) = place_new_file(&tmp.path, path, "revision PDF", ErrorCode::OutputExists) {
-            return Err(with_rollback_notes(
-                e,
-                rollback_files(
-                    &[(dwg_path, dwg_tmp.id), (changes_path, changes_tmp.id)],
-                    &[],
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn write_temp(path: &Path, bytes: &[u8], kind: &str, what: &str) -> Result<StagedTemp, Error> {
-    let write_err = |e: io::Error| {
-        Error::new(
-            ErrorCode::WriteFailed,
-            format!("could not write the {what}: {e}"),
-        )
-        .in_file(path)
-    };
-    let (tmp, mut file) = create_temp_beside_kind(path, kind).map_err(write_err)?;
-    #[cfg(any(unix, windows))]
-    let id = file_id_of_file(&file);
-    #[cfg(not(any(unix, windows)))]
-    let id: Option<FileId> = None;
-    let wrote = file.write_all(bytes).and_then(|()| file.sync_all());
-    drop(file);
-    if let Err(e) = wrote {
-        let mut err = write_err(e);
-        if let Err(rm) = fs::remove_file(&tmp) {
-            if rm.kind() != io::ErrorKind::NotFound {
-                err.message.push_str(&format!(
-                    "; could not remove temporary file `{}`: {rm}",
-                    tmp.display()
-                ));
-            }
-        }
-        return Err(err);
-    }
-    Ok(StagedTemp { path: tmp, id })
-}
-
-fn rollback_files(placed: &[(&Path, Option<FileId>)], unplaced: &[&Path]) -> Vec<String> {
-    let mut notes = Vec::new();
-    for &tmp in unplaced {
-        if let Err(e) = fs::remove_file(tmp) {
-            if e.kind() != io::ErrorKind::NotFound {
-                notes.push(format!(
-                    "could not remove temporary file `{}`: {e}",
-                    tmp.display()
-                ));
-            }
-        }
-    }
-    for &(dest, expected_id) in placed {
-        #[cfg(any(unix, windows))]
-        let same = expected_id.is_some() && regular_file_id_no_follow(dest) == expected_id;
-        #[cfg(not(any(unix, windows)))]
-        let same = {
-            let _ = expected_id;
-            fs::symlink_metadata(dest).is_ok_and(|m| m.is_file())
-        };
-        if !same {
-            notes.push(format!(
-                "left `{}` in place during rollback because its file identity changed",
-                dest.display()
-            ));
-            continue;
-        }
-        if let Err(e) = fs::remove_file(dest) {
-            if e.kind() != io::ErrorKind::NotFound {
-                notes.push(format!(
-                    "could not remove `{}` during rollback: {e}",
-                    dest.display()
-                ));
-            }
-        }
-    }
-    notes
-}
-
-fn with_rollback_notes(mut err: Error, notes: Vec<String>) -> Error {
-    if !notes.is_empty() {
-        err.message
-            .push_str(&format!("; rollback notes: {}", notes.join("; ")));
-    }
-    err
 }
 
 // ── Operation dispatch & target/snap resolution ───────────────────────────
@@ -1922,7 +1904,7 @@ fn enforce_verification_gates(
     decode: &DecodeReport,
     outcomes: &[RevisionOperationOutcome],
     verified: &RevisionVerification,
-) -> Option<Reply<RevisionReport>> {
+) -> Option<(RevisionReport, Error)> {
     // 1. Requested-edit integrity gate (ADR-0005): NEVER bypassable with
     //    `--allow-loss`. If any requested addition vanished or any requested
     //    deletion survived, refuse with zero files written.
@@ -1932,6 +1914,7 @@ fn enforce_verification_gates(
             source: source.display().to_string(),
             sheet: sheet_name.to_owned(),
             dry_run,
+            journal_entry: None,
             message: detail.clone(),
             original: original_meta.clone(),
             revision: None,
@@ -1949,7 +1932,7 @@ fn enforce_verification_gates(
             checks: None,
         };
         let error = Error::new(ErrorCode::DwgWrite, detail).in_file(source);
-        return Some(Reply::partly(report, error));
+        return Some((report, error));
     }
 
     // 2. Untouched-means-unchanged gate (ADR-0004): refuse collateral changes
@@ -1960,6 +1943,7 @@ fn enforce_verification_gates(
             source: source.display().to_string(),
             sheet: sheet_name.to_owned(),
             dry_run,
+            journal_entry: None,
             message: detail.clone(),
             original: original_meta.clone(),
             revision: None,
@@ -1977,7 +1961,7 @@ fn enforce_verification_gates(
             checks: None,
         };
         let error = Error::new(ErrorCode::DwgWrite, detail).in_file(source);
-        return Some(Reply::partly(report, error));
+        return Some((report, error));
     }
     None
 }

@@ -376,7 +376,7 @@ pub(crate) fn refuse_unfinished(folder: &Path, who: Unfinished) -> Result<(), Er
     Err(Error::new(ErrorCode::RollbackFailed, message).in_file(&folder.join(JOURNAL_FILE)))
 }
 
-fn kind_words(kind: EntryKind) -> &'static str {
+pub(super) fn kind_words(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::ChangeSet => "a change set",
         EntryKind::FailedAttempt => "a failed attempt",

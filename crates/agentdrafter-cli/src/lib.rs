@@ -46,9 +46,10 @@ const SCHEMA_USAGE: &str =
     "agentdrafter schema [sheet-description | block-library | template | set | rows | change-set]";
 const OPERATIONS_USAGE: &str = "agentdrafter operations";
 const CHANGE_USAGE: &str = "agentdrafter change <drawing-set-folder | original.dwg> <change-set.json | -> [--output <revision.dwg>] [--allow-loss] [--dry-run] [--fonts <folder>]... [--no-system-fonts] [--plot-style <name>] [--plot-styles <folder>]... [--no-pdf]";
-const JOURNAL_USAGE: &str = "agentdrafter journal <drawing-set-folder>";
-const UNDO_USAGE: &str = "agentdrafter undo <drawing-set-folder> <change-set> [--dry-run]";
-const ACCEPT_USAGE: &str = "agentdrafter accept <drawing-set-folder> [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]... [--no-system-fonts]";
+const JOURNAL_USAGE: &str = "agentdrafter journal <drawing-set-folder | original.dwg>";
+const UNDO_USAGE: &str =
+    "agentdrafter undo <drawing-set-folder | original.dwg> <change-set> [--dry-run]";
+const ACCEPT_USAGE: &str = "agentdrafter accept <drawing-set-folder | original.dwg> [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]... [--no-system-fonts]";
 const PROPOSE_USAGE: &str = "agentdrafter propose <drawing-set-folder> <change-set.json | -> [--by <who>] [--fonts <folder>]... [--no-system-fonts]";
 const PROPOSALS_USAGE: &str = "agentdrafter proposals <drawing-set-folder>";
 const GUIDE_USAGE: &str = "agentdrafter guide <drawing-set-folder> <guide.json | -> [--by <who>] [--fonts <folder>]... [--no-system-fonts]";
@@ -738,7 +739,8 @@ fn parse_journal(args: Args) -> Result<Value, Error> {
     }
     let [set] = <[OsString; 1]>::try_from(given).map_err(|given| {
         Error::usage(format!(
-            "journal takes a drawing set's folder, found {} arguments; usage: {JOURNAL_USAGE}",
+            "journal takes a drawing set's folder or an original `.dwg`, found {} arguments; \
+             usage: {JOURNAL_USAGE}",
             given.len()
         ))
     })?;
@@ -765,7 +767,8 @@ fn parse_undo(args: Args) -> Result<Value, Error> {
     }
     let [set, change_set] = <[OsString; 2]>::try_from(given).map_err(|given| {
         usage(format!(
-            "undo takes a drawing set's folder and a change set, found {} arguments",
+            "undo takes a drawing set's folder (or original `.dwg`) and a change set, found {} \
+             arguments",
             given.len()
         ))
     })?;
@@ -831,13 +834,16 @@ fn parse_accept(mut args: Args) -> Result<Value, Error> {
             }
             _ => {
                 if set.replace(arg).is_some() {
-                    return Err(usage("accept takes one drawing set's folder".into()));
+                    return Err(usage(
+                        "accept takes one drawing set's folder or original `.dwg`".into(),
+                    ));
                 }
             }
         }
     }
-    request.set =
-        PathBuf::from(set.ok_or_else(|| usage("accept needs a drawing set's folder".into()))?);
+    request.set = PathBuf::from(set.ok_or_else(|| {
+        usage("accept needs a drawing set's folder or an original `.dwg`".into())
+    })?);
     input_of(request, fonts)
 }
 

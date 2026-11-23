@@ -112,6 +112,9 @@ pub fn accept_with(
     settings: &Settings,
     via: Interface,
 ) -> Reply<AcceptReport> {
+    if crate::original::is_dwg_file(&request.set) {
+        return super::original_journal::accept_original(request, settings, via);
+    }
     let rolled_back = match recover(&request.set) {
         Ok(rolled_back) => rolled_back,
         Err(error) => return Reply::from(Err(error)),
@@ -291,7 +294,7 @@ fn sheets_words(sheets: &[String]) -> String {
 }
 
 /// The failed checks, in words.
-fn failed_words(failed: &[CheckFailed]) -> String {
+pub(super) fn failed_words(failed: &[CheckFailed]) -> String {
     let count = match failed.len() {
         1 => "1 failed check".to_owned(),
         n => format!("{n} failed checks"),
@@ -304,7 +307,7 @@ fn failed_words(failed: &[CheckFailed]) -> String {
 }
 
 /// The error for a journal that has moved on past the entry the caller saw.
-fn moved_on(entries: &[Entry], seen: u64, newest: u64) -> Error {
+pub(super) fn moved_on(entries: &[Entry], seen: u64, newest: u64) -> Error {
     let since: Vec<String> = entries
         .iter()
         .filter(|e| e.entry > seen)
@@ -445,7 +448,7 @@ fn as_written(path: &Path) -> (Vec<String>, usize) {
 }
 
 /// A check's rule as JSON writes it, such as `off_sheet`.
-fn rule_text(rule: crate::check::Rule) -> String {
+pub(super) fn rule_text(rule: crate::check::Rule) -> String {
     match serde_json::to_value(rule) {
         Ok(serde_json::Value::String(text)) => text,
         _ => format!("{rule:?}"),
@@ -513,40 +516,50 @@ pub(crate) fn stamp_revision(files: &[(SourceKind, &Path, &[u8])]) -> StampRevis
 /// the set's files the output also read, such as the template its paper
 /// came from, with theirs.
 fn dwg_revision(dwg: &Path, bytes: &[u8], rest: &[(SourceKind, &Path, &[u8])]) -> StampRevision {
-    let set = match set_of_dwg(dwg) {
-        Ok(set) => set,
-        Err(why) => return StampRevision::not_issued(Some(why)),
+    let not_issued_why = match set_of_dwg(dwg) {
+        Ok(set) => match read_entries(&set.folder) {
+            Ok(entries) => {
+                // The newest accept that issued this file with these bytes, the file
+                // named in it as the DWG is named, or by another name of the same file
+                // as the file system tells it, such as `dwg/DEMO-001.dwg` for
+                // `demo-001.dwg` where letter case is ignored. Each accept is asked in
+                // turn, newest first, so no older accept's name for it shadows a newer.
+                let print = fingerprint(bytes);
+                let found = in_set(&set.folder, rest).and_then(|others| {
+                    entries.iter().rev().find(|e| {
+                        e.kind == EntryKind::Accept
+                            && e.finished()
+                            && e.revision.iter().any(|f| {
+                                f.sha256 == print
+                                    && (f.path == set.path
+                                        || is_same_file(&set.folder.join(&f.path), dwg))
+                            })
+                            && others.iter().all(|(path, print)| {
+                                e.revision
+                                    .iter()
+                                    .any(|f| &f.path == path && &f.sha256 == print)
+                            })
+                    })
+                });
+                if found.is_some() {
+                    return issued(found);
+                }
+                None
+            }
+            Err(_) => Some(
+                "the journal of the drawing set the DWG's build mark names cannot be read, so no \
+                 accept of the set can be found"
+                    .to_owned(),
+            ),
+        },
+        Err(why) => Some(why),
     };
-    let Ok(entries) = read_entries(&set.folder) else {
-        return StampRevision::not_issued(Some(
-            "the journal of the drawing set the DWG's build mark names cannot be read, so no \
-             accept of the set can be found"
-                .to_owned(),
-        ));
-    };
-    // The newest accept that issued this file with these bytes, the file
-    // named in it as the DWG is named, or by another name of the same file
-    // as the file system tells it, such as `dwg/DEMO-001.dwg` for
-    // `demo-001.dwg` where letter case is ignored. Each accept is asked in
-    // turn, newest first, so no older accept's name for it shadows a newer.
-    let print = fingerprint(bytes);
-    let Some(others) = in_set(&set.folder, rest) else {
-        return StampRevision::not_issued(None);
-    };
-    let accept = entries.iter().rev().find(|e| {
-        e.kind == EntryKind::Accept
-            && e.finished()
-            && e.revision.iter().any(|f| {
-                f.sha256 == print
-                    && (f.path == set.path || is_same_file(&set.folder.join(&f.path), dwg))
-            })
-            && others.iter().all(|(path, print)| {
-                e.revision
-                    .iter()
-                    .any(|f| &f.path == path && &f.sha256 == print)
-            })
-    });
-    issued(accept)
+    if rest.is_empty() {
+        if let Some(found) = super::original_journal::issued_of_revision_dwg(dwg, bytes) {
+            return found;
+        }
+    }
+    StampRevision::not_issued(not_issued_why)
 }
 
 /// What a stamp says of the revision a sheet description or a template
@@ -600,7 +613,7 @@ fn issued_by(entries: &[Entry], read: &[(String, String)]) -> StampRevision {
 }
 
 /// Issued by `accept`, when there is one; otherwise not issued.
-fn issued(accept: Option<&Entry>) -> StampRevision {
+pub(super) fn issued(accept: Option<&Entry>) -> StampRevision {
     match accept {
         Some(accept) => StampRevision {
             issued: true,

@@ -77,11 +77,26 @@ def snapshot(set_folder):
     found = {}
     for path in set_folder.rglob("*"):
         relative = path.relative_to(set_folder)
+        parts = relative.parts
+        in_orig_journal = any(
+            parts[i] == ".agentdrafter" and parts[i + 1] == "originals"
+            for i in range(len(parts) - 1)
+        )
         if relative == JOURNAL_FILE or relative.is_relative_to(UNDO_STATES_FOLDER):
+            continue
+        if in_orig_journal and (path.name == "journal.lock" or "undo-states" in parts):
             continue
         if path.is_dir():
             if relative != JOURNAL_FILE.parent:
                 found[relative] = None
+        elif in_orig_journal and path.name == "journal.jsonl":
+            entries = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                record = json.loads(line)
+                record.pop("at", None)
+                record.pop("via", None)
+                entries.append(record)
+            found[relative] = entries
         elif (
             any(relative.is_relative_to(f) for f in (PROPOSALS_FOLDER, GUIDES_FOLDER))
             and relative.suffix == ".json"

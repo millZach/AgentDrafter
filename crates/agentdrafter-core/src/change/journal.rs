@@ -130,6 +130,25 @@ pub struct RollBack {
     pub files: Vec<FileState>,
 }
 
+/// Metadata recorded on an original-DWG revision entry in the original's own
+/// journal. Absent on drawing-set entries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OriginalRevisionMeta {
+    /// The original DWG's file name when revised.
+    pub original_file: String,
+    /// SHA-256 fingerprint of the original DWG bytes.
+    pub original_sha256: String,
+    /// Exact DWG version preserved by the revision (such as `AC1032`).
+    pub dwg_version: String,
+    /// The revision DWG's path, relative to the original's folder.
+    pub revision_dwg: String,
+    /// SHA-256 fingerprint of the revision DWG bytes.
+    pub revision_sha256: String,
+    /// Whether `--allow-loss` was accepted for this revision.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allowed_loss: bool,
+}
+
 /// One entry of the journal, as its line holds it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -210,6 +229,9 @@ pub struct Entry {
     /// how many steps the guide has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guide: Option<super::guides::GuideMark>,
+    /// Metadata for an original-DWG revision entry; absent on drawing-set entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_revision: Option<OriginalRevisionMeta>,
     /// How it was rolled back, when it was: read from the line that marks
     /// it so, not from its own.
     #[serde(skip)]
@@ -219,7 +241,7 @@ pub struct Entry {
 impl Entry {
     /// An entry of `kind` numbered `entry`, made now, with nothing else
     /// recorded yet.
-    fn new(entry: u64, kind: EntryKind) -> Self {
+    pub(super) fn new(entry: u64, kind: EntryKind) -> Self {
         Self {
             entry,
             kind,
@@ -243,6 +265,7 @@ impl Entry {
             kept_by: None,
             discarded_by: None,
             guide: None,
+            original_revision: None,
             rolled_back: None,
         }
     }
@@ -410,6 +433,9 @@ pub struct JournalEntry {
 /// commit that never finished left pending is rolled back first, and the
 /// reply says so under `rolled_back`.
 pub fn journal(request: &JournalRequest) -> Reply<JournalReport> {
+    if crate::original::is_dwg_file(&request.set) {
+        return super::original_journal::journal_original(request);
+    }
     match super::recover(&request.set) {
         Ok(rolled_back) => Reply::from(read_journal(&request.set)).after(rolled_back),
         Err(error) => Reply::from(Err(error)),
@@ -419,6 +445,22 @@ pub fn journal(request: &JournalRequest) -> Reply<JournalReport> {
 fn read_journal(folder: &Path) -> Result<JournalReport, Error> {
     read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
     let entries = read_entries(folder)?;
+    Ok(build_journal_report(
+        folder,
+        &folder.join(JOURNAL_FILE),
+        entries,
+        inconsistent(folder),
+        "the journal is empty: no change set has been applied to the set",
+    ))
+}
+
+pub(super) fn build_journal_report(
+    target: &Path,
+    file: &Path,
+    entries: Vec<Entry>,
+    inconsistent: Option<Inconsistent>,
+    empty_message: &str,
+) -> JournalReport {
     let fates = fates(&entries);
     let can_undo = undoable(&entries, &fates);
     let count = |kind: EntryKind| {
@@ -437,7 +479,7 @@ fn read_journal(folder: &Path) -> Result<JournalReport, Error> {
     let rolled_back = in_state(CommitState::RolledBack);
     let pending = in_state(CommitState::Pending);
     let message = if entries.is_empty() {
-        "the journal is empty: no change set has been applied to the set".to_owned()
+        empty_message.to_owned()
     } else {
         let undos = counted(count(EntryKind::Undo), "undo");
         let mut more = Vec::new();
@@ -510,15 +552,15 @@ fn read_journal(folder: &Path) -> Result<JournalReport, Error> {
             }
         })
         .collect();
-    Ok(JournalReport {
-        set: folder.display().to_string(),
-        file: folder.join(JOURNAL_FILE).display().to_string(),
+    JournalReport {
+        set: target.display().to_string(),
+        file: file.display().to_string(),
         message,
         entries,
         can_undo,
         kept_undo_states: KEPT_UNDO_STATES,
-        inconsistent: inconsistent(folder),
-    })
+        inconsistent,
+    }
 }
 
 /// `numbers` joined with commas and `and`.
@@ -602,18 +644,28 @@ pub(super) fn keeps_state(entry: &Entry, fates: &BTreeMap<u64, Fate>) -> bool {
 
 /// The journal's entries, the oldest first; none when there is no journal.
 pub(super) fn read_entries(folder: &Path) -> Result<Vec<Entry>, Error> {
-    Ok(read_text(folder)?.map(|t| t.1).unwrap_or_default())
+    read_entries_at(&folder.join(JOURNAL_FILE))
+}
+
+/// The entries of the journal at `path`, the oldest first; none when there is
+/// no journal file yet.
+pub(super) fn read_entries_at(path: &Path) -> Result<Vec<Entry>, Error> {
+    Ok(read_text_at(path)?.map(|t| t.1).unwrap_or_default())
 }
 
 /// The journal's text and its entries, or `None` when there is no journal.
 /// A last line written in part is refused, as any line that is not an
 /// entry is: the next command cuts it off (`recover.rs`).
 fn read_text(folder: &Path) -> Result<Option<(String, Vec<Entry>)>, Error> {
-    let Some(read) = read_journal_file(folder)? else {
+    read_text_at(&folder.join(JOURNAL_FILE))
+}
+
+/// Like [`read_text`], reading the journal file at `path`.
+pub(super) fn read_text_at(path: &Path) -> Result<Option<(String, Vec<Entry>)>, Error> {
+    let Some(read) = read_journal_at(path)? else {
         return Ok(None);
     };
     if let Some(torn) = read.torn {
-        let path = folder.join(JOURNAL_FILE);
         return Err(Error::new(
             ErrorCode::ReadFailed,
             format!(
@@ -623,7 +675,7 @@ fn read_text(folder: &Path) -> Result<Option<(String, Vec<Entry>)>, Error> {
             ),
         )
         .at_position(torn.line, 1)
-        .in_file(&path));
+        .in_file(path));
     }
     Ok(Some((read.text, read.entries)))
 }
@@ -652,8 +704,12 @@ pub(super) struct Torn {
 /// entry, or marks an entry no line before it holds pending, is refused,
 /// with its line, unless it is the last and was written only in part.
 pub(super) fn read_journal_file(folder: &Path) -> Result<Option<JournalRead>, Error> {
-    let path = folder.join(JOURNAL_FILE);
-    let bytes = match fs::read(&path) {
+    read_journal_at(&folder.join(JOURNAL_FILE))
+}
+
+/// Reads the journal file at `path`, or returns `None` when it does not exist.
+pub(super) fn read_journal_at(path: &Path) -> Result<Option<JournalRead>, Error> {
+    let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
@@ -661,7 +717,7 @@ pub(super) fn read_journal_file(folder: &Path) -> Result<Option<JournalRead>, Er
                 ErrorCode::ReadFailed,
                 format!("could not read the set's journal: {e}"),
             )
-            .in_file(&path))
+            .in_file(path))
         }
     };
     let split = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
@@ -671,7 +727,7 @@ pub(super) fn read_journal_file(folder: &Path) -> Result<Option<JournalRead>, Er
             ErrorCode::ReadFailed,
             format!("the set's journal is not text: {e}"),
         )
-        .in_file(&path)
+        .in_file(path)
     })?;
     let mut entries: Vec<Entry> = Vec::new();
     let mut lines = 0;
@@ -680,15 +736,15 @@ pub(super) fn read_journal_file(folder: &Path) -> Result<Option<JournalRead>, Er
         if line.trim().is_empty() {
             continue;
         }
-        let read = parse_line(line).map_err(|e| not_entry(&path, i + 1, &e))?;
-        mark(&mut entries, read, i + 1, &path)?;
+        let read = parse_line(line).map_err(|e| not_entry(path, i + 1, &e))?;
+        mark(&mut entries, read, i + 1, path)?;
     }
     let mut torn = None;
     if !tail.iter().all(u8::is_ascii_whitespace) {
         let line = lines + 1;
         match std::str::from_utf8(tail).ok().map(|t| (t, parse_line(t))) {
             Some((last, Ok(read))) => {
-                mark(&mut entries, read, line, &path)?;
+                mark(&mut entries, read, line, path)?;
                 text.push_str(last);
             }
             _ => {
@@ -788,7 +844,7 @@ pub(super) fn pending(entries: &[Entry]) -> Option<&Entry> {
 
 /// `item` as one line of the journal, after a line break when the
 /// journal's text does not end with one.
-fn line_of(text: Option<&str>, item: &impl Serialize) -> Vec<u8> {
+pub(super) fn line_of(text: Option<&str>, item: &impl Serialize) -> Vec<u8> {
     // An entry holds only strings, numbers, lists and string-keyed maps,
     // which always serialize, and JSON escapes every line break in them.
     let mut line = serde_json::to_string(item).expect("an entry serializes to JSON");
@@ -824,13 +880,17 @@ pub(super) fn state_line(
 /// up to [`LOCK_WAIT`] for a process that holds it to let it go. It is
 /// taken before anything is written, so when it cannot be, nothing was.
 pub(super) fn lock(folder: &Path) -> Result<File, Error> {
-    let path = folder.join(LOCK_FILE);
+    lock_at(&folder.join(LOCK_FILE))
+}
+
+/// Holds the journal lock at `path` until the returned file is dropped.
+pub(super) fn lock_at(path: &Path) -> Result<File, Error> {
     let failed = |what: &str, why: String| {
         Error::new(
             ErrorCode::WriteFailed,
             format!("could not {what} the set's journal lock: {why}; nothing was changed"),
         )
-        .in_file(&path)
+        .in_file(path)
     };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| failed("make the folder of", e.to_string()))?;
@@ -840,7 +900,7 @@ pub(super) fn lock(folder: &Path) -> Result<File, Error> {
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&path)
+        .open(path)
         .map_err(|e| failed("open", e.to_string()))?;
     let start = Instant::now();
     loop {
@@ -865,7 +925,7 @@ pub(super) fn lock(folder: &Path) -> Result<File, Error> {
 
 /// The error for a commit that finds an entry another commit left pending,
 /// which no command has rolled back yet.
-fn left_pending(entry: &Entry) -> Error {
+pub(super) fn left_pending(entry: &Entry) -> Error {
     Error::new(
         ErrorCode::RollbackFailed,
         format!(
@@ -878,7 +938,7 @@ fn left_pending(entry: &Entry) -> Error {
 }
 
 /// The number the next entry takes.
-fn next_number(entries: &[Entry]) -> u64 {
+pub(super) fn next_number(entries: &[Entry]) -> u64 {
     entries.iter().map(|e| e.entry).max().unwrap_or(0) + 1
 }
 
@@ -1293,14 +1353,18 @@ pub(super) fn commit_accept(
 /// that is not an undo state. A file that cannot be taken away is left; it
 /// is needed by nothing.
 pub(super) fn prune(folder: &Path, entries: &[Entry]) {
+    prune_at(&folder.join(UNDO_STATES_FOLDER), entries);
+}
+
+/// Like [`prune`], pruning the undo-states folder at `store`.
+pub(super) fn prune_at(store: &Path, entries: &[Entry]) {
     let fates = fates(entries);
     let needed: BTreeSet<&str> = entries
         .iter()
         .filter(|e| keeps_state(e, &fates) || e.state == Some(CommitState::Pending))
         .flat_map(|e| e.files.iter().filter_map(|f| f.before.as_deref()))
         .collect();
-    let store = folder.join(UNDO_STATES_FOLDER);
-    let Ok(listed) = fs::read_dir(&store) else {
+    let Ok(listed) = fs::read_dir(store) else {
         return;
     };
     for item in listed.flatten() {
@@ -1309,7 +1373,7 @@ pub(super) fn prune(folder: &Path, entries: &[Entry]) {
             let _ = fs::remove_file(item.path());
         }
     }
-    let _ = fs::remove_dir(&store);
+    let _ = fs::remove_dir(store);
 }
 
 /// The bytes of the file at `path`, or `None` when there is none.
@@ -1328,7 +1392,12 @@ pub(super) fn read_state(path: &Path) -> Result<Option<Vec<u8>>, Error> {
 /// The bytes before a change set of the file whose SHA-256 is `print`, from
 /// the undo states, checked against it.
 pub(super) fn undo_state(folder: &Path, print: &str) -> Option<Vec<u8>> {
-    let bytes = fs::read(folder.join(UNDO_STATES_FOLDER).join(print)).ok()?;
+    undo_state_at(&folder.join(UNDO_STATES_FOLDER), print)
+}
+
+/// Like [`undo_state`], reading from `store`.
+pub(super) fn undo_state_at(store: &Path, print: &str) -> Option<Vec<u8>> {
+    let bytes = fs::read(store.join(print)).ok()?;
     (fingerprint(&bytes) == print).then_some(bytes)
 }
 
@@ -1367,7 +1436,7 @@ fn folders_made(folder: &Path, replacements: &[Replacement]) -> Vec<String> {
 }
 
 /// An error code as its JSON writes it, such as `unknown_name`.
-fn code_text(code: ErrorCode) -> String {
+pub(super) fn code_text(code: ErrorCode) -> String {
     match serde_json::to_value(code) {
         Ok(Value::String(text)) => text,
         _ => format!("{code:?}"),

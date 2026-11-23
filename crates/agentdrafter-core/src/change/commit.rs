@@ -119,11 +119,29 @@ struct Unplaced {
     not_back: Vec<String>,
 }
 
+/// One brand-new file an original-DWG revision places atomically without
+/// overwriting any existing file, symlink, or original.
+pub(super) struct NewFile<'a> {
+    pub path: &'a Path,
+    pub bytes: &'a [u8],
+    pub what: &'static str,
+}
+
 /// Writes `ahead`'s entry, pending, then puts every file of `replacements`
 /// in place, the undo states first, then marks the entry done; or, when a
 /// step fails, puts every file back and cuts the journal back, so nothing is
 /// changed. On failure the error says what is left.
 pub(super) fn commit(ahead: &Ahead, replacements: &[Replacement]) -> Result<(), Error> {
+    commit_with_options(ahead, replacements, true)
+}
+
+/// Like [`commit`], controlling whether removing a file also attempts to
+/// remove its parent directory when empty.
+pub(super) fn commit_with_options(
+    ahead: &Ahead,
+    replacements: &[Replacement],
+    remove_empty_parents: bool,
+) -> Result<(), Error> {
     let mut seam = Seam::commit();
     let length = match add_to_end(ahead.journal, ahead.pending, Sync::Pending) {
         Ok(length) => length,
@@ -145,9 +163,9 @@ pub(super) fn commit(ahead: &Ahead, replacements: &[Replacement]) -> Result<(), 
     let names = Names::new(ahead.entry, keys);
     let placed = match put_in_place(replacements, &names, &mut seam) {
         Ok(placed) => placed,
-        Err(unplaced) => return Err(not_finished(ahead, length, *unplaced)),
+        Err(unplaced) => return Err(not_finished(ahead, length, *unplaced, remove_empty_parents)),
     };
-    finish(replacements, &placed);
+    finish(replacements, &placed, remove_empty_parents);
     seam.passed(|| "every file was in place".to_owned());
     let done = seam
         .fail(replacements.len())
@@ -172,6 +190,7 @@ pub(super) fn commit(ahead: &Ahead, replacements: &[Replacement]) -> Result<(), 
                 error: Error::new(ErrorCode::WriteFailed, base).in_file(ahead.journal),
                 not_back: Vec::new(),
             },
+            remove_empty_parents,
         )),
         // It may stand in part: putting the files back now could leave a
         // journal that says done beside them, so they are left in place.
@@ -189,6 +208,227 @@ pub(super) fn commit(ahead: &Ahead, replacements: &[Replacement]) -> Result<(), 
         )
         .in_file(ahead.journal)),
     }
+}
+
+/// Write-ahead commit for brand-new revision files beside an original DWG:
+/// appends `ahead.pending`, stages each file into an entry-prefixed temp file
+/// beside its destination, places each atomically with non-clobbering
+/// [`crate::original::place_new_file`] (never overwriting an existing file,
+/// symlink, or the original), and appends `ahead.done`. On any failure, rolls
+/// back only files whose identity matches what we placed and cuts the journal
+/// back so nothing is changed.
+pub(super) fn commit_new_files(
+    ahead: &Ahead,
+    new_files: &[NewFile<'_>],
+    source_id: Option<crate::build::FileId>,
+) -> Result<(), Error> {
+    if let Some(parent) = ahead.journal.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            Error::new(
+                ErrorCode::WriteFailed,
+                format!("could not make the folder the journal goes in: {e}"),
+            )
+            .in_file(parent)
+        })?;
+    }
+    let mut seam = Seam::commit();
+    let length = match add_to_end(ahead.journal, ahead.pending, Sync::Pending) {
+        Ok(length) => length,
+        Err(failed) => return Err(not_added(ahead, failed)),
+    };
+    seam.passed(|| "its entry was written, pending".to_owned());
+
+    let keys: Vec<String> = (0..new_files.len()).map(|j| format!("f{j}")).collect();
+    let names = Names::new(ahead.entry, keys);
+
+    let mut staged: Vec<(PathBuf, Option<crate::build::FileId>)> =
+        Vec::with_capacity(new_files.len());
+    for (j, file) in new_files.iter().enumerate() {
+        let tmp = names.beside(file.path, j, "tmp");
+        let created = OpenOptions::new().write(true).create_new(true).open(&tmp);
+        let mut f = match created {
+            Ok(f) => f,
+            Err(e) => {
+                for (t, _) in &staged {
+                    let _ = fs::remove_file(t);
+                }
+                let err = Error::new(
+                    ErrorCode::WriteFailed,
+                    format!("could not write the {}: {e}", file.what),
+                )
+                .in_file(file.path);
+                return Err(cut_back_new_files_error(ahead, length, err));
+            }
+        };
+        #[cfg(any(unix, windows))]
+        let id = crate::build::file_id_of_file(&f);
+        #[cfg(not(any(unix, windows)))]
+        let id: Option<crate::build::FileId> = None;
+        let wrote = f.write_all(file.bytes).and_then(|()| f.sync_all());
+        drop(f);
+        if let Err(e) = wrote {
+            let _ = fs::remove_file(&tmp);
+            for (t, _) in &staged {
+                let _ = fs::remove_file(t);
+            }
+            let err = Error::new(
+                ErrorCode::WriteFailed,
+                format!("could not write the {}: {e}", file.what),
+            )
+            .in_file(file.path);
+            return Err(cut_back_new_files_error(ahead, length, err));
+        }
+        staged.push((tmp, id));
+        seam.passed(|| format!("{} was written beside its place", file.path.display()));
+    }
+
+    let mut placed: Vec<(&Path, Option<crate::build::FileId>)> =
+        Vec::with_capacity(new_files.len());
+    for (j, (file, (tmp, id))) in new_files.iter().zip(&staged).enumerate() {
+        if let Err(e) = seam.fail(j) {
+            let err = Error::new(
+                ErrorCode::WriteFailed,
+                format!("could not put {} in place ({e})", file.what),
+            )
+            .in_file(file.path);
+            let unplaced: Vec<&Path> = staged[j..].iter().map(|(p, _)| p.as_path()).collect();
+            let notes = rollback_placed_new_files(&placed, &unplaced, source_id);
+            return Err(cut_back_with_notes(ahead, length, err, notes));
+        }
+        if let Err(err) =
+            crate::original::place_new_file(tmp, file.path, file.what, ErrorCode::OutputExists)
+        {
+            let unplaced: Vec<&Path> = staged[j + 1..].iter().map(|(p, _)| p.as_path()).collect();
+            let notes = rollback_placed_new_files(&placed, &unplaced, source_id);
+            return Err(cut_back_with_notes(ahead, length, err, notes));
+        }
+        placed.push((file.path, *id));
+        seam.passed(|| format!("{} was put in its place", file.path.display()));
+    }
+
+    seam.passed(|| "every file was in place".to_owned());
+    let done = seam
+        .fail(new_files.len())
+        .map_err(AddFailed::from)
+        .and_then(|()| add_to_end(ahead.journal, ahead.done, Sync::Done).map(|_| ()));
+    let Err(failed) = done else {
+        return Ok(());
+    };
+    let base = format!(
+        "could not mark entry {} done in the journal ({})",
+        ahead.entry, failed.error
+    );
+    match marked(ahead, length) {
+        Marked::Done => Ok(()),
+        Marked::Pending => {
+            let notes = rollback_placed_new_files(&placed, &[], source_id);
+            let err = Error::new(ErrorCode::WriteFailed, base).in_file(ahead.journal);
+            Err(cut_back_with_notes(ahead, length, err, notes))
+        }
+        Marked::Unknown => Err(Error::new(
+            ErrorCode::WriteFailed,
+            format!(
+                "{base}, and it could not be taken back ({}): every file is in place, and the \
+                 journal may hold the line in part; the next command cuts a line written in part \
+                 off and rolls entry {} back",
+                failed
+                    .left
+                    .map_or_else(|| "it could not be read".to_owned(), |e| e.to_string()),
+                ahead.entry
+            ),
+        )
+        .in_file(ahead.journal)),
+    }
+}
+
+pub(crate) fn rollback_placed_new_files(
+    placed: &[(&Path, Option<crate::build::FileId>)],
+    unplaced: &[&Path],
+    source_id: Option<crate::build::FileId>,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    for &tmp in unplaced {
+        if let Err(e) = fs::remove_file(tmp) {
+            if e.kind() != io::ErrorKind::NotFound {
+                notes.push(format!(
+                    "could not remove temporary file `{}`: {e}",
+                    tmp.display()
+                ));
+            }
+        }
+    }
+    for &(dest, expected_id) in placed {
+        #[cfg(any(unix, windows))]
+        let same = {
+            let current = crate::original::regular_file_id_no_follow(dest);
+            expected_id.is_some()
+                && current == expected_id
+                && !(source_id.is_some() && current == source_id)
+        };
+        #[cfg(not(any(unix, windows)))]
+        let same = {
+            let _ = (expected_id, source_id);
+            fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_file())
+        };
+        if !same {
+            notes.push(format!(
+                "left `{}` in place during rollback because its file identity changed",
+                dest.display()
+            ));
+            continue;
+        }
+        if let Err(e) = fs::remove_file(dest) {
+            if e.kind() != io::ErrorKind::NotFound {
+                notes.push(format!(
+                    "could not remove `{}` during rollback: {e}",
+                    dest.display()
+                ));
+            }
+        }
+    }
+    notes
+}
+
+fn cut_back_new_files_error(ahead: &Ahead, length: u64, mut err: Error) -> Error {
+    match cut_back(ahead.journal, length) {
+        Ok(()) => {
+            err.message.push_str("; nothing was changed");
+        }
+        Err(e) => {
+            err.message.push_str(&format!(
+                "; the journal could not be cut back ({e}), so it holds entry {} pending, and \
+                 the next command marks it rolled back",
+                ahead.entry
+            ));
+        }
+    }
+    err
+}
+
+fn cut_back_with_notes(ahead: &Ahead, length: u64, mut err: Error, notes: Vec<String>) -> Error {
+    if !notes.is_empty() {
+        err.message
+            .push_str(&format!("; rollback notes: {}", notes.join("; ")));
+        err.message.push_str(&format!(
+            "; the journal holds entry {} pending so the next command can finish rolling it back",
+            ahead.entry
+        ));
+        return err;
+    }
+    match cut_back(ahead.journal, length) {
+        Ok(()) => {
+            err.message
+                .push_str("; every file was put back as it was, so nothing was changed");
+        }
+        Err(e) => {
+            err.message.push_str(&format!(
+                "; every file was put back as it was, but the journal could not be cut back \
+                 ({e}), so it holds entry {} pending, and the next command marks it rolled back",
+                ahead.entry
+            ));
+        }
+    }
+    err
 }
 
 /// What the journal holds of `ahead`'s entry, written from `length`, once
@@ -244,10 +484,21 @@ fn not_added(ahead: &Ahead, failed: AddFailed) -> Error {
 /// length before the entry, so that nothing was changed. When either cannot
 /// be done, the entry stays pending and the error says so: the next command
 /// rolls it back.
-fn not_finished(ahead: &Ahead, length: u64, unplaced: Unplaced) -> Error {
+fn not_finished(
+    ahead: &Ahead,
+    length: u64,
+    unplaced: Unplaced,
+    remove_empty_parents: bool,
+) -> Error {
     let Unplaced { error, not_back } = unplaced;
     let base = error.message.clone();
-    let message = match restore(ahead.entry, ahead.before, ahead.states, ahead.folders_made) {
+    let message = match restore_with_options(
+        ahead.entry,
+        ahead.before,
+        ahead.states,
+        ahead.folders_made,
+        remove_empty_parents,
+    ) {
         Err(failed) => format!(
             "{base}, and could not put every file back as it was ({}{}): the set's journal \
              holds entry {} pending, so the next command puts every file back from its undo \
@@ -288,6 +539,18 @@ pub(super) fn restore(
     before: &[Before],
     states: &Path,
     folders_made: &[PathBuf],
+) -> Result<Vec<Restored>, Error> {
+    restore_with_options(entry, before, states, folders_made, true)
+}
+
+/// Like [`restore`], controlling whether removing a file also attempts to
+/// remove its parent directory when empty.
+pub(super) fn restore_with_options(
+    entry: u64,
+    before: &[Before],
+    states: &Path,
+    folders_made: &[PathBuf],
+    remove_empty_parents: bool,
 ) -> Result<Vec<Restored>, Error> {
     let mut replacements: Vec<Replacement> = Vec::new();
     let mut keys: Vec<String> = Vec::new();
@@ -359,7 +622,7 @@ pub(super) fn restore(
             }
         }
     })?;
-    finish(&replacements, &placed);
+    finish(&replacements, &placed, remove_empty_parents);
     let mut folders = folders_made.to_vec();
     folders.sort_by_key(|f| Reverse(f.components().count()));
     // What the commit left beside its files goes, wherever it is.
@@ -497,12 +760,12 @@ fn put_in_place(
 
 /// Takes away the files moved aside, now that every file is in place, and
 /// the folder a file taken away leaves empty.
-fn finish(replacements: &[Replacement], placed: &[Placed]) {
+fn finish(replacements: &[Replacement], placed: &[Placed], remove_empty_parents: bool) {
     for (replacement, done) in replacements.iter().zip(placed) {
         if let Some(aside) = &done.aside {
             let _ = fs::remove_file(aside);
         }
-        if replacement.bytes.is_none() {
+        if remove_empty_parents && replacement.bytes.is_none() {
             if let Some(parent) = replacement.path.parent() {
                 let _ = fs::remove_dir(parent);
             }
@@ -784,7 +1047,7 @@ thread_local! {
     /// cutting it back to fail too.
     pub(super) static FAIL_SYNC: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// The step a test asks a commit to stop at, as a killed process stops.
-    pub(super) static STOP_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    pub(crate) static STOP_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     /// As [`FAIL_SYNC`], for the line that marks the entry done.
     pub(super) static FAIL_DONE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// The step a test asks a restore to stop at, as a killed process stops.

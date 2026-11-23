@@ -736,6 +736,104 @@ const O_NOFOLLOW: i32 = {
     }
 };
 
+/// Outcome of safely inspecting/reading a file without following symlinks or
+/// touching an original DWG.
+pub(crate) enum NoFollowRead {
+    /// File does not exist.
+    Missing,
+    /// Regular non-symlink file distinct from the original, with its bytes.
+    File(Vec<u8>),
+    /// Path is a symbolic link or Windows reparse point.
+    Symlink,
+    /// Path is a directory or non-regular file.
+    NotRegular,
+    /// Path resolves to the original DWG itself.
+    SameAsOriginal,
+}
+
+/// Reads `path` without following a trailing symlink or Windows reparse point,
+/// refusing directories, symlinks, and any file with the same identity as
+/// `source_id` (or `source` on non-unix/non-windows targets).
+pub(crate) fn read_regular_no_follow(
+    source: &Path,
+    source_id: Option<FileId>,
+    path: &Path,
+) -> io::Result<NoFollowRead> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(NoFollowRead::Missing),
+        Err(e) => return Err(e),
+    };
+    if meta.file_type().is_symlink() {
+        return Ok(NoFollowRead::Symlink);
+    }
+    if !meta.file_type().is_file() {
+        return Ok(NoFollowRead::NotRegular);
+    }
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        if O_NOFOLLOW != 0 {
+            opts.custom_flags(O_NOFOLLOW);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(crate::build::win_file::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = match opts.open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(NoFollowRead::Missing),
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(40) || e.raw_os_error() == Some(62) => {
+            // ELOOP on Linux (40) or macOS/BSD (62) from O_NOFOLLOW on a symlink.
+            return Ok(NoFollowRead::Symlink);
+        }
+        Err(e) => return Err(e),
+    };
+    let opened = file.metadata()?;
+    if !opened.file_type().is_file() {
+        return Ok(NoFollowRead::NotRegular);
+    }
+    #[cfg(unix)]
+    {
+        let _ = source;
+        let opened_id = file_id_of_file(&file);
+        if source_id.is_some() && opened_id == source_id {
+            return Ok(NoFollowRead::SameAsOriginal);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = source;
+        let Some(info) = crate::build::win_file::file_info(&file) else {
+            return Ok(NoFollowRead::NotRegular);
+        };
+        let bad = crate::build::win_file::FILE_ATTRIBUTE_DIRECTORY
+            | crate::build::win_file::FILE_ATTRIBUTE_REPARSE_POINT;
+        if (info.file_attributes & bad) != 0 {
+            return Ok(NoFollowRead::Symlink);
+        }
+        let opened_id = file_id_of_file(&file);
+        if source_id.is_some() && opened_id == source_id {
+            return Ok(NoFollowRead::SameAsOriginal);
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = source_id;
+        if is_same_file(source, path) {
+            return Ok(NoFollowRead::SameAsOriginal);
+        }
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(NoFollowRead::File(bytes))
+}
+
 /// Opens `mirror` without following a trailing symlink or reparse point,
 /// verifies on the opened handle that it is a regular non-symlink file that
 /// matches `expected` and is not `source_id`, and reads at most the first
