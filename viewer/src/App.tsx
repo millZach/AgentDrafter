@@ -162,9 +162,12 @@ import {
 } from './proposals.ts';
 import {
   allowLossKey,
+  beginDwgRead,
   buildDesktopSearch,
   canUndoDrawing,
   classifySource,
+  completeDwgRead,
+  createDwgReadTracker,
   dwgEditGuard,
   getDesktopBridge,
   kindBadge,
@@ -174,6 +177,7 @@ import {
   mergeRecent,
   newestActiveOriginalSha,
   normalizeOriginalChangeSet,
+  noteJournalOriginalSha,
   removeRecentLocal,
   resolveBeside,
   revisionAtEntry,
@@ -755,40 +759,77 @@ function DrawingWorkspace({
   const [decodeModalOpen, setDecodeModalOpen] = useState(false);
   const [plotting, setPlotting] = useState(false);
   const [ownRev, setOwnRev] = useState<{ path: string; entry: number; sha256: string; originalSha256: string } | null>(null);
-  const readSeqRef = useRef(0);
-  const readPendingRef = useRef(readPending);
-  readPendingRef.current = readPending;
+  const dwgReadTrackerRef = useRef(createDwgReadTracker());
+  const workspaceActiveRef = useRef(true);
   const revokeLossRef = useRef(onRevokeLoss);
   revokeLossRef.current = onRevokeLoss;
 
+  const triggerDwgRead = useCallback(
+    (markPending: boolean) => {
+      const tracker = dwgReadTrackerRef.current;
+      const gen = beginDwgRead(tracker);
+      if (markPending) {
+        setReadPending(true);
+        setReadError(null);
+      }
+      void call<ReadReport>('read', { source, no_mirror: true }, token).then(
+        (fresh) => {
+          if (!workspaceActiveRef.current) return;
+          const done = completeDwgRead(tracker, gen, fresh.sha256);
+          if (!done.accept) return;
+          if (done.changed && done.prevSha) {
+            revokeLossRef.current(done.prevSha);
+            setOwnRev(null);
+          }
+          setReadError(null);
+          setReadReport((prev) =>
+            prev &&
+            prev.sha256 === fresh.sha256 &&
+            prev.decoded === fresh.decoded &&
+            prev.warnings === fresh.warnings &&
+            prev.read_past_damage === fresh.read_past_damage
+              ? prev
+              : fresh,
+          );
+          setReadPending(false);
+          if (done.needsFollowUpRead) triggerDwgRead(false);
+        },
+        (e) => {
+          if (!workspaceActiveRef.current) return;
+          const done = completeDwgRead(tracker, gen, null);
+          if (!done.accept) return;
+          if (done.prevSha) revokeLossRef.current(done.prevSha);
+          setOwnRev(null);
+          setReadReport(null);
+          setReadError(why(e, token));
+          setReadPending(false);
+          if (done.needsFollowUpRead) triggerDwgRead(false);
+        },
+      );
+    },
+    [source, token],
+  );
+
   useEffect(() => {
+    workspaceActiveRef.current = true;
+    const tracker = dwgReadTrackerRef.current;
     if (!isDwg) {
+      tracker.gen += 1;
+      tracker.inFlight = false;
+      tracker.cachedSha = null;
+      tracker.latestJournalSha = null;
+      tracker.refreshedForJournalSha = null;
       setReadReport(null);
       setReadPending(false);
       setReadError(null);
       return;
     }
-    let current = true;
-    const seq = ++readSeqRef.current;
-    setReadPending(true);
-    setReadError(null);
-    call<ReadReport>('read', { source, no_mirror: true }, token).then(
-      (report) => {
-        if (!current || seq !== readSeqRef.current) return;
-        setReadReport(report);
-        setReadPending(false);
-      },
-      (e) => {
-        if (!current || seq !== readSeqRef.current) return;
-        setReadReport(null);
-        setReadError(why(e, token));
-        setReadPending(false);
-      },
-    );
+    triggerDwgRead(true);
     return () => {
-      current = false;
+      workspaceActiveRef.current = false;
+      tracker.gen += 1;
     };
-  }, [isDwg, source, token]);
+  }, [isDwg, triggerDwgRead]);
 
   const allowLoss = isDwg && isLossAllowed(readReport?.sha256 ?? null);
   const editGuard = desktop ? dwgEditGuard(sourceKind, readReport, readPending, allowLoss) : 'editable';
@@ -1374,7 +1415,6 @@ function DrawingWorkspace({
       void check(null);
       return;
     }
-    let active = true;
     const stop = watch(
       source,
       token,
@@ -1390,43 +1430,13 @@ function DrawingWorkspace({
         const report = replied.result;
         setNoJournal(null);
         setJournal(report);
-        // When a plant DWG's journal gains an active revision made against a
-        // different original SHA-256 than our cached `readReport.sha256`,
-        // immediately re-read the live original so `sha256`, decode state, and
-        // any stale `allow_loss` consent stay in sync with disk.
-        if (isDwg && !readPendingRef.current) {
+        // Track the newest active `original_sha256` on every journal SSE update
+        // (even while the initial `read` is in flight) and trigger a guarded
+        // `read --no-mirror` refresh whenever it differs from the cached read.
+        if (isDwg) {
           const newestSha = newestActiveOriginalSha(report);
-          const cachedSha = originalShaRef.current;
-          if (newestSha && (!cachedSha || newestSha.toLowerCase() !== cachedSha.toLowerCase())) {
-            const seq = ++readSeqRef.current;
-            void call<ReadReport>('read', { source, no_mirror: true }, token).then(
-              (fresh) => {
-                if (!active || seq !== readSeqRef.current) return;
-                const prevSha = originalShaRef.current;
-                if (prevSha && fresh.sha256.toLowerCase() !== prevSha.toLowerCase()) {
-                  revokeLossRef.current(prevSha);
-                  setOwnRev(null);
-                }
-                setReadError(null);
-                setReadReport((prev) =>
-                  prev &&
-                  prev.sha256 === fresh.sha256 &&
-                  prev.decoded === fresh.decoded &&
-                  prev.warnings === fresh.warnings &&
-                  prev.read_past_damage === fresh.read_past_damage
-                    ? prev
-                    : fresh,
-                );
-              },
-              (e) => {
-                if (!active || seq !== readSeqRef.current) return;
-                const prevSha = originalShaRef.current;
-                if (prevSha) revokeLossRef.current(prevSha);
-                setOwnRev(null);
-                setReadReport(null);
-                setReadError(why(e, token));
-              },
-            );
+          if (noteJournalOriginalSha(dwgReadTrackerRef.current, newestSha)) {
+            triggerDwgRead(false);
           }
         }
         const before = seen.current;
@@ -1530,13 +1540,12 @@ function DrawingWorkspace({
       },
     );
     return () => {
-      active = false;
       stop();
       seen.current = null;
       proposalsSeen.current = null;
       guidesSeen.current = null;
     };
-  }, [source, isDwg, isSheet, token, check, toastFor, log, drawAgain, redrawPreview]);
+  }, [source, isDwg, isSheet, token, check, toastFor, log, drawAgain, redrawPreview, triggerDwgRead]);
 
   // The objects the focused entry changed on the sheet shown, marked.
   const focusedEntry = journal?.entries.find((e) => e.entry === focused);
@@ -1867,10 +1876,20 @@ function DrawingWorkspace({
       // original DWG's SHA-256 on disk so replacing the file at the same path
       // always revokes prior consent and forces fresh acknowledgement.
       if (isDwg && allowLoss && readReport?.sha256) {
-        const fresh = await call<ReadReport>('read', { source, no_mirror: true }, token);
+        const gen = beginDwgRead(dwgReadTrackerRef.current);
+        let fresh: ReadReport;
+        try {
+          fresh = await call<ReadReport>('read', { source, no_mirror: true }, token);
+        } catch (readErr) {
+          completeDwgRead(dwgReadTrackerRef.current, gen, null);
+          throw readErr;
+        }
+        const done = completeDwgRead(dwgReadTrackerRef.current, gen, fresh.sha256);
         if (fresh.sha256 !== readReport.sha256) {
           onRevokeLoss(readReport.sha256);
-          setReadReport(fresh);
+          setOwnRev(null);
+          if (done.accept) setReadReport(fresh);
+          if (done.needsFollowUpRead) triggerDwgRead(false);
           say(
             'warn',
             'Original DWG changed on disk',
@@ -1878,6 +1897,7 @@ function DrawingWorkspace({
           );
           return false;
         }
+        if (done.needsFollowUpRead) triggerDwgRead(false);
       }
       const prepared =
         isDwg && readReport && summary
@@ -1902,14 +1922,18 @@ function DrawingWorkspace({
       return true;
     } catch (e) {
       if (isDwg && e instanceof CommandError && e.code === 'changed_by_hand') {
+        const gen = beginDwgRead(dwgReadTrackerRef.current);
         try {
           const fresh = await call<ReadReport>('read', { source, no_mirror: true }, token);
-          if (readReport?.sha256 && fresh.sha256 !== readReport.sha256) {
+          const done = completeDwgRead(dwgReadTrackerRef.current, gen, fresh.sha256);
+          if (done.accept && readReport?.sha256 && fresh.sha256 !== readReport.sha256) {
             onRevokeLoss(readReport.sha256);
             setOwnRev(null);
             setReadReport(fresh);
           }
+          if (done.needsFollowUpRead) triggerDwgRead(false);
         } catch {
+          completeDwgRead(dwgReadTrackerRef.current, gen, null);
           // Ignore follow-up read error; the original change error is shown below.
         }
       }

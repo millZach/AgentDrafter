@@ -4483,3 +4483,118 @@ fn legacy_journal_entry_without_standalone_output_never_becomes_working_revision
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn same_directory_symlink_alias_working_revision_chains_when_reopened_via_original() {
+    use crate::change::original_journal::original_journal_file;
+    use crate::change::{journal, JournalRequest};
+
+    let dir = scratch("same_dir_symlink_chain");
+    let pump = build_made_up_original(&dir, "Pump");
+    let alias = dir.join("Alias.dwg");
+    std::os::unix::fs::symlink(&pump, &alias).unwrap();
+    let settings = Settings::default().without_system_fonts();
+
+    let circles_at_x = |path: &Path| -> Vec<i64> {
+        let mut xs: Vec<i64> = crate::original::read_dwg_record(path, false)
+            .unwrap()
+            .record
+            .sheet
+            .objects
+            .iter()
+            .filter_map(|o| match o {
+                Object::Circle(c) => Some(c.center.x.round() as i64),
+                _ => None,
+            })
+            .collect();
+        xs.sort();
+        xs
+    };
+
+    // 1. Revise via same-directory symlink `Alias.dwg` -> writes sibling `Alias.rev1.dwg`
+    //    recorded in `Pump.dwg`'s journal.
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: alias,
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [10, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+    let rep1 = r1.result.unwrap();
+    let alias_rev1 = PathBuf::from(rep1.revision_dwg.unwrap());
+    assert_eq!(
+        alias_rev1.file_name().unwrap().to_str().unwrap(),
+        "Alias.rev1.dwg"
+    );
+
+    // Journal reply populates native OS-resolved `revision_path`, while `journal.jsonl`
+    // on disk does NOT persist `revision_path`.
+    let jfile = original_journal_file(&pump).expect("journal file exists");
+    let raw_jsonl = fs::read_to_string(&jfile).unwrap();
+    assert!(
+        !raw_jsonl.contains("revision_path"),
+        "revision_path must be computed on read, never persisted to journal.jsonl: {raw_jsonl}"
+    );
+    let jrep = journal(&JournalRequest { set: pump.clone() })
+        .result
+        .unwrap();
+    let meta1 = jrep.entries[0]
+        .recorded
+        .original_revision
+        .as_ref()
+        .expect("entry 1 has original_revision");
+    let rev_path = meta1
+        .revision_path
+        .as_deref()
+        .expect("journal reply populates native revision_path");
+    assert_eq!(
+        fs::canonicalize(rev_path).unwrap(),
+        fs::canonicalize(&alias_rev1).unwrap()
+    );
+
+    // 2. Reopen and revise via `Pump.dwg` -> must chain onto `Alias.rev1.dwg`
+    //    (keeping circle x=10 alongside new circle x=30)!
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: pump,
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [30, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "{r2:?}");
+    let rep2 = r2.result.unwrap();
+    assert_eq!(
+        rep2.parent_revision.as_ref().map(|p| p.entry),
+        rep1.journal_entry,
+        "reopening Pump.dwg must chain on Alias.rev1.dwg"
+    );
+    assert_eq!(
+        rep2.parent_revision.as_ref().map(|p| p.file.as_str()),
+        Some("Alias.rev1.dwg")
+    );
+    let xs = circles_at_x(Path::new(&rep2.revision_dwg.unwrap()));
+    assert!(
+        xs.contains(&10) && xs.contains(&30),
+        "Pump revision must retain Alias.rev1.dwg edit (10) alongside new edit (30): {xs:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

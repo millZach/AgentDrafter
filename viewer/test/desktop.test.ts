@@ -3,9 +3,12 @@ import { test } from 'node:test';
 
 import {
   allowLossKey,
+  beginDwgRead,
   buildDesktopSearch,
   canUndoDrawing,
   classifySource,
+  completeDwgRead,
+  createDwgReadTracker,
   dwgEditGuard,
   isAbsolutePath,
   isWindowsPath,
@@ -17,6 +20,7 @@ import {
   newestActiveOriginalSha,
   nextRevisionHint,
   normalizeOriginalChangeSet,
+  noteJournalOriginalSha,
   parseDesktopUrl,
   removeRecentLocal,
   resolveBeside,
@@ -92,12 +96,18 @@ test('resolves revision DWG paths beside POSIX and Windows originals', () => {
   // Relative POSIX path containing `/` with leading backslashes must NOT be mistaken for a Windows UNC path.
   assert.equal(isWindowsPath('\\\\yard/\\\\part.dwg'), false);
   assert.equal(isWindowsPath('\\yard/\\part.dwg'), false);
+  assert.equal(isWindowsPath('\\\\yard/part.dwg'), false);
   assert.equal(isWindowsPath('\\\\server\\share\\A.dwg'), true);
+  assert.equal(isWindowsPath('\\\\server\\share/folder\\part.dwg'), true);
   assert.equal(isWindowsPath('C:\\demo\\A.dwg'), true);
   assert.equal(resolveBeside('\\yard/\\part.dwg', '\\part.rev1.dwg'), '\\yard/\\part.rev1.dwg');
   assert.equal(resolveBeside('\\\\yard/\\\\part.dwg', '\\\\part.rev1.dwg'), '\\\\yard/\\\\part.rev1.dwg');
   assert.equal(resolveBeside('C:\\demo\\A.dwg', 'A.rev1.dwg'), 'C:\\demo\\A.rev1.dwg');
   assert.equal(resolveBeside('\\\\server\\share\\A.dwg', 'A.rev1.dwg'), '\\\\server\\share\\A.rev1.dwg');
+  assert.equal(
+    resolveBeside('\\\\server\\share/folder\\part.dwg', 'part.rev1.dwg'),
+    '\\\\server\\share/folder\\part.rev1.dwg',
+  );
   assert.equal(resolveBeside('\\\\server\\share\\P-101.dwg', '\\\\other\\share\\custom.dwg'), '\\\\other\\share\\custom.dwg');
 });
 
@@ -376,6 +386,43 @@ test('resolves active and stepped revisions from an original DWG journal and nor
     sha256: 'revA',
   });
 
+  // Same-directory symlink alias: Pump.dwg revised via Alias.dwg -> Alias.rev1.dwg,
+  // plus core-provided native `revision_path` preferred over client-side `resolveBeside`.
+  const aliasAndNativePathJournal: JournalReport = {
+    set: '/plant/Pump.dwg',
+    message: '1 entry',
+    can_undo: [1],
+    entries: [
+      {
+        entry: 1,
+        kind: 'change_set',
+        at: '2026-11-22T18:00:00Z',
+        landed_on: ['Pump'],
+        original_revision: {
+          original_file: 'Pump.dwg',
+          original_sha256: 'pumpSha',
+          dwg_version: 'AC1032',
+          revision_dwg: 'Alias.rev1.dwg',
+          revision_sha256: 'aliasRev1Sha',
+          revision_path: '/real-plant/Alias.rev1.dwg',
+        },
+      },
+    ],
+  };
+  assert.deepEqual(latestActiveRevision(aliasAndNativePathJournal, '/plant/Pump.dwg', 'pumpSha'), {
+    path: '/real-plant/Alias.rev1.dwg',
+    file: 'Alias.rev1.dwg',
+    entry: 1,
+    dwgVersion: 'AC1032',
+    sha256: 'aliasRev1Sha',
+    originalSha256: 'pumpSha',
+  });
+  assert.deepEqual(revisionAtEntry(aliasAndNativePathJournal, 1, '/plant/Pump.dwg', 'pumpSha'), {
+    path: '/real-plant/Alias.rev1.dwg',
+    file: 'Alias.rev1.dwg',
+    sha256: 'aliasRev1Sha',
+  });
+
   // Change set generated while displaying P-101.rev1.dwg rewrites sheet & handle prefix back to P-101.
   const cs = {
     operations: [
@@ -425,4 +472,70 @@ test('merges, caps, removes, and persists fallback local recents cleanly', () =>
   };
   saveLocalRecents(store, list);
   assert.deepEqual(loadLocalRecents(store), list);
+});
+
+test('DwgReadTracker rejects out-of-order read completions and refreshes after SSE during initial read', () => {
+  // 1. Out-of-order completions: slow read B (gen 2) arriving after newer read A (gen 3) is ignored.
+  const t1 = createDwgReadTracker();
+  const g1 = beginDwgRead(t1);
+  assert.deepEqual(completeDwgRead(t1, g1, 'hashA'), {
+    accept: true,
+    prevSha: null,
+    changed: false,
+    needsFollowUpRead: false,
+  });
+  assert.equal(noteJournalOriginalSha(t1, 'hashB'), true);
+  const slowB = beginDwgRead(t1);
+  // Newer read starts and finishes before slowB resolves.
+  const fastA = beginDwgRead(t1);
+  assert.deepEqual(completeDwgRead(t1, fastA, 'hashA'), {
+    accept: true,
+    prevSha: 'hasha',
+    changed: false,
+    needsFollowUpRead: false,
+  });
+  // Slow B finally returns -> rejected because slowB !== t1.gen!
+  assert.deepEqual(completeDwgRead(t1, slowB, 'hashB'), {
+    accept: false,
+    prevSha: null,
+    changed: false,
+    needsFollowUpRead: false,
+  });
+  assert.equal(t1.cachedSha, 'hasha');
+
+  // 2. SSE arrives while initial read is in flight with a different original_sha256 ->
+  //    once initial read finishes with hashA, tracker requests ONE follow-up read.
+  const t2 = createDwgReadTracker();
+  const initGen = beginDwgRead(t2);
+  // SSE arrives during initial read: returns false (don't race), remembers hashB.
+  assert.equal(noteJournalOriginalSha(t2, 'hashB'), false);
+  assert.deepEqual(completeDwgRead(t2, initGen, 'hashA'), {
+    accept: true,
+    prevSha: null,
+    changed: false,
+    needsFollowUpRead: true,
+  });
+  // Follow-up read runs and discovers disk is now hashB (changed = true, no second follow-up).
+  const followGen = beginDwgRead(t2);
+  assert.deepEqual(completeDwgRead(t2, followGen, 'hashB'), {
+    accept: true,
+    prevSha: 'hasha',
+    changed: true,
+    needsFollowUpRead: false,
+  });
+  // Repeat SSE with same hashB does not loop.
+  assert.equal(noteJournalOriginalSha(t2, 'hashB'), false);
+
+  // 3. Even if disk was swapped back to hashA while journal stays on hashB, follow-up does NOT infinite-loop.
+  const t3 = createDwgReadTracker();
+  const gInit = beginDwgRead(t3);
+  assert.equal(noteJournalOriginalSha(t3, 'hashB'), false);
+  assert.equal(completeDwgRead(t3, gInit, 'hashA').needsFollowUpRead, true);
+  const gFollow = beginDwgRead(t3);
+  assert.deepEqual(completeDwgRead(t3, gFollow, 'hashA'), {
+    accept: true,
+    prevSha: 'hasha',
+    changed: false,
+    needsFollowUpRead: false,
+  });
 });

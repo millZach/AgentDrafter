@@ -803,10 +803,14 @@ impl OriginalJournal {
     }
 
     /// Whether `revision_dwg` (as stored in `OriginalRevisionMeta::revision_dwg`)
-    /// is a sibling automatic working-revision filename (`<orig-stem>.rev<N>.dwg`
+    /// is a sibling automatic working-revision filename (`<non-empty-stem>.rev<N>.dwg`
     /// with no directory components), as opposed to a standalone `--output` path
     /// (including legacy journal entries written before `standalone_output`).
-    fn is_default_working_revision_dwg(&self, revision_dwg: &str) -> bool {
+    ///
+    /// Accepts any non-empty stem so same-directory symlink aliases (e.g.
+    /// revising `Pump.dwg` through `Alias.dwg` -> `Alias.rev1.dwg`, then
+    /// reopening via `Pump.dwg`) stay recognized as valid working revisions.
+    fn is_default_working_revision_dwg(revision_dwg: &str) -> bool {
         if revision_dwg.is_empty() || revision_dwg.contains('/') {
             return false;
         }
@@ -820,28 +824,27 @@ impl OriginalJournal {
         let Some(name) = file_name.to_str() else {
             return false;
         };
-        let Some(without_ext) = name.strip_suffix(".dwg") else {
+        let Some(without_ext) = name.strip_suffix(".dwg").or_else(|| {
+            let ext_start = name.len().checked_sub(4)?;
+            name.is_char_boundary(ext_start)
+                .then(|| &name[ext_start..])
+                .filter(|ext| ext.eq_ignore_ascii_case(".dwg"))
+                .map(|_| &name[..ext_start])
+        }) else {
             return false;
         };
         let Some((stem, num)) = without_ext.rsplit_once(".rev") else {
             return false;
         };
-        if num.is_empty()
+        if stem.is_empty()
+            || num.is_empty()
             || num.starts_with('0')
             || !num.bytes().all(|b| b.is_ascii_digit())
             || num.parse::<u64>().ok().is_none_or(|v| v == 0)
         {
             return false;
         }
-        let source_stem = stem_of(&self.source);
-        #[cfg(any(windows, target_os = "macos"))]
-        {
-            stem.eq_ignore_ascii_case(&self.sheet) || stem.eq_ignore_ascii_case(&source_stem)
-        }
-        #[cfg(not(any(windows, target_os = "macos")))]
-        {
-            stem == self.sheet || stem == source_stem
-        }
+        true
     }
 
     /// Returns the newest active (finished, non-undone, non-standalone) working
@@ -868,7 +871,8 @@ impl OriginalJournal {
             let Some(meta) = entry.original_revision.as_ref() else {
                 continue;
             };
-            if meta.standalone_output || !self.is_default_working_revision_dwg(&meta.revision_dwg) {
+            if meta.standalone_output || !Self::is_default_working_revision_dwg(&meta.revision_dwg)
+            {
                 continue;
             }
             let path = self.resolve_file(&meta.revision_dwg);
@@ -1129,10 +1133,15 @@ pub(super) fn journal_original(request: &JournalRequest) -> Reply<JournalReport>
         Ok(rb) => rb,
         Err(error) => return Reply::from(Err(error)),
     };
-    let entries = match oj.read_entries() {
+    let mut entries = match oj.read_entries() {
         Ok(entries) => entries,
         Err(error) => return Reply::from(Err(error)).after(rolled_back),
     };
+    for entry in &mut entries {
+        if let Some(meta) = entry.original_revision.as_mut() {
+            meta.revision_path = Some(oj.display_file(&meta.revision_dwg));
+        }
+    }
     let report = build_journal_report(
         &oj.source,
         &oj.journal_file,

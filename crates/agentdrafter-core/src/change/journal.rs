@@ -151,6 +151,10 @@ pub struct OriginalRevisionMeta {
     /// standalone destination rather than the sequential working revision chain.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub standalone_output: bool,
+    /// Native OS-resolved path of `revision_dwg`, populated at read time when
+    /// building a `journal` reply and never persisted into `journal.jsonl`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_path: Option<String>,
 }
 
 /// One entry of the journal, as its line holds it.

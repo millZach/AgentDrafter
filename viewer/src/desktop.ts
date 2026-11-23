@@ -117,14 +117,15 @@ export function getDesktopBridge(): DesktopBridge | null {
 }
 
 /**
- * Whether `path` uses Windows path syntax (`C:\…`, `C:/…`, or UNC `\\server\…`).
- * Any POSIX path (including relative POSIX paths containing `/` such as
- * `\\yard/\\part.dwg` or bare POSIX filenames starting with `\\`) never treats
- * literal `\` characters as directory separators.
+ * Whether `path` uses Windows path syntax: a drive letter (`C:\…`, `C:/…`) or
+ * a UNC prefix (`\\server\share…`, including mixed-separator paths like
+ * `\\server\share/folder\part.dwg`). Relative POSIX paths such as
+ * `\\yard/\\part.dwg` or bare filenames like `\\weird.dwg` do NOT match
+ * `\\host\share` and keep POSIX `/` directory semantics.
  */
 export function isWindowsPath(path: string): boolean {
   if (/^[A-Za-z]:[\\/]/.test(path)) return true;
-  return path.startsWith('\\\\') && !path.includes('/') && path.indexOf('\\', 2) > 2;
+  return /^\\\\[^\\/]+\\[^\\/]+/.test(path);
 }
 
 function stripTrailingSeparators(path: string): string {
@@ -202,7 +203,9 @@ export function resolveBeside(originalPath: string, relOrAbs: string): string {
   const parent = sourceParentDir(originalPath);
   if (!parent) return relOrAbs;
   if (winOrig) {
-    const sep = originalPath.includes('\\') && !originalPath.includes('/') ? '\\' : '/';
+    const lastSlash = originalPath.lastIndexOf('/');
+    const lastBack = originalPath.lastIndexOf('\\');
+    const sep = lastBack >= lastSlash ? '\\' : '/';
     const cleanedRel = sep === '\\' ? relOrAbs.replace(/\//g, '\\') : relOrAbs;
     return parent.endsWith('/') || parent.endsWith('\\') ? `${parent}${cleanedRel}` : `${parent}${sep}${cleanedRel}`;
   }
@@ -232,34 +235,110 @@ function matchesOriginalSha(recorded: string | undefined, expected: string | nul
   return recorded.toLowerCase() === expected.toLowerCase();
 }
 
-function matchesWorkingRevisionStem(revisionDwg: string, origPathOrName: string, winOrig: boolean): boolean {
+function isDefaultWorkingRevisionName(revisionDwg: string, winOrig: boolean): boolean {
   if (!revisionDwg) return false;
   if (winOrig) {
     if (revisionDwg.includes('/') || revisionDwg.includes('\\') || isAbsolutePath(revisionDwg)) return false;
   } else if (revisionDwg.includes('/')) {
     return false;
   }
-  if (!revisionDwg.endsWith('.dwg')) return false;
+  if (!/\.dwg$/i.test(revisionDwg)) return false;
   const withoutExt = revisionDwg.slice(0, -4);
   const revIdx = withoutExt.lastIndexOf('.rev');
-  if (revIdx < 0) return false;
-  const stem = withoutExt.slice(0, revIdx);
+  if (revIdx <= 0) return false;
   const num = withoutExt.slice(revIdx + 4);
-  if (!/^[1-9]\d*$/.test(num)) return false;
-  const origStem = displayNameWithMode(origPathOrName, winOrig).replace(/\.dwg$/i, '');
-  return winOrig ? stem.toLowerCase() === origStem.toLowerCase() : stem === origStem;
+  return /^[1-9]\d*$/.test(num);
 }
 
 function isWorkingRevisionMeta(
   meta: NonNullable<Entry['original_revision']> | undefined,
-  originalPath: string,
   winOrig: boolean,
 ): meta is NonNullable<Entry['original_revision']> {
   if (!meta?.revision_dwg || meta.standalone_output) return false;
-  return (
-    matchesWorkingRevisionStem(meta.revision_dwg, originalPath, winOrig) ||
-    (!!meta.original_file && matchesWorkingRevisionStem(meta.revision_dwg, meta.original_file, winOrig))
-  );
+  return isDefaultWorkingRevisionName(meta.revision_dwg, winOrig);
+}
+
+/**
+ * Monotonic generation tracker for async `read --no-mirror` requests on a plant
+ * DWG, coordinating initial reads, SSE-triggered refreshes, and pre-edit checks:
+ * - Any response with `gen !== tracker.gen` is rejected so slow out-of-order
+ *   reads never overwrite a newer read.
+ * - Any journal SSE `original_sha256` arriving while a read is in flight is
+ *   remembered so `completeDwgRead` triggers a single follow-up read if the
+ *   completed read's SHA-256 differs from the journal's newest active entry.
+ */
+export interface DwgReadTracker {
+  gen: number;
+  inFlight: boolean;
+  cachedSha: string | null;
+  latestJournalSha: string | null;
+  refreshedForJournalSha: string | null;
+}
+
+export function createDwgReadTracker(): DwgReadTracker {
+  return {
+    gen: 0,
+    inFlight: false,
+    cachedSha: null,
+    latestJournalSha: null,
+    refreshedForJournalSha: null,
+  };
+}
+
+/** Starts a new async `read --no-mirror` and returns its monotonic generation ID. */
+export function beginDwgRead(tracker: DwgReadTracker): number {
+  tracker.gen += 1;
+  tracker.inFlight = true;
+  return tracker.gen;
+}
+
+/**
+ * Notes the newest active `original_sha256` from a journal SSE snapshot.
+ * Returns `true` when the caller should immediately start a fresh `read --no-mirror`.
+ * While a read is already in flight, records the SHA so `completeDwgRead` triggers
+ * a follow-up read once the in-flight read finishes with a different SHA-256.
+ */
+export function noteJournalOriginalSha(tracker: DwgReadTracker, journalSha: string | null): boolean {
+  if (!journalSha) return false;
+  const norm = journalSha.toLowerCase();
+  if (tracker.latestJournalSha !== norm) {
+    tracker.latestJournalSha = norm;
+    tracker.refreshedForJournalSha = null;
+  }
+  if (tracker.inFlight) return false;
+  if (tracker.cachedSha && tracker.cachedSha === norm) return false;
+  if (tracker.refreshedForJournalSha === norm) return false;
+  tracker.refreshedForJournalSha = norm;
+  return true;
+}
+
+/**
+ * Completes an async `read --no-mirror` for `gen`. Rejects stale/out-of-order
+ * responses (`gen !== tracker.gen`) without mutating state.
+ */
+export function completeDwgRead(
+  tracker: DwgReadTracker,
+  gen: number,
+  freshSha: string | null,
+): { accept: boolean; prevSha: string | null; changed: boolean; needsFollowUpRead: boolean } {
+  if (gen !== tracker.gen) {
+    return { accept: false, prevSha: null, changed: false, needsFollowUpRead: false };
+  }
+  const prevSha = tracker.cachedSha;
+  const normFresh = freshSha ? freshSha.toLowerCase() : null;
+  tracker.inFlight = false;
+  tracker.cachedSha = normFresh;
+  const changed = !!prevSha && (!normFresh || normFresh !== prevSha);
+  let needsFollowUpRead = false;
+  if (
+    tracker.latestJournalSha &&
+    tracker.latestJournalSha !== normFresh &&
+    tracker.refreshedForJournalSha !== tracker.latestJournalSha
+  ) {
+    tracker.refreshedForJournalSha = tracker.latestJournalSha;
+    needsFollowUpRead = true;
+  }
+  return { accept: true, prevSha, changed, needsFollowUpRead };
 }
 
 /**
@@ -294,10 +373,11 @@ export function latestActiveRevision(
     const e = journal.entries[i] as Entry | undefined;
     if (!e || e.kind !== 'change_set' || e.undone_by || e.rolled_back) continue;
     const meta = e.original_revision;
-    if (!isWorkingRevisionMeta(meta, originalPath, winOrig)) continue;
+    if (!isWorkingRevisionMeta(meta, winOrig)) continue;
     if (!matchesOriginalSha(meta.original_sha256, expectedOriginalSha256)) return null;
+    const path = meta.revision_path || resolveBeside(originalPath, meta.revision_dwg);
     return {
-      path: resolveBeside(originalPath, meta.revision_dwg),
+      path,
       file: displayNameWithMode(meta.revision_dwg, winOrig),
       entry: e.entry,
       dwgVersion: meta.dwg_version,
@@ -336,10 +416,11 @@ export function revisionAtEntry(
     if (!e || e.entry > entryNumber) continue;
     if (e.kind !== 'change_set' || e.rolled_back || undoneByThen.has(e.entry) || e.undone_by) continue;
     const meta = e.original_revision;
-    if (!isWorkingRevisionMeta(meta, originalPath, winOrig)) continue;
+    if (!isWorkingRevisionMeta(meta, winOrig)) continue;
     if (!matchesOriginalSha(meta.original_sha256, expectedOriginalSha256)) return null;
+    const path = meta.revision_path || resolveBeside(originalPath, meta.revision_dwg);
     return {
-      path: resolveBeside(originalPath, meta.revision_dwg),
+      path,
       file: displayNameWithMode(meta.revision_dwg, winOrig),
       sha256: meta.revision_sha256,
     };

@@ -66,6 +66,8 @@ export interface Entry {
     revision_sha256: string;
     allowed_loss?: boolean;
     standalone_output?: boolean;
+    /** Native OS-resolved path populated by the core when reading the journal. */
+    revision_path?: string;
   };
   undo_state?: 'kept' | 'pruned' | 'undone';
   undone_by?: number;

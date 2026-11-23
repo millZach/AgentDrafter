@@ -391,6 +391,7 @@ pub fn revise_with(request: &ReviseRequest, settings: &Settings) -> Reply<Revisi
                 revision_sha256: rev_meta.sha256.clone(),
                 allowed_loss: ready.report.allowed_loss,
                 standalone_output: request.output.is_some(),
+                revision_path: None,
             };
             match oj.commit_revision(&locked, &request.change_set, objects, meta, &new_files) {
                 Ok(entry_num) => {
