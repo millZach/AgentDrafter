@@ -1197,7 +1197,7 @@ fn does(spec: &Spec) -> String {
                              `[0, 0, 0]`) unless `place` is false. AutoCAD's XATTACH / XREF."
             .to_owned(),
         Kind::DetachXref => "Detaches the external reference `name` and deletes every insert \
-                             that places it. AutoCAD's XREF Detach."
+                             that places it. AutoCAD's XDETACH (XREF Detach)."
             .to_owned(),
         Kind::BindXref => "Binds the external reference `name` into a local block definition \
                            holding the referenced drawing's model-space objects, importing its \
