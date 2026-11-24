@@ -451,6 +451,7 @@ fn place_object(
                 rotation,
                 justify: t.justify,
                 layer,
+                field: t.field.clone(),
                 properties,
             }))
         }
@@ -473,6 +474,7 @@ fn place_object(
                 rotation,
                 justify: t.justify,
                 layer,
+                field: t.field.clone(),
                 properties,
             }))
         }
@@ -922,6 +924,7 @@ fn explode_dimension(
                             rotation: laid.text.rotation,
                             justify: Justify::Left,
                             layer: dim.layer.clone(),
+                            field: None,
                             properties: text_props.clone(),
                         }));
                     }
@@ -1137,6 +1140,7 @@ mod tests {
             layout: None,
             other_layouts: Vec::new(),
             wipeout_frame: crate::model::WipeoutFrame::Off,
+            custom_properties: BTreeMap::new(),
         }
     }
 
@@ -1218,10 +1222,12 @@ mod tests {
                 Attribute {
                     tag: "TAG".to_owned(),
                     value: "XV-101".to_owned(),
+                    field: None,
                 },
                 Attribute {
                     tag: "SECRET".to_owned(),
                     value: "X".to_owned(),
+                    field: None,
                 },
             ],
             state: BTreeMap::new(),

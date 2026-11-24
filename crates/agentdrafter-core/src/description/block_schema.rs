@@ -196,6 +196,28 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                         ],
                     },
                 },
+                "attribute_fields": {
+                    "description": "AutoCAD fields attached to the insert's carried attributes, \
+                                    from tag to field definition (or a list of field definitions \
+                                    or nulls for a tag the block defines more than once).",
+                    "type": "object",
+                    "propertyNames": { "$ref": "#/$defs/attribute_tag" },
+                    "additionalProperties": {
+                        "anyOf": [
+                            { "$ref": "#/$defs/field" },
+                            { "type": "null" },
+                            {
+                                "type": "array",
+                                "items": {
+                                    "anyOf": [
+                                        { "$ref": "#/$defs/field" },
+                                        { "type": "null" },
+                                    ],
+                                },
+                            },
+                        ],
+                    },
+                },
                 "state": { "$ref": "#/$defs/dynamic_state" },
             }),
         ),

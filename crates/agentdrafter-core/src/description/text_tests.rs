@@ -73,7 +73,9 @@ fn text_reads_every_key() {
             width_factor: 1.2,
             rotation: 270.0,
             justify: Justify::MiddleCenter,
-            layer: "0".into(), properties: Default::default(),
+            layer: "0".into(),
+            field: None,
+            properties: Default::default(),
         })
     );
 }
@@ -127,6 +129,7 @@ fn mtext_reads_every_key_and_drops_line_breaks_at_the_end() {
             rotation: 45.0,
             justify: Attachment::BottomRight,
             layer: "0".into(),
+            field: None,
             properties: Default::default(),
         })
     );

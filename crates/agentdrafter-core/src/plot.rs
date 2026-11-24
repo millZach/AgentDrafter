@@ -557,6 +557,7 @@ pub(crate) fn plot_dwg_bytes(
         layout: drawing.layout,
         other_layouts: drawing.other_layouts,
         wipeout_frame: drawing.wipeout_frame,
+        custom_properties: drawing.custom_properties,
     };
     let record = Record {
         sheet,

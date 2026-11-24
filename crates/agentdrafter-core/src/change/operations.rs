@@ -101,6 +101,9 @@ pub(crate) enum Kind {
     /// hatch, dimension, multileader, leader or table) into the simpler objects
     /// that draw it: AutoCAD's EXPLODE.
     Explode,
+    /// Attaches, updates, or clears an AutoCAD field on a text, mtext, or
+    /// insert attribute: AutoCAD's FIELD.
+    SetField,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -329,7 +332,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 80] = [
+pub(crate) const SPECS: [Spec; 81] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -498,6 +501,11 @@ pub(crate) const SPECS: [Spec; 80] = [
         name: "explode",
         alias: "EXPLODE",
         kind: Kind::Explode,
+    },
+    Spec {
+        name: "set_field",
+        alias: "FIELD",
+        kind: Kind::SetField,
     },
     grid("set_cell", "TABLEDIT", GridOp::SetCell),
     grid("add_row", "", GridOp::Add(Axis::Row)),
@@ -1131,6 +1139,14 @@ fn does(spec: &Spec) -> String {
                           hatch, dimension, multileader, leader or table into the objects that \
                           draw it. Removes the source object(s) (`deleted`), assigns each new \
                           object its own ID, and lists them under `created`. AutoCAD's EXPLODE (X)."
+            .to_owned(),
+        Kind::SetField => "Attaches, updates, or clears an AutoCAD field (`FIELD`) on a text, \
+                           multiline text, or insert attribute (`tag`, with optional `occurrence` \
+                           for repeated tags). Pass `field` as a single field item (`kind`: \
+                           `filename`, `save_date`, `plot_date`, `create_date`, `date`, \
+                           `sheet_number`, `custom_property`, `object_property`, or `code`) or a \
+                           multi-field `{template, items}`, or `field: null` to convert the host \
+                           back to plain text. AutoCAD's FIELD."
             .to_owned(),
     }
 }
@@ -2708,6 +2724,40 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
             copied_objects_properties(&mut schema);
             schema
         }
+        Kind::SetField => json!({
+            "type": "object",
+            "required": ["target", "field"],
+            "additionalProperties": false,
+            "properties": {
+                "target": { "$ref": "#/$defs/target" },
+                "tag": {
+                    "description": "When `target` is an insert, the attribute tag to attach or \
+                                    clear the field on. Omit for a text or mtext target.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "occurrence": {
+                    "description": "Which attribute to set when the insert's block defines `tag` \
+                                    more than once, counted from 1.",
+                    "type": "integer",
+                    "minimum": 1,
+                },
+                "field": {
+                    "description": "The AutoCAD field definition to attach, or `null` to clear \
+                                    the field and keep plain text.",
+                    "anyOf": [
+                        crate::description::field::field_schema(),
+                        { "type": "null" },
+                    ],
+                },
+                "value": {
+                    "description": "Optional explicit display text for the host object or \
+                                    attribute (overrides auto-evaluated display text, or sets \
+                                    the plain text when clearing with `field: null`).",
+                    "type": "string",
+                },
+            },
+        }),
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
@@ -3946,6 +3996,15 @@ pub(crate) enum Body {
     SetBlockState {
         target: Target,
         state: Map<String, Value>,
+    },
+    /// Attaches, replaces, or clears an AutoCAD field on a text, mtext, or
+    /// insert attribute: AutoCAD's FIELD.
+    SetField {
+        target: Target,
+        tag: Option<String>,
+        occurrence: Option<usize>,
+        field: Option<crate::model::TextField>,
+        value: Option<String>,
     },
     /// Sets an attribute on every insert matching a query selection: AutoCAD's
     /// GATTE.
@@ -5392,6 +5451,84 @@ fn operation(
                 }
             };
             Body::SetBlockState { target, state }
+        }
+        Kind::SetField => {
+            keys(&["target", "tag", "occurrence", "field", "value"])?;
+            let target = target()?;
+            let tag = match map.get("tag") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`tag` cannot be empty".to_owned(),
+                        "tag",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `tag`, an attribute tag name".to_owned(),
+                        "tag",
+                    ))
+                }
+            };
+            let occurrence = match map.get("occurrence") {
+                None | Some(Value::Null) => None,
+                Some(Value::Number(n)) if n.as_u64().is_some_and(|v| v >= 1) => {
+                    if tag.is_none() {
+                        return Err(fail(
+                            ErrorCode::BadValue,
+                            "`occurrence` requires `tag`".to_owned(),
+                            "occurrence",
+                        ));
+                    }
+                    Some(n.as_u64().unwrap() as usize)
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`occurrence` is a whole number from 1".to_owned(),
+                        "occurrence",
+                    ))
+                }
+            };
+            let field =
+                match map.get("field") {
+                    Some(Value::Null) => None,
+                    Some(val) => {
+                        let parsed = crate::description::field::parse_field_json(val, "field")
+                            .map_err(|e| {
+                                let f = e.field.as_deref().unwrap_or("field");
+                                fail(e.code, e.message, f)
+                            })?;
+                        Some(parsed)
+                    }
+                    None => return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `field`: give a field definition, or `null` to clear a field"
+                            .to_owned(),
+                        "field",
+                    )),
+                };
+            let value = match map.get("value") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `value`, a text string".to_owned(),
+                        "value",
+                    ))
+                }
+            };
+            Body::SetField {
+                target,
+                tag,
+                occurrence,
+                field,
+                value,
+            }
         }
         Kind::SetAttributes => {
             keys(&[

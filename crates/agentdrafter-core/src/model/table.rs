@@ -358,6 +358,7 @@ impl Table {
             rotation: 0.0,
             justify,
             layer: self.layer.clone(),
+            field: None,
             properties: self.properties.clone(),
         })
     }

@@ -96,7 +96,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, objects_key, paper_key, layout_key, layouts_key] =
+    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, custom_properties_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, objects_key, paper_key, layout_key, layouts_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -124,6 +124,7 @@ pub fn sheet_description_schema() -> Value {
                                 shown and plotted) or `display` (2, shown on screen, not plotted).",
                 "enum": super::wipeout::WIPEOUT_FRAME_NAMES,
             },
+            custom_properties_key: super::field::custom_properties_property(),
             linetypes_key: linetypes,
             layers_key: layers,
             hatch_patterns_key: hatch_patterns,
@@ -989,6 +990,7 @@ fn defs() -> Map<String, Value> {
             spline
         },
     );
+    super::field::add_field_defs(&mut defs);
     hatch_schema::add_defs(&mut defs);
     text_defs(&mut defs);
     table_schema::table_defs(&mut defs);
@@ -1063,20 +1065,21 @@ fn text_defs(defs: &mut Map<String, Value>) {
             "description": "The height of the capitals: a length more than 0.",
         }),
     );
-    defs.insert(
-        "text".into(),
-        object_def(
+    defs.insert("text".into(), {
+        let mut text = object_def(
             "A single line of text, as AutoCAD's TEXT draws it.",
-            &["contents", "position", "height"],
+            &["position", "height"],
             json!({
                 "contents": {
                     "description": "What the text says, exactly as it shows: one line, \
                                     something that shows, so not empty and not only white \
                                     space, with no control characters. `%` shows as a percent \
-                                    sign, however many there are.",
+                                    sign, however many there are. May be omitted when `field` is \
+                                    given.",
                     "type": TEXT_TYPES,
                     "pattern": shows_pattern(),
                 },
+                "field": { "$ref": "#/$defs/field" },
                 "position": {
                     "$ref": "#/$defs/point",
                     "description": "The point the text is justified at.",
@@ -1099,23 +1102,29 @@ fn text_defs(defs: &mut Map<String, Value>) {
                     "enum": Justify::ALL.map(Justify::name),
                 },
             }),
-        ),
-    );
-    defs.insert(
-        "mtext".into(),
-        object_def(
+        );
+        text["anyOf"] = json!([
+            { "required": ["contents"] },
+            { "required": ["field"] },
+        ]);
+        text
+    });
+    defs.insert("mtext".into(), {
+        let mut mtext = object_def(
             "Text of one or more lines in a box, as AutoCAD's MTEXT draws it.",
-            &["contents", "position", "height"],
+            &["position", "height"],
             json!({
                 "contents": {
                     "description": "What the text says, exactly as it shows: something that \
                                     shows, so not empty and not only white space. A line \
                                     break starts a new line, and line breaks at the end are \
                                     dropped. No control characters but line breaks. A \\, { or } \
-                                    shows as itself; formatting codes are not read.",
+                                    shows as itself; formatting codes are not read. May be \
+                                    omitted when `field` is given.",
                     "type": TEXT_TYPES,
                     "pattern": shows_pattern(),
                 },
+                "field": { "$ref": "#/$defs/field" },
                 "position": {
                     "$ref": "#/$defs/point",
                     "description": "The point the text's box is attached at.",
@@ -1141,8 +1150,13 @@ fn text_defs(defs: &mut Map<String, Value>) {
                     "enum": Attachment::ALL.map(Attachment::name),
                 },
             }),
-        ),
-    );
+        );
+        mtext["anyOf"] = json!([
+            { "required": ["contents"] },
+            { "required": ["field"] },
+        ]);
+        mtext
+    });
 }
 
 /// The definition of one object type: its own `properties`, its `layer`,

@@ -170,6 +170,7 @@ pub(crate) fn read_record_with_recovery(
             layout: drawing.layout,
             other_layouts: drawing.other_layouts,
             wipeout_frame: drawing.wipeout_frame,
+            custom_properties: drawing.custom_properties,
         };
         return Ok(Record {
             sheet,

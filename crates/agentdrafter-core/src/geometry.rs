@@ -152,6 +152,33 @@ fn arc_sweep(start_angle: f64, end_angle: f64) -> (f64, f64) {
     (start_angle.to_radians(), sweep.to_radians())
 }
 
+/// The curve of an ellipse (whole or arc), for length and geometry evaluation.
+pub(crate) fn ellipse_curve(e: &crate::model::Ellipse) -> Curve {
+    let major = [e.major_axis.x, e.major_axis.y];
+    let minor = [-major[1] * e.ratio, major[0] * e.ratio];
+    let (start, sweep) = if e.is_whole() {
+        (0.0, TAU)
+    } else {
+        let start = ellipse_parameter(e.start_angle, e.ratio);
+        let end = ellipse_parameter(e.end_angle, e.ratio);
+        let sweep = (end - start).rem_euclid(TAU);
+        (start, if sweep == 0.0 { TAU } else { sweep })
+    };
+    Curve::Ellipse {
+        center: p3(e.center),
+        major,
+        minor,
+        start,
+        sweep,
+    }
+}
+
+/// The B-spline curve of a spline, if well-formed.
+pub(crate) fn spline_curve(spline: &crate::model::Spline) -> Option<Curve> {
+    spline_definition(spline)
+        .map(|(degree, control, knots)| Curve::Spline(BSpline::new(degree, control, knots)))
+}
+
 /// The curve of a polyline's segment that starts at point `i`.
 pub(crate) fn polyline_segment(polyline: &Polyline, i: usize) -> Option<Curve> {
     let n = polyline.points.len();

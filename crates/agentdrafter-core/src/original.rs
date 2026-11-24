@@ -339,6 +339,7 @@ pub(crate) fn dwg_loaded_from_drawing(
         layout: drawing.layout,
         other_layouts: drawing.other_layouts,
         wipeout_frame: drawing.wipeout_frame,
+        custom_properties: drawing.custom_properties,
     };
     let record = SheetRecord {
         name: sheet_name,

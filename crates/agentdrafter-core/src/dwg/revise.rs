@@ -197,6 +197,7 @@ pub(crate) struct RevisionSession {
     expected_block_records_added: HashSet<String>,
     expected_non_graphical_changed: HashSet<u64>,
     expected_non_graphical_added: HashSet<u64>,
+    expected_non_graphical_removed: HashSet<u64>,
     app_registered: bool,
     revcloud_app_registered: bool,
 }
@@ -249,6 +250,7 @@ impl RevisionSession {
             expected_block_records_added: HashSet::new(),
             expected_non_graphical_changed: HashSet::new(),
             expected_non_graphical_added: HashSet::new(),
+            expected_non_graphical_removed: HashSet::new(),
             app_registered: false,
             revcloud_app_registered: false,
         })
@@ -1036,6 +1038,335 @@ impl RevisionSession {
         ))
     }
 
+    /// Attaches, replaces, or clears an AutoCAD field (`FIELD`) on a `Text`,
+    /// `MText`, or an `Insert`'s attribute (when `tag` is provided), directly
+    /// in `CadDocument`, whitelisting only the exact mutated/added/removed
+    /// non-graphical field objects so untouched plant fields stay untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn set_field(
+        &mut self,
+        hex: &str,
+        tag: Option<&str>,
+        occurrence: Option<usize>,
+        field: Option<&crate::model::TextField>,
+        display_slots: &[String],
+        explicit_text: Option<&str>,
+        id_to_hex: &std::collections::HashMap<String, String>,
+    ) -> Result<(String, MutationHandles), Error> {
+        let mut id_to_handle: std::collections::HashMap<String, Handle> =
+            std::collections::HashMap::with_capacity(id_to_hex.len());
+        for (k, v) in id_to_hex {
+            if let Ok(val) = u64::from_str_radix(v.trim(), 16) {
+                if val != 0 {
+                    id_to_handle.insert(k.clone(), Handle::new(val));
+                }
+            }
+        }
+        let id_to_handle = &id_to_handle;
+        let handle = parse_hex_handle(hex)?;
+        let _ = self.ensure_sheet_entity(handle, hex)?;
+
+        enum TargetHost {
+            Text {
+                host: Handle,
+            },
+            MText {
+                host: Handle,
+                width_factor: Option<f64>,
+            },
+            Attribute {
+                insert: Handle,
+                attr_index: usize,
+                attr_handle: Handle,
+                tag: String,
+            },
+        }
+
+        let target_host = match (self.drawing.get_entity(handle), tag) {
+            (Some(EntityType::Text(_)), None) => TargetHost::Text { host: handle },
+            (Some(EntityType::MText(mt)), None) => {
+                let width_factor = text::mtext_contents(&mt.value).and_then(|(_, wf)| wf);
+                TargetHost::MText {
+                    host: handle,
+                    width_factor,
+                }
+            }
+            (Some(EntityType::Text(_) | EntityType::MText(_)), Some(_)) => {
+                return Err(Error::new(
+                    ErrorCode::BadValue,
+                    "`tag` belongs to an insert's attribute, not a text or mtext",
+                )
+                .at_field("tag"));
+            }
+            (Some(EntityType::Insert(_)), None) => {
+                return Err(Error::new(
+                    ErrorCode::MissingKey,
+                    "setting a field on an insert requires `tag`, the attribute tag to attach \
+                     the field to",
+                )
+                .at_field("tag"));
+            }
+            (Some(EntityType::Insert(ins)), Some(tag)) => {
+                let mut editable = Vec::new();
+                let mut saw_constant = false;
+                for (i, a) in ins.attributes.iter().enumerate() {
+                    if a.tag.eq_ignore_ascii_case(tag) {
+                        if a.flags.constant {
+                            saw_constant = true;
+                        } else {
+                            editable.push(i);
+                        }
+                    }
+                }
+                let chosen = match (editable.as_slice(), occurrence) {
+                    ([], _) => {
+                        if saw_constant {
+                            return Err(Error::new(
+                                ErrorCode::BadValue,
+                                format!(
+                                    "attribute `{tag}` on insert `{hex}` is constant and cannot \
+                                     carry a field"
+                                ),
+                            )
+                            .at_field("tag"));
+                        }
+                        let available: Vec<String> = ins
+                            .attributes
+                            .iter()
+                            .filter(|a| !a.flags.constant)
+                            .map(|a| a.tag.clone())
+                            .collect();
+                        return Err(Error::new(
+                            ErrorCode::UnknownName,
+                            if available.is_empty() {
+                                format!(
+                                    "insert `{hex}` carries no editable attributes; cannot set \
+                                     field on `{tag}`"
+                                )
+                            } else {
+                                format!(
+                                    "insert `{hex}` carries no editable attribute `{tag}`; its \
+                                     editable attributes: {}",
+                                    available.join(", ")
+                                )
+                            },
+                        )
+                        .at_field("tag"));
+                    }
+                    ([only], None | Some(1)) => *only,
+                    ([_], Some(n)) => {
+                        return Err(Error::new(
+                            ErrorCode::BadValue,
+                            format!("insert `{hex}` carries `{tag}` once, not {n} times"),
+                        )
+                        .at_field("occurrence"));
+                    }
+                    (many, None) => {
+                        return Err(Error::new(
+                            ErrorCode::BadValue,
+                            format!(
+                                "insert `{hex}` carries `{tag}` {} times; pass `occurrence` \
+                                 (1 to {})",
+                                many.len(),
+                                many.len()
+                            ),
+                        )
+                        .at_field("occurrence"));
+                    }
+                    (many, Some(n)) if n >= 1 && n <= many.len() => many[n - 1],
+                    (many, Some(n)) => {
+                        return Err(Error::new(
+                            ErrorCode::BadValue,
+                            format!(
+                                "insert `{hex}` carries `{tag}` {} times, not {n}",
+                                many.len()
+                            ),
+                        )
+                        .at_field("occurrence"));
+                    }
+                };
+                let att_layer = layer_of(&ins.attributes[chosen].common);
+                if self.is_layer_locked(&att_layer) {
+                    return Err(Error::new(
+                        ErrorCode::Locked,
+                        format!(
+                            "attribute `{tag}` on insert `{hex}` sits on layer `{att_layer}`, \
+                             which is locked"
+                        ),
+                    ));
+                }
+                let attr_tag = ins.attributes[chosen].tag.clone();
+                let mut attr_handle = ins.attributes[chosen].common.handle;
+                let need_seqend = ins.seqend_handle.is_none();
+                if attr_handle.is_null() {
+                    attr_handle = self.drawing.allocate_handle();
+                    let new_seqend = need_seqend.then(|| self.drawing.allocate_handle());
+                    if let Some(EntityType::Insert(ins_mut)) = self.drawing.get_entity_mut(handle) {
+                        ins_mut.attributes[chosen].common.handle = attr_handle;
+                        ins_mut.attributes[chosen].common.owner_handle = handle;
+                        if let Some(seq) = new_seqend {
+                            ins_mut.seqend_handle = Some(seq);
+                        }
+                    }
+                }
+                TargetHost::Attribute {
+                    insert: handle,
+                    attr_index: chosen,
+                    attr_handle,
+                    tag: attr_tag,
+                }
+            }
+            (Some(other), _) => {
+                return Err(Error::new(
+                    ErrorCode::BadValue,
+                    format!(
+                        "set_field works on a text, mtext, or insert attribute, not a {}",
+                        kind_of(other)
+                    ),
+                )
+                .at_field("target"));
+            }
+            (None, _) => {
+                return Err(Error::new(
+                    ErrorCode::UnknownName,
+                    format!("no object with handle `{hex}` in the drawing"),
+                )
+                .at_field("target"));
+            }
+        };
+
+        let ng_before = snapshot_non_graphical(&self.drawing);
+        let mut record = MutationHandles::default();
+
+        match target_host {
+            TargetHost::Text { host } => {
+                if let Some(tf) = field {
+                    super::field::attach_text_field(
+                        &mut self.drawing,
+                        host,
+                        tf,
+                        display_slots,
+                        id_to_handle,
+                        None,
+                        false,
+                    )?;
+                } else {
+                    super::field::clear_host_field(&mut self.drawing, host);
+                    if let Some(val) = explicit_text {
+                        if let Some(EntityType::Text(t)) = self.drawing.get_entity_mut(host) {
+                            t.value = text::text_code(val);
+                        }
+                    }
+                }
+                if let Some(ent) = self.drawing.get_entity_mut(host) {
+                    clear_raw_record(ent);
+                }
+                self.expected_touched.insert(host.value());
+                record.touched.push(handle_text(host));
+                self.record_non_graphical_diff(&ng_before);
+                let action = if field.is_some() {
+                    "set field"
+                } else {
+                    "cleared field"
+                };
+                Ok((action.to_owned(), record))
+            }
+            TargetHost::MText { host, width_factor } => {
+                if let Some(tf) = field {
+                    super::field::attach_text_field(
+                        &mut self.drawing,
+                        host,
+                        tf,
+                        display_slots,
+                        id_to_handle,
+                        width_factor,
+                        true,
+                    )?;
+                } else {
+                    super::field::clear_host_field(&mut self.drawing, host);
+                    if let Some(val) = explicit_text {
+                        if let Some(EntityType::MText(t)) = self.drawing.get_entity_mut(host) {
+                            t.value = text::mtext_code(val, width_factor);
+                        }
+                    }
+                }
+                if let Some(ent) = self.drawing.get_entity_mut(host) {
+                    clear_raw_record(ent);
+                }
+                self.expected_touched.insert(host.value());
+                record.touched.push(handle_text(host));
+                self.record_non_graphical_diff(&ng_before);
+                let action = if field.is_some() {
+                    "set field"
+                } else {
+                    "cleared field"
+                };
+                Ok((action.to_owned(), record))
+            }
+            TargetHost::Attribute {
+                insert,
+                attr_index,
+                attr_handle,
+                tag: attr_tag,
+            } => {
+                if let Some(tf) = field {
+                    super::field::attach_text_field(
+                        &mut self.drawing,
+                        attr_handle,
+                        tf,
+                        display_slots,
+                        id_to_handle,
+                        None,
+                        false,
+                    )?;
+                } else {
+                    super::field::clear_host_field(&mut self.drawing, attr_handle);
+                    if let Some(val) = explicit_text {
+                        if let Some(EntityType::Insert(ins)) = self.drawing.get_entity_mut(insert) {
+                            if let Some(att) = ins.attributes.get_mut(attr_index) {
+                                att.value = text::text_code(val);
+                            }
+                        }
+                    }
+                }
+                if let Some(ent) = self.drawing.get_entity_mut(insert) {
+                    clear_raw_record(ent);
+                }
+                self.expected_touched.insert(insert.value());
+                record.touched.push(handle_text(insert));
+                self.expected_touched.insert(attr_handle.value());
+                record.touched.push(handle_text(attr_handle));
+                self.record_non_graphical_diff(&ng_before);
+                let action = if field.is_some() {
+                    format!("set field on attribute `{attr_tag}`")
+                } else {
+                    format!("cleared field on attribute `{attr_tag}`")
+                };
+                Ok((action, record))
+            }
+        }
+    }
+
+    fn record_non_graphical_diff(&mut self, before: &BTreeMap<u64, NonGraphicalDigest>) {
+        let after = snapshot_non_graphical(&self.drawing);
+        for (&h, old) in before {
+            match after.get(&h) {
+                None => {
+                    self.expected_non_graphical_removed.insert(h);
+                }
+                Some(now) if now != old => {
+                    self.expected_non_graphical_changed.insert(h);
+                }
+                Some(_) => {}
+            }
+        }
+        for &h in after.keys() {
+            if !before.contains_key(&h) {
+                self.expected_non_graphical_added.insert(h);
+            }
+        }
+    }
+
     /// Changes keys on the object at `hex` directly in `CadDocument`,
     /// validating every key before mutating anything.
     pub(crate) fn change_object(
@@ -1460,6 +1791,31 @@ impl RevisionSession {
     pub(crate) fn delete_object(&mut self, hex: &str) -> Result<MutationHandles, Error> {
         let handle = parse_hex_handle(hex)?;
         let _ = self.ensure_sheet_entity(handle, hex)?;
+        // Strip any ACAD_FIELD entries owned by this entity (or an insert's
+        // attributes) before removing the entity so no orphaned FIELD records
+        // remain in ACAD_FIELDLIST.
+        let field_hosts: Vec<Handle> = match self.drawing.get_entity(handle) {
+            Some(EntityType::Text(_) | EntityType::MText(_)) => vec![handle],
+            Some(EntityType::Insert(ins)) => ins
+                .attributes
+                .iter()
+                .map(|a| a.common.handle)
+                .filter(|h| !h.is_null())
+                .collect(),
+            _ => Vec::new(),
+        };
+        if !field_hosts.is_empty() {
+            let ng_before = snapshot_non_graphical(&self.drawing);
+            let mut stripped = false;
+            for h in field_hosts {
+                if super::field::clear_host_field(&mut self.drawing, h) {
+                    stripped = true;
+                }
+            }
+            if stripped {
+                self.record_non_graphical_diff(&ng_before);
+            }
+        }
         let mut record = MutationHandles::default();
         let Some(removed) = self.drawing.remove_entity(handle) else {
             return Err(Error::new(
@@ -1838,6 +2194,7 @@ impl RevisionSession {
         // 2. Non-graphical objects (dictionaries, layouts, xrecords, custom objects).
         for (&handle, orig) in &before.non_graphical {
             match after.non_graphical.get(&handle) {
+                None if self.expected_non_graphical_removed.contains(&handle) => {}
                 None => unexpected.push(UnexpectedChange {
                     kind: orig.kind.clone(),
                     handle: format!("{handle:X}"),
@@ -3793,6 +4150,16 @@ fn snapshot_drawing(
         vports,
         block_records,
     }
+}
+
+fn snapshot_non_graphical(drawing: &CadDocument) -> BTreeMap<u64, NonGraphicalDigest> {
+    let mut non_graphical = BTreeMap::new();
+    for (&h, obj) in &drawing.objects {
+        if !h.is_null() {
+            non_graphical.insert(h.value(), non_graphical_digest(obj));
+        }
+    }
+    non_graphical
 }
 
 fn non_graphical_digest(obj: &ObjectType) -> NonGraphicalDigest {

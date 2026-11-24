@@ -587,6 +587,7 @@ impl MLeader {
                 Attachment::TopRight
             },
             layer: self.layer.clone(),
+            field: None,
             properties: self.properties.clone(),
         };
         let measured = measure(&text);
@@ -722,6 +723,7 @@ impl Leader {
                 Attachment::MiddleRight
             },
             layer: self.layer.clone(),
+            field: None,
             properties: self.properties.clone(),
         })
     }

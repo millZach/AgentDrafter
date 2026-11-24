@@ -175,10 +175,12 @@ fn an_insert_reads_every_key_and_fills_in_attributes_it_leaves_out() {
                 Attribute {
                     tag: "TAG".into(),
                     value: "?".into(),
+                    field: None,
                 },
                 Attribute {
                     tag: "NOTE".into(),
                     value: "SEE NOTE 2".into(),
+                    field: None,
                 },
             ],
             state: std::collections::BTreeMap::new(),

@@ -18,8 +18,9 @@ use crate::units::Unit;
 pub(crate) const TEXT_STYLE_KEYS: [&str; 2] = ["font", "width_factor"];
 
 /// The keys a single line of text takes.
-pub(crate) const TEXT_KEYS: [&str; 12] = [
+pub(crate) const TEXT_KEYS: [&str; 13] = [
     "contents",
+    "field",
     "position",
     "height",
     "style",
@@ -34,8 +35,9 @@ pub(crate) const TEXT_KEYS: [&str; 12] = [
 ];
 
 /// The keys multiline text takes.
-pub(crate) const MTEXT_KEYS: [&str; 13] = [
+pub(crate) const MTEXT_KEYS: [&str; 14] = [
     "contents",
+    "field",
     "position",
     "height",
     "width",
@@ -85,24 +87,40 @@ pub(super) fn text(
     layer: String,
     styles: &[TextStyle],
 ) -> Result<Text, Error> {
-    let contents_node = fields.require_text("contents")?;
-    let contents_path = fields.path_of("contents");
-    let contents = scalar(contents_node, &contents_path, "the text, one line")?;
-    let problem = if contents.contains(['\n', '\r']) {
-        Some("a text is one line; for more lines use `mtext`".to_owned())
-    } else {
-        contents_problem(contents).or_else(|| character_code(contents))
+    let field = match fields.get(super::field::FIELD_KEY) {
+        Some(node) if !node.is_bare_null() => Some(super::field::parse_field(
+            node,
+            &fields.path_of(super::field::FIELD_KEY),
+        )?),
+        _ => None,
     };
-    if let Some(problem) = problem {
-        return Err(bad_value(contents_node, &contents_path, problem));
-    }
+    let contents = match fields.text("contents") {
+        Some(contents_node) => {
+            let contents_path = fields.path_of("contents");
+            let contents = scalar(contents_node, &contents_path, "the text, one line")?;
+            let problem = if contents.contains(['\n', '\r']) {
+                Some("a text is one line; for more lines use `mtext`".to_owned())
+            } else {
+                contents_problem(contents).or_else(|| character_code(contents))
+            };
+            if let Some(problem) = problem {
+                return Err(bad_value(contents_node, &contents_path, problem));
+            }
+            contents.to_owned()
+        }
+        None if field.is_some() => String::new(),
+        None => {
+            let _ = fields.require_text("contents")?;
+            unreachable!("require_text returns Err when missing")
+        }
+    };
     let style = style_name(fields, styles)?;
     let width_factor = match fields.get("width_factor") {
         Some(node) => width_factor(node, &fields.path_of("width_factor"))?,
         None => style_of(&style, styles).map_or(1.0, |s| s.width_factor),
     };
     Ok(Text {
-        contents: contents.to_owned(),
+        contents,
         position: point(
             fields.require("position")?,
             &fields.path_of("position"),
@@ -114,6 +132,7 @@ pub(super) fn text(
         rotation: rotation(fields)?,
         justify: justify(fields)?,
         layer,
+        field,
         properties: Default::default(),
     })
 }
@@ -131,13 +150,29 @@ pub(super) fn mtext(
     layer: String,
     styles: &[TextStyle],
 ) -> Result<MText, Error> {
-    let contents_node = fields.require_text("contents")?;
-    let contents_path = fields.path_of("contents");
-    let written = scalar(contents_node, &contents_path, "the text")?;
-    let contents = shown_mtext(written);
-    if let Some(problem) = contents_problem(&contents) {
-        return Err(bad_value(contents_node, &contents_path, problem));
-    }
+    let field = match fields.get(super::field::FIELD_KEY) {
+        Some(node) if !node.is_bare_null() => Some(super::field::parse_field(
+            node,
+            &fields.path_of(super::field::FIELD_KEY),
+        )?),
+        _ => None,
+    };
+    let contents = match fields.text("contents") {
+        Some(contents_node) => {
+            let contents_path = fields.path_of("contents");
+            let written = scalar(contents_node, &contents_path, "the text")?;
+            let contents = shown_mtext(written);
+            if let Some(problem) = contents_problem(&contents) {
+                return Err(bad_value(contents_node, &contents_path, problem));
+            }
+            contents
+        }
+        None if field.is_some() => String::new(),
+        None => {
+            let _ = fields.require_text("contents")?;
+            unreachable!("require_text returns Err when missing")
+        }
+    };
     let width = match fields.get("width") {
         Some(node) => {
             let path = fields.path_of("width");
@@ -171,6 +206,7 @@ pub(super) fn mtext(
         rotation: rotation(fields)?,
         justify: attachment(fields)?,
         layer,
+        field,
         properties: Default::default(),
     })
 }

@@ -797,6 +797,7 @@ impl Dimension {
             rotation: 0.0,
             justify: Attachment::MiddleCenter,
             layer: self.layer.clone(),
+            field: None,
             properties: self.properties.clone(),
         };
         let stacked = pieces

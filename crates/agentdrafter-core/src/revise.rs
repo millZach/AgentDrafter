@@ -2227,6 +2227,95 @@ fn apply_revision_op(
                 created: Vec::new(),
             })
         }
+        Body::SetField {
+            target,
+            tag,
+            occurrence,
+            field,
+            value,
+        } => {
+            let loaded = ensure_record(session, cached, source, sheet_name)?;
+            let found = resolve_target(session, loaded, target, sheet_name, op, "target")?;
+            check_unlocked(session, &found.handle, &found.id, op, "target")?;
+
+            // Build local-ID -> handle map and evaluate display slots for any
+            // new field against the drawing as it currently stands.
+            let record = &loaded.record;
+            let dwg_origin = record.dwg.as_ref().expect("DWG record has DwgOrigin");
+            let mut id_to_hex: std::collections::HashMap<String, String> =
+                std::collections::HashMap::with_capacity(record.sheet.objects.len());
+            let mut local_ids: Vec<String> = Vec::with_capacity(record.sheet.objects.len());
+            for (i, h_hex) in dwg_origin.handles.iter().enumerate() {
+                let full_id = &dwg_origin.ids[i];
+                let local = full_id
+                    .split_once(crate::description::ID_SEPARATOR)
+                    .map_or(full_id.as_str(), |(_, tail)| tail)
+                    .to_owned();
+                id_to_hex.insert(full_id.to_lowercase(), h_hex.clone());
+                id_to_hex.insert(local.to_lowercase(), h_hex.clone());
+                id_to_hex.insert(format!("#{}", h_hex.to_lowercase()), h_hex.clone());
+                local_ids.push(local);
+            }
+            let layout_name = found
+                .model_index
+                .and_then(|idx| record.sheet.layout_of(idx).map(|l| l.name.as_str()))
+                .or_else(|| record.sheet.layout.as_ref().map(|l| l.name.as_str()));
+            let display_slots = match field {
+                Some(tf) => {
+                    let ctx = crate::model::field::EvalContext::from_sheet(
+                        &record.sheet,
+                        Some(sheet_name),
+                        layout_name,
+                        &local_ids,
+                        &dwg_origin.handles,
+                    );
+                    let (mut slots, _) = crate::model::field::evaluate_text_field(tf, &ctx);
+                    if let Some(explicit) = value.as_deref() {
+                        if tf.items.len() == 1
+                            && crate::model::field::is_default_field_template(&tf.template)
+                            && !explicit.is_empty()
+                        {
+                            slots[0] = explicit.to_owned();
+                        }
+                    }
+                    slots
+                }
+                None => Vec::new(),
+            };
+            let (msg, handles) = session
+                .set_field(
+                    &found.handle,
+                    tag.as_deref(),
+                    *occurrence,
+                    field.as_ref(),
+                    &display_slots,
+                    value.as_deref(),
+                    &id_to_hex,
+                )
+                .map_err(|e| {
+                    let f = e.field.as_deref().unwrap_or("field");
+                    op_error(index, op_name, e.code, e.message, f)
+                })?;
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message: format!("{msg} on `{}` (handle `{}`)", found.id, found.handle),
+                id: Some(found.id),
+                handle: Some(found.handle),
+                handles_touched: handles.touched,
+                handles_added: handles.added,
+                handles_deleted: handles.deleted,
+                copies: Vec::new(),
+                snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
+                split_id: None,
+                deleted: Vec::new(),
+                transformed: Vec::new(),
+                created: Vec::new(),
+            })
+        }
         Body::ReplaceText {
             find,
             replace,

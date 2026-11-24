@@ -331,6 +331,7 @@ pub(super) fn read_insert_in(
             insert.attributes.push(Attribute {
                 tag: definition.tag.clone(),
                 value,
+                field: None,
             });
         }
         Some(insert)
@@ -481,10 +482,12 @@ mod tests {
                 Attribute {
                     tag: "TAG".into(),
                     value: "A-1".into(),
+                    field: None,
                 },
                 Attribute {
                     tag: "NOTE".into(),
                     value: String::new(),
+                    field: None,
                 },
             ],
             state: std::collections::BTreeMap::new(),

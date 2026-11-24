@@ -1157,6 +1157,7 @@ fn read_block_content(
             (!value.contains("%%")).then(|| Attribute {
                 tag: definition.tag.clone(),
                 value,
+                field: None,
             })
         })
         .collect::<Option<Vec<_>>>()?;
