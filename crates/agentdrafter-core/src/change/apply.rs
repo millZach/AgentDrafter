@@ -26,10 +26,11 @@ use super::array;
 use super::commit::Replacement;
 use super::from_dimension::dimension_from;
 use super::journal::{commit_change_set, HowChanged, Keeping, Landing, ObjectChanged, SheetFailed};
+use super::offset::{compute_offset, object_to_record_keys, OffsetBy, OffsetSide};
 use super::operations::{
     op_error, read_change_set, AddTo, BlockOp, Body, DrawOrderPlace, FromOp, Import, Kind, Motion,
-    OpPoint, Operation, Pattern, PointSnap, Table, TableOp, Target, TextToFrontWhich, TransformBy,
-    ROW_VALUE_KEY,
+    OpOffsetBy, OpOffsetSide, OpPoint, Operation, Pattern, PointSnap, Table, TableOp, Target,
+    TextToFrontWhich, TransformBy, ROW_VALUE_KEY,
 };
 use super::replace::{TextMatchKind, TextMatcher, TextScope};
 use super::MARK_FILE;
@@ -525,7 +526,7 @@ fn objects_changed(
         };
         let how = match (op.spec.kind, &op.body) {
             (Kind::Delete, _) => HowChanged::Deleted,
-            (Kind::Add(..), _) => HowChanged::Added,
+            (Kind::Add(..) | Kind::Offset, _) => HowChanged::Added,
             _ => HowChanged::Changed,
         };
         if let Some(id) = &d.id {
@@ -1215,6 +1216,7 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::Delete { target }
             | Body::SetAttribute { target, .. }
             | Body::SetBlockState { target, .. }
+            | Body::Offset { target, .. }
             | Body::TableEdit { target, .. }
             | Body::LeaderLine { target, .. }
             | Body::DimensionFrom { target, .. } => match target {
@@ -1526,6 +1528,28 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         );
     }
 
+    if let Body::Offset {
+        target,
+        by,
+        id,
+        name,
+        layer,
+        erase_source,
+    } = &op.body
+    {
+        return apply_offset(
+            at,
+            op,
+            target,
+            by,
+            id.as_deref(),
+            name.as_deref(),
+            layer.as_deref(),
+            *erase_source,
+            settings,
+        );
+    }
+
     if let Body::Table {
         op: table_op,
         table,
@@ -1608,6 +1632,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::TextToFront { .. }
         | Body::ReplaceText { .. }
         | Body::SetAttributes { .. }
+        | Body::Offset { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2023,6 +2048,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::TextToFront { .. }
         | Body::ReplaceText { .. }
         | Body::SetAttributes { .. }
+        | Body::Offset { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -6274,6 +6300,216 @@ fn apply_set_attributes(
     }
 }
 
+/// Draws a parallel offset of a line, polyline, arc, circle, ellipse or spline
+/// (`offset` / AutoCAD `OFFSET`, `O`).
+#[allow(clippy::too_many_arguments)]
+fn apply_offset(
+    at: &mut Attempt,
+    op: &Operation,
+    target: &Target,
+    by: &OpOffsetBy,
+    id: Option<&str>,
+    name: Option<&str>,
+    layer: Option<&str>,
+    erase_source: bool,
+    settings: &Settings,
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+    let found = match resolve(at, target, op) {
+        Ok(found) => found,
+        Err(applied) => return *applied,
+    };
+    let reach = at.reach(found.file, found.row);
+    if let Some(refusal) = many_paths(files, found.file, op, "target") {
+        return refusal;
+    }
+    if erase_source {
+        if let Some(locked_layer) =
+            batch_object_locked_layer(at, files, found.row, found.file, found.list, found.index)
+        {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::Locked,
+                    format!(
+                        "`{}` is on layer `{locked_layer}`, which is locked; cannot erase source \
+                         without unlocking it first",
+                        found.id
+                    ),
+                    "target",
+                ),
+            );
+        }
+    }
+    let rows = match at.rows_now() {
+        Ok(rows) => rows,
+        Err(e) => return fail(reach, e),
+    };
+    let record = match sheet_record(at, &rows, found.row, &mut Vec::new()) {
+        Ok(record) => record,
+        Err(e) => return fail(reach, e),
+    };
+    let local = found
+        .id
+        .split_once(ID_SEPARATOR)
+        .map_or(found.id.as_str(), |(_, local)| local);
+    let in_row = matches!(found.file, FileRef::Rows(_));
+    let Some(obj_idx) = record
+        .objects
+        .iter()
+        .position(|o| o.in_row == in_row && o.id.eq_ignore_ascii_case(local))
+    else {
+        return fail(
+            reach,
+            op_err(
+                ErrorCode::UnknownName,
+                format!("could not read `{}` to offset it", found.id),
+                "target",
+            ),
+        );
+    };
+    let base = &record.sheet.objects[obj_idx];
+    let space = crate::query::space_of(&record.sheet, obj_idx);
+
+    let mut snapped: Vec<SnapResolved> = Vec::new();
+    let resolve_pt = |p: &OpPoint, snapped: &mut Vec<SnapResolved>| -> Result<[f64; 3], Error> {
+        match p {
+            OpPoint::At(xyz) => Ok(*xyz),
+            OpPoint::Snap(snap) => {
+                snapped_points(at, op, &reach, &[snap], settings).map(|mut pts| {
+                    let (xyz, res) = pts.remove(0);
+                    snapped.push(res);
+                    xyz
+                })
+            }
+        }
+    };
+    let resolved_by = match by {
+        OpOffsetBy::Distance { distance, side } => {
+            let side = match side {
+                OpOffsetSide::Left => OffsetSide::Left,
+                OpOffsetSide::Right => OffsetSide::Right,
+                OpOffsetSide::Inside => OffsetSide::Inside,
+                OpOffsetSide::Outside => OffsetSide::Outside,
+                OpOffsetSide::Point(pt) => match resolve_pt(pt, &mut snapped) {
+                    Ok(xyz) => OffsetSide::Point(xyz),
+                    Err(e) => return fail(reach, e),
+                },
+            };
+            OffsetBy::Distance {
+                distance: *distance,
+                side,
+            }
+        }
+        OpOffsetBy::Through(pt) => match resolve_pt(pt, &mut snapped) {
+            Ok(xyz) => OffsetBy::Through(xyz),
+            Err(e) => return fail(reach, e),
+        },
+    };
+    let (new_object, eff_distance) = match compute_offset(base, &resolved_by, layer) {
+        Ok(res) => res,
+        Err(e) => {
+            let field = if e.message.contains("side") {
+                "side"
+            } else if e.message.contains("through") {
+                "through"
+            } else if e.message.contains("works on") {
+                "target"
+            } else {
+                "distance"
+            };
+            return fail(reach, op_err(e.code, e.message, field));
+        }
+    };
+    let new_local_id = match id {
+        Some(explicit) => explicit.to_owned(),
+        None => {
+            let mut taken: BTreeSet<String> = BTreeSet::new();
+            for &k in &reach {
+                match at.objects(k) {
+                    Ok(objects) => {
+                        taken.extend(objects.into_iter().map(|o| o.3.id.to_lowercase()));
+                    }
+                    Err(e) => return fail(reach.clone(), e),
+                }
+            }
+            let prefix = new_object.type_name();
+            (1..)
+                .map(|n| format!("{prefix}-{n}"))
+                .find(|candidate| !taken.contains(&candidate.to_lowercase()))
+                .expect("a free id")
+        }
+    };
+    let (kind, keys) = object_to_record_keys(&new_object, &new_local_id, name, space.as_deref());
+    let path = match found.file {
+        FileRef::Rows(f) => files.rows_files[f].path.clone(),
+        FileRef::Template(t) => files.templates[t].path.clone(),
+    };
+    let rec = match at.file(found.file) {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+    let mut ids_written = Vec::new();
+    let added = match rec.add(found.list, kind, &keys, op.index) {
+        Ok(idx) => idx,
+        Err(e) => return fail(reach, op_err(e.code, e.message, "")),
+    };
+    let after = rec.object_text(found.list, added);
+    if erase_source {
+        ids_written = rec.delete(found.list, found.index, op.index);
+    }
+    let full_id = format!("{}{ID_SEPARATOR}{new_local_id}", files.name(found.row));
+    let template_note = match found.file {
+        FileRef::Rows(_) => String::new(),
+        FileRef::Template(t) => format!(
+            " in template `{}` ({})",
+            files.templates[t].written,
+            every_sheet(&files.names(&reach))
+        ),
+    };
+    let erase_note = if erase_source {
+        format!(" and erases `{}`", found.id)
+    } else {
+        String::new()
+    };
+    let dist_str = crate::description::number_text(eff_distance);
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: Some(full_id.clone()),
+            before: None,
+            after: Some(after),
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written,
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
+            snapped,
+            message: format!(
+                "offsets `{}` by {dist_str} ({}) to {kind} `{full_id}`{erase_note}{template_note}",
+                found.id, files.units
+            ),
+        }),
+        sheets: reach,
+        refuse: false,
+    }
+}
+
 /// when `margin` is omitted), and written as a rectangular `revision_cloud`
 /// object in the sheet's row or template.
 #[allow(clippy::too_many_arguments)]
@@ -7452,6 +7688,7 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
         | Body::SetBlockState { target, .. }
+        | Body::Offset { target, .. }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => reaches(target),
@@ -7604,6 +7841,7 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
                 "value".to_owned()
             }
         }
+        Body::Offset { .. } => "distance".to_owned(),
     }
 }
 
@@ -7774,6 +8012,7 @@ fn target_words(op: &Operation) -> String {
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
         | Body::SetBlockState { target, .. }
+        | Body::Offset { target, .. }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => target.words(),

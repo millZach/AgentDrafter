@@ -21,9 +21,10 @@ use crate::build::file_id_of_file;
 use crate::build::is_same_file;
 use crate::build::FileId;
 use crate::change::array::{self, At, Place};
+use crate::change::offset::{compute_offset, OffsetBy, OffsetSide};
 use crate::change::operations::{
-    op_error, read_change_set_for_original, AddTo, Body, DrawOrderPlace, Motion, OpPoint,
-    Operation, Pattern, Table, TableOp, Target, TransformBy,
+    op_error, read_change_set_for_original, AddTo, Body, DrawOrderPlace, Motion, OpOffsetBy,
+    OpOffsetSide, OpPoint, Operation, Pattern, Table, TableOp, Target, TransformBy,
 };
 use crate::change::original_journal::OriginalJournal;
 use crate::change::replace::{TextMatcher, TextScope};
@@ -2473,6 +2474,99 @@ fn apply_revision_op(
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set,
+            })
+        }
+        Body::Offset {
+            target,
+            by,
+            id,
+            name,
+            layer,
+            erase_source,
+        } => {
+            let loaded = ensure_record(session, cached, source, sheet_name)?;
+            let found = resolve_target(session, loaded, target, sheet_name, op, "target")?;
+            if *erase_source {
+                check_unlocked(session, &found.handle, &found.id, op, "target")?;
+            }
+            let obj_idx = (0..loaded.record.sheet.objects.len())
+                .find(|&i| loaded.record.handle_of(i) == Some(found.handle.as_str()))
+                .ok_or_else(|| {
+                    op_error(
+                        index,
+                        op_name,
+                        ErrorCode::UnknownName,
+                        format!("could not read `{}` to offset it", found.id),
+                        "target",
+                    )
+                })?;
+            let base = loaded.record.sheet.objects[obj_idx].clone();
+            let mut snapped = Vec::new();
+            let resolved_by = match by {
+                OpOffsetBy::Distance { distance, side } => {
+                    let side = match side {
+                        OpOffsetSide::Left => OffsetSide::Left,
+                        OpOffsetSide::Right => OffsetSide::Right,
+                        OpOffsetSide::Inside => OffsetSide::Inside,
+                        OpOffsetSide::Outside => OffsetSide::Outside,
+                        OpOffsetSide::Point(pt) => OffsetSide::Point(resolve_op_point(
+                            pt,
+                            loaded,
+                            settings,
+                            op,
+                            &mut snapped,
+                        )?),
+                    };
+                    OffsetBy::Distance {
+                        distance: *distance,
+                        side,
+                    }
+                }
+                OpOffsetBy::Through(pt) => {
+                    OffsetBy::Through(resolve_op_point(pt, loaded, settings, op, &mut snapped)?)
+                }
+            };
+            let (new_object, eff_distance) = compute_offset(&base, &resolved_by, layer.as_deref())
+                .map_err(|e| op_error(index, op_name, e.code, e.message, "distance"))?;
+            let space = session.space_of_handle(&found.handle)?;
+            let fonts = SheetFonts::find(&loaded.record.sheet, settings);
+            let start_of = |t: &crate::text::Text| fonts.start(t);
+            let (hex, mut handles) = session.add_object(
+                &new_object,
+                &space,
+                sheet_name,
+                id.as_deref(),
+                name.as_deref(),
+                &start_of,
+            )?;
+            if *erase_source {
+                let del = session.delete_object(&found.handle)?;
+                handles.touched.extend(del.touched);
+                handles.deleted.extend(del.deleted);
+            }
+            let new_id = match id {
+                Some(explicit) => format!("{sheet_name}/{explicit}"),
+                None => handle_id(sheet_name, &hex),
+            };
+            let dist_str = crate::description::number_text(eff_distance);
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message: format!(
+                    "offset `{}` by {dist_str} to {} `{new_id}` (handle `{hex}`)",
+                    found.id,
+                    new_object.type_name()
+                ),
+                id: Some(new_id),
+                handle: Some(hex),
+                handles_touched: handles.touched,
+                handles_added: handles.added,
+                handles_deleted: handles.deleted,
+                copies: Vec::new(),
+                snapped,
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         Body::Change {
