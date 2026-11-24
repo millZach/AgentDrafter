@@ -407,7 +407,7 @@ fn an_unknown_key_lists_the_keys_text_takes() {
         &e,
         ErrorCode::UnknownKey,
         "objects[0].text.oblique",
-        &["a text takes contents, position, height, style, width_factor, rotation, justify, layer"],
+        &["a text takes contents, field, position, height, style, width_factor, rotation, justify, layer"],
     );
     let e = object_error("mtext: {contents: A, position: [0, 0, 0], height: 1, columns: 2}");
     assert_names(
