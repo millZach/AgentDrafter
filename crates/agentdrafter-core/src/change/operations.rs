@@ -23,7 +23,10 @@ use crate::error::{Error, ErrorCode};
 use crate::geometry::{SnapKind, SnapRef};
 use crate::model::{DimensionKind, ISO_DIMENSION_STYLE, STANDARD_DIMENSION_STYLE};
 use crate::query::snap::{check_shape, no_kind};
+use crate::query::Selection;
 use crate::units::{parse_length, LengthError, Unit};
+
+use super::replace::{TextMatchKind, TextMatcher, TextScope};
 
 /// What an operation does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +64,12 @@ pub(crate) enum Kind {
     SetAttribute,
     /// Sets dynamic block parameter values on an insert: AutoCAD's PROPERTIES.
     SetBlockState,
+    /// Sets an attribute on every insert a query selection matches: AutoCAD's
+    /// GATTE.
+    SetAttributes,
+    /// Finds and replaces text across texts, mtexts and attribute values:
+    /// AutoCAD's FIND.
+    ReplaceText,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -280,7 +289,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 69] = [
+pub(crate) const SPECS: [Spec; 71] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -394,6 +403,16 @@ pub(crate) const SPECS: [Spec; 69] = [
         name: "set_block_state",
         alias: "PROPERTIES",
         kind: Kind::SetBlockState,
+    },
+    Spec {
+        name: "set_attributes",
+        alias: "GATTE",
+        kind: Kind::SetAttributes,
+    },
+    Spec {
+        name: "replace_text",
+        alias: "FIND",
+        kind: Kind::ReplaceText,
     },
     grid("set_cell", "TABLEDIT", GridOp::SetCell),
     grid("add_row", "", GridOp::Add(Axis::Row)),
@@ -945,6 +964,25 @@ fn does(spec: &Spec) -> String {
                                 insert, named by each parameter's name as AutoCAD's Properties \
                                 palette lists it. A null value resets a parameter to its default. \
                                 AutoCAD's PROPERTIES."
+            .to_owned(),
+        Kind::SetAttributes => "Sets an attribute's value on every insert that matches the query \
+                                selection under `where`, across the sheets named under `sheets` \
+                                or the whole drawing set when `sheets` is left out, listing every \
+                                insert updated in the reply. Uses the same selection keys as \
+                                `query attributes` (block, name, id, tag, value, text, match, \
+                                space, window, crossing, touching), takes `occurrence` for a \
+                                repeated tag and `row_value` for a template list of parts. \
+                                AutoCAD's GATTE."
+            .to_owned(),
+        Kind::ReplaceText => "Finds and replaces text in texts, multiline texts and insert \
+                              attribute values across the sheets named under `sheets` or the \
+                              whole drawing set when `sheets` is left out, matched as `exact` \
+                              literal text (the default), `whole_word`, or a regular expression \
+                              `pattern` (with capture-group substitution), case-sensitively by \
+                              default (`case_sensitive: false` to ignore case). Optionally \
+                              restricts the search with `in` (`text`, `mtext`, `attribute`), \
+                              `tag` or `block`. Lists every place changed in the reply, and a \
+                              dry run shows them without writing. AutoCAD's FIND."
             .to_owned(),
     }
 }
@@ -1920,12 +1958,188 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                 },
             },
         }),
+        Kind::SetAttributes => json!({
+            "type": "object",
+            "required": ["where", "tag", "value"],
+            "additionalProperties": false,
+            "properties": {
+                "where": insert_selection_schema(),
+                "sheets": {
+                    "description": "The sheets to search and edit, by name. Left out, every \
+                                    sheet of the drawing set.",
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/sheet_name" },
+                    "minItems": 1,
+                },
+                "tag": { "$ref": "#/$defs/attribute_tag" },
+                "occurrence": {
+                    "description": "Which of the attributes with this tag to set, counted from \
+                                    1 in the order the block defines them. Needed when the block \
+                                    defines the tag more than once; 1 or left out when it defines \
+                                    it once.",
+                    "type": "integer",
+                    "minimum": 1,
+                },
+                "value": { "$ref": "#/$defs/attribute_value" },
+                ROW_VALUE_KEY: row_value_key(),
+            },
+        }),
+        Kind::ReplaceText => json!({
+            "type": "object",
+            "required": ["find", "replace"],
+            "additionalProperties": false,
+            "properties": {
+                "find": {
+                    "description": "The text or regular expression pattern to find.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "replace": {
+                    "description": "The replacement text. In `pattern` mode, `$1`, `${name}` and \
+                                    `$$` expand capture groups; in `exact` and `whole_word` modes \
+                                    it is written literally.",
+                    "type": "string",
+                },
+                "match": {
+                    "description": "How `find` matches: `exact` (literal substring, default), \
+                                    `whole_word` (bounded by non-word characters), or `pattern` \
+                                    (regular expression).",
+                    "enum": TextMatchKind::ALL,
+                },
+                "case_sensitive": {
+                    "description": "Whether matching respects letter case. True when left out.",
+                    "type": "boolean",
+                },
+                "sheets": {
+                    "description": "The sheets to search and edit, by name. Left out, every \
+                                    sheet of the drawing set.",
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/sheet_name" },
+                    "minItems": 1,
+                },
+                "in": {
+                    "description": "Which text-bearing places to search: any non-empty subset of \
+                                    `text`, `mtext` and `attribute`. Left out, all three.",
+                    "type": "array",
+                    "items": { "enum": TextScope::ALL },
+                    "minItems": 1,
+                    "uniqueItems": true,
+                },
+                "tag": {
+                    "description": "When replacing in attributes, restrict attribute matches to \
+                                    this tag (case-insensitive).",
+                    "$ref": "#/$defs/attribute_tag",
+                },
+                "block": {
+                    "description": "When replacing in attributes, restrict attribute matches to \
+                                    inserts of this block (case-insensitive).",
+                    "type": "string",
+                    "minLength": 1,
+                },
+            },
+        }),
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
     let required = schema["required"].as_array_mut().expect("a list");
     required.insert(0, json!(OP_KEY));
     schema
+}
+
+/// The JSON Schema of the `where` query selection taken by `set_attributes`.
+/// Mirrors `query find` / `query attributes`'s [`Selection`].
+fn insert_selection_schema() -> Value {
+    let text = |what: &str| json!({ "description": what, "type": "string" });
+    let box_schema = |what: &str| {
+        json!({
+            "description": format!("{what} Two opposite corners, [[x1, y1], [x2, y2]], in the declared unit."),
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 3,
+                "items": { "type": "number" },
+            },
+        })
+    };
+    json!({
+        "description": "Query selection choosing which inserts to edit (same keys as `query attributes`). An empty object `{}` selects every insert on the targeted sheets.",
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "id": text("The insert's ID, such as `DEMO-001/title-block`."),
+            "name": text("The insert's name, such as `title-block`."),
+            "block": text("The block the insert places."),
+            "tag": text("An attribute tag the insert carries, or with `value` the tag whose value is matched."),
+            "value": text("An attribute value on the insert, in any attribute or in the one `tag` names."),
+            "text": text("Text drawn inside the insert's block."),
+            "match": {
+                "description": "How the selection matches: `exact` (default) or `contains` (case-insensitive substring).",
+                "enum": ["exact", "contains"],
+            },
+            "window": box_schema("Inserts wholly within this box."),
+            "crossing": box_schema("Inserts within or crossing this box."),
+            "space": {
+                "description": "Inserts in this space: `model`, a layout name, or `paper`.",
+                "type": "string",
+                "minLength": 1,
+            },
+            "touching": {
+                "description": "Inserts whose geometry meets this object.",
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "id": text("The object's ID."),
+                    "name": text("The object's name."),
+                },
+            },
+        },
+    })
+}
+
+/// Parses an optional non-empty `sheets` list of sheet names on a batch
+/// operation (`replace_text`, `set_attributes`).
+fn read_optional_sheets(
+    map: &Map<String, Value>,
+) -> Result<Option<Vec<String>>, (ErrorCode, String, String)> {
+    match map.get("sheets") {
+        None => Ok(None),
+        Some(Value::Array(items)) if !items.is_empty() => {
+            let mut out = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                match item {
+                    Value::String(name) if !name.trim().is_empty() => out.push(name.clone()),
+                    Value::String(_) => {
+                        return Err((
+                            ErrorCode::BadValue,
+                            "a sheet name cannot be empty".to_owned(),
+                            format!("sheets[{i}]"),
+                        ))
+                    }
+                    _ => {
+                        return Err((
+                            ErrorCode::WrongType,
+                            "expected a sheet's name".to_owned(),
+                            format!("sheets[{i}]"),
+                        ))
+                    }
+                }
+            }
+            Ok(Some(out))
+        }
+        Some(Value::Array(_)) => Err((
+            ErrorCode::BadValue,
+            "`sheets` must name at least one sheet, or be left out for the whole set".to_owned(),
+            "sheets".to_owned(),
+        )),
+        Some(_) => Err((
+            ErrorCode::WrongType,
+            "expected `sheets`, a list of sheet names".to_owned(),
+            "sheets".to_owned(),
+        )),
+    }
 }
 
 /// The rule that a copy or an array names its objects by target, one, or
@@ -2752,6 +2966,26 @@ pub(crate) enum Body {
     SetBlockState {
         target: Target,
         state: Map<String, Value>,
+    },
+    /// Sets an attribute on every insert matching a query selection: AutoCAD's
+    /// GATTE.
+    SetAttributes {
+        selection: Selection,
+        sheets: Option<Vec<String>>,
+        tag: String,
+        occurrence: Option<usize>,
+        value: String,
+    },
+    /// Replaces text across texts, mtexts and attribute values: AutoCAD's FIND.
+    ReplaceText {
+        find: String,
+        replace: String,
+        matching: TextMatchKind,
+        case_sensitive: bool,
+        sheets: Option<Vec<String>>,
+        scopes: Vec<TextScope>,
+        tag: Option<String>,
+        block: Option<String>,
     },
     /// A table operation: on the entry `name` of the template `to` names,
     /// with the keys it adds or sets, and the new name a rename gives.
@@ -4086,6 +4320,290 @@ fn operation(
                 }
             };
             Body::SetBlockState { target, state }
+        }
+        Kind::SetAttributes => {
+            keys(&[
+                "where",
+                "sheets",
+                "tag",
+                "occurrence",
+                "value",
+                ROW_VALUE_KEY,
+            ])?;
+            let selection: Selection = match map.get("where") {
+                Some(v @ Value::Object(_)) => serde_json::from_value(v.clone()).map_err(|e| {
+                    fail(
+                        ErrorCode::BadValue,
+                        format!("invalid `where` selection: {e}"),
+                        "where",
+                    )
+                })?,
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `where`, a query selection mapping such as {\"block\": \"TITLE_BLOCK\"}"
+                            .to_owned(),
+                        "where",
+                    ))
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `where`, the query selection of inserts to edit".to_owned(),
+                        "where",
+                    ))
+                }
+            };
+            let sheets = read_optional_sheets(map)
+                .map_err(|(code, message, field)| fail(code, message, &field))?;
+            let occurrence =
+                match map.get("occurrence") {
+                    None => None,
+                    Some(Value::Number(n)) if whole(n).is_some_and(|n| n >= 1) => {
+                        whole(n).and_then(|n| usize::try_from(n).ok())
+                    }
+                    Some(_) => return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected the occurrence, a whole number from 1: which of the attributes \
+                         with this tag to set, in the order the block defines them"
+                            .to_owned(),
+                        "occurrence",
+                    )),
+                };
+            let tag = match map.get("tag") {
+                Some(Value::String(tag)) if !tag.trim().is_empty() => tag.clone(),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`tag` cannot be empty".to_owned(),
+                        "tag",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `tag`, the attribute tag to set, such as REV".to_owned(),
+                        "tag",
+                    ))
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `tag`, the attribute tag to set, such as REV".to_owned(),
+                        "tag",
+                    ))
+                }
+            };
+            let value = match map.get("value") {
+                Some(Value::String(text)) => text.clone(),
+                Some(Value::Number(n)) => n.to_string(),
+                Some(Value::Bool(b)) => b.to_string(),
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected the attribute's value, one line of text".to_owned(),
+                        "value",
+                    ))
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `value`, the attribute's new value".to_owned(),
+                        "value",
+                    ))
+                }
+            };
+            Body::SetAttributes {
+                selection,
+                sheets,
+                tag,
+                occurrence,
+                value,
+            }
+        }
+        Kind::ReplaceText => {
+            keys(&[
+                "find",
+                "replace",
+                "match",
+                "case_sensitive",
+                "sheets",
+                "in",
+                "tag",
+                "block",
+            ])?;
+            let find = match map.get("find") {
+                Some(Value::String(s)) if !s.is_empty() => s.clone(),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`find` cannot be empty".to_owned(),
+                        "find",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `find`, the text or pattern to find".to_owned(),
+                        "find",
+                    ))
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `find`, the text or pattern to find".to_owned(),
+                        "find",
+                    ))
+                }
+            };
+            let replace = match map.get("replace") {
+                Some(Value::String(s)) => s.clone(),
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `replace`, the replacement text".to_owned(),
+                        "replace",
+                    ))
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `replace`, the replacement text".to_owned(),
+                        "replace",
+                    ))
+                }
+            };
+            let matching = match map.get("match") {
+                None => TextMatchKind::Exact,
+                Some(Value::String(s)) => TextMatchKind::parse(s).ok_or_else(|| {
+                    fail(
+                        ErrorCode::BadValue,
+                        format!(
+                            "unknown `match` mode `{s}`; expected one of {}",
+                            TextMatchKind::ALL.join(", ")
+                        ),
+                        "match",
+                    )
+                })?,
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        format!("expected `match`, one of {}", TextMatchKind::ALL.join(", ")),
+                        "match",
+                    ))
+                }
+            };
+            let case_sensitive = match map.get("case_sensitive") {
+                None => true,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `case_sensitive`, true or false".to_owned(),
+                        "case_sensitive",
+                    ))
+                }
+            };
+            // Validate regex / matcher at parse time so malformed patterns fail
+            // before touching any sheet.
+            TextMatcher::compile(&find, matching, case_sensitive)
+                .map_err(|e| fail(e.code, e.message, "find"))?;
+            let sheets = read_optional_sheets(map)
+                .map_err(|(code, message, field)| fail(code, message, &field))?;
+            let scopes = match map.get("in") {
+                None => vec![TextScope::Text, TextScope::MText, TextScope::Attribute],
+                Some(Value::Array(items)) if !items.is_empty() => {
+                    let mut parsed = Vec::with_capacity(items.len());
+                    for (i, item) in items.iter().enumerate() {
+                        let Some(s) = item.as_str() else {
+                            return Err(fail(
+                                ErrorCode::WrongType,
+                                format!("expected one of {}", TextScope::ALL.join(", ")),
+                                &format!("in[{i}]"),
+                            ));
+                        };
+                        let Some(scope) = TextScope::parse(s) else {
+                            return Err(fail(
+                                ErrorCode::BadValue,
+                                format!(
+                                    "unknown `in` target `{s}`; expected one of {}",
+                                    TextScope::ALL.join(", ")
+                                ),
+                                &format!("in[{i}]"),
+                            ));
+                        };
+                        if parsed.contains(&scope) {
+                            return Err(fail(
+                                ErrorCode::BadValue,
+                                format!("`in` lists `{s}` more than once"),
+                                &format!("in[{i}]"),
+                            ));
+                        }
+                        parsed.push(scope);
+                    }
+                    parsed
+                }
+                Some(Value::Array(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`in` must name at least one of text, mtext, attribute".to_owned(),
+                        "in",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        format!("expected `in`, a list of {}", TextScope::ALL.join(", ")),
+                        "in",
+                    ))
+                }
+            };
+            let tag = match map.get("tag") {
+                None => None,
+                Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`tag` cannot be empty".to_owned(),
+                        "tag",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `tag`, an attribute tag".to_owned(),
+                        "tag",
+                    ))
+                }
+            };
+            let block = match map.get("block") {
+                None => None,
+                Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`block` cannot be empty".to_owned(),
+                        "block",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `block`, a block name".to_owned(),
+                        "block",
+                    ))
+                }
+            };
+            Body::ReplaceText {
+                find,
+                replace,
+                matching,
+                case_sensitive,
+                sheets,
+                scopes,
+                tag,
+                block,
+            }
         }
         Kind::Grid(grid_op) => {
             let allowed: Vec<&str> = match grid_op {

@@ -113,6 +113,8 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
 | `text_to_front` | `TEXTTOFRONT` | Brings `text`, `dimensions`, `leaders`, or `all` (default) to the front of draw order. See [Wipeouts and draw order](wipeouts.md). |
 | `set_attribute` | `ATTEDIT` | Sets one attribute value of an insert, naming one occurrence of a tag its block defines more than once. |
 | `set_block_state` | `PROPERTIES` | Sets one or more dynamic block parameter values (visibility state, lookup row, flip, linear distance, or rotation) on an insert. See [Dynamic blocks](dynamic-blocks.md). |
+| `set_attributes` | `GATTE` | Sets an attribute on every insert matching a query `where` selection across named sheets or the whole set (and on original DWGs). See [Find and replace](find-and-replace.md). |
+| `replace_text` | `FIND` | Finds and replaces text across texts, mtexts and attribute values in `exact`, `whole_word`, or `pattern` mode across named sheets or the whole set (and on original DWGs). See [Find and replace](find-and-replace.md). |
 | `set_cell` | `TABLEDIT` | Sets keys of a table's cell: its text, style, height, justification or merge. |
 | `add_row` | none | Adds a row to a table. |
 | `delete_row` | none | Deletes a row of a table. |

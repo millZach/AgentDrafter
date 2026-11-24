@@ -1924,6 +1924,47 @@ impl RecordFile {
         Ok(AttributeSet::Written)
     }
 
+    /// Returns the row-value binding (`{row: NAME}` or list of parts) for a
+    /// text/mtext's `contents` (`attr == None`) or an insert attribute
+    /// (`attr == Some((cap_tag, slot))`), without mutating the record. Returns
+    /// `None` when the value is written literally (or absent/default).
+    pub(crate) fn text_binding(
+        &self,
+        list: ObjectList,
+        index: usize,
+        attr: Option<(&str, Option<usize>)>,
+    ) -> Option<FromRow> {
+        let items = self.items(list)?;
+        let item = items.get(index)?;
+        let keys = object_parts(item).1?;
+        match attr {
+            None => {
+                let entry = keys.iter().find(|e| e.key == "contents")?;
+                row_value_name(&entry.value)
+                    .map(FromRow::Whole)
+                    .or_else(|| parts_of(&entry.value).map(FromRow::Parts))
+            }
+            Some((tag, slot)) => {
+                let attrs = keys.iter().find(|e| e.key == "attributes")?;
+                let Kind::Mapping(values) = &attrs.value.kind else {
+                    return None;
+                };
+                let entry = values.iter().find(|e| tag_in_capitals(&e.key) == tag)?;
+                match slot {
+                    None => row_value_name(&entry.value)
+                        .map(FromRow::Whole)
+                        .or_else(|| parts_of(&entry.value).map(FromRow::Parts)),
+                    Some(i) => {
+                        let Kind::Sequence(seq) = &entry.value.kind else {
+                            return None;
+                        };
+                        seq.get(i).and_then(row_value_name).map(FromRow::Whole)
+                    }
+                }
+            }
+        }
+    }
+
     /// Sets one or more dynamic block parameters under `state:` of the insert
     /// of `list` at `index`, as operation `operation`. A `Value::Null` value
     /// removes that parameter from `state:` so it falls back to its default.
