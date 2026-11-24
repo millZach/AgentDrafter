@@ -36,6 +36,13 @@ pub struct Hatch {
     /// filled, so a loop inside another is a hole, and a loop inside that
     /// is filled again.
     pub boundary: Vec<HatchLoop>,
+    /// Whether this hatch is annotative (`ANNOTATIVE`): its pattern scale is
+    /// multiplied by the inverse of the active annotation scale.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub annotative: bool,
+    /// The annotation scales this annotative hatch supports (`OBJECTSCALE`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotation_scales: Vec<String>,
     #[serde(default = "layer_zero")]
     pub layer: String,
     #[serde(flatten)]

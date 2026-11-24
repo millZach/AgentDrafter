@@ -96,7 +96,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, image_frame_key, custom_properties_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, xrefs_key, objects_key, groups_key, paper_key, page_setup_key, layout_key, layouts_key] =
+    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, image_frame_key, custom_properties_key, annotation_scales_key, annotation_scale_key, anno_all_visible_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, xrefs_key, objects_key, groups_key, paper_key, page_setup_key, layout_key, layouts_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -131,6 +131,9 @@ pub fn sheet_description_schema() -> Value {
                 "enum": super::wipeout::WIPEOUT_FRAME_NAMES,
             },
             custom_properties_key: super::field::custom_properties_property(),
+            annotation_scales_key: super::annotation_scale::annotation_scales_property(),
+            annotation_scale_key: super::annotation_scale::annotation_scale_property(),
+            anno_all_visible_key: super::annotation_scale::anno_all_visible_property(),
             linetypes_key: linetypes,
             layers_key: layers,
             hatch_patterns_key: hatch_patterns,
@@ -1006,6 +1009,7 @@ fn defs() -> Map<String, Value> {
             spline
         },
     );
+    super::annotation_scale::add_defs(&mut defs);
     super::field::add_field_defs(&mut defs);
     hatch_schema::add_defs(&mut defs);
     text_defs(&mut defs);
@@ -1060,6 +1064,9 @@ fn text_defs(defs: &mut Map<String, Value>) {
                     "description": "The width factor text in the style takes unless it states \
                                     its own. Without it, 1.",
                 },
+                "annotative": super::annotation_scale::annotative_property(
+                    "Whether text in this style is annotative by default. Without it, false."
+                ),
             },
         }),
     );
@@ -1117,6 +1124,8 @@ fn text_defs(defs: &mut Map<String, Value>) {
                                     (bottom is the lowest descender). Without it, left.",
                     "enum": Justify::ALL.map(Justify::name),
                 },
+                "annotative": { "$ref": "#/$defs/annotative" },
+                "annotation_scales": { "$ref": "#/$defs/object_annotation_scales" },
             }),
         );
         text["anyOf"] = json!([
@@ -1165,6 +1174,8 @@ fn text_defs(defs: &mut Map<String, Value>) {
                                     Without it, top_left.",
                     "enum": Attachment::ALL.map(Attachment::name),
                 },
+                "annotative": { "$ref": "#/$defs/annotative" },
+                "annotation_scales": { "$ref": "#/$defs/object_annotation_scales" },
             }),
         );
         mtext["anyOf"] = json!([

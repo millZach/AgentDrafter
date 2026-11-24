@@ -107,6 +107,9 @@ pub(super) fn add_block_record(
             format!("could not add block `{}` to the drawing: {e}", block.name),
         )
     })?;
+    if block.annotative {
+        super::annotation_scale::mark_block_annotative(drawing, handle);
+    }
     Ok(handle)
 }
 
@@ -364,6 +367,8 @@ pub(super) fn read_insert_in(
             name: super::ids::read_name(&dwg.common),
             layer,
             properties: Default::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         });
     };
     let (effective_block, state, evaluated_block) = drawing
@@ -384,6 +389,8 @@ pub(super) fn read_insert_in(
         state,
         evaluated_block,
         name: super::ids::read_name(&dwg.common),
+        annotative: false,
+        annotation_scales: Vec::new(),
         layer,
         properties: Default::default(),
     };
@@ -536,6 +543,7 @@ mod tests {
             ],
             cells: Vec::new(),
             parameters: Vec::new(),
+            annotative: false,
         }
     }
 
@@ -562,6 +570,8 @@ mod tests {
             state: std::collections::BTreeMap::new(),
             evaluated_block: None,
             name: Some("mark-1".into()),
+            annotative: false,
+            annotation_scales: Vec::new(),
             layer: "symbols".into(),
             properties: Default::default(),
         }
@@ -635,6 +645,7 @@ mod tests {
             objects: vec![crate::model::Object::AttributeDefinition(ours.clone())],
             cells: Vec::new(),
             parameters: Vec::new(),
+            annotative: false,
         };
         let written = dwg_attribute_definition(&ours, &|t| t.position);
         let mut read_block = block.clone();

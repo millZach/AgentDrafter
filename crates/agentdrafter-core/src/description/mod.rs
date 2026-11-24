@@ -15,6 +15,7 @@
 //! agents to read. [`set`] reads a drawing set's settings and rows, [`template`] fills
 //! a template in from a row, and [`set_schema`] states their schemas.
 
+pub(crate) mod annotation_scale;
 mod block_schema;
 pub(crate) mod blocks;
 mod dimension;
@@ -91,13 +92,16 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 20] = [
+pub(crate) const SHEET_KEYS: [&str; 23] = [
     "units",
     "block_library",
     "ltscale",
     "wipeout_frame",
     media::IMAGE_FRAME_KEY,
     field::CUSTOM_PROPERTIES_KEY,
+    annotation_scale::ANNOTATION_SCALES_KEY,
+    annotation_scale::ANNOTATION_SCALE_KEY,
+    annotation_scale::ANNO_ALL_VISIBLE_KEY,
     "linetypes",
     "layers",
     "hatch_patterns",
@@ -441,6 +445,22 @@ fn sheet_and_records(
         Some(node) => field::custom_properties(node)?,
         None => std::collections::BTreeMap::new(),
     };
+    let mut annotation_scales = match fields.get(annotation_scale::ANNOTATION_SCALES_KEY) {
+        Some(node) => annotation_scale::annotation_scales(node)?,
+        None => Vec::new(),
+    };
+    let annotation_scale = match fields.text(annotation_scale::ANNOTATION_SCALE_KEY) {
+        Some(node) => Some(annotation_scale::resolve_scale_name(
+            node,
+            annotation_scale::ANNOTATION_SCALE_KEY,
+            &annotation_scales,
+        )?),
+        None => None,
+    };
+    let anno_all_visible = match fields.get(annotation_scale::ANNO_ALL_VISIBLE_KEY) {
+        Some(node) => Some(boolean(node, annotation_scale::ANNO_ALL_VISIBLE_KEY)?),
+        None => None,
+    };
     let paper = match fields.get(paper::PAPER_KEY) {
         Some(node) => Some(paper::paper(node, paper::PAPER_KEY, units)?),
         None => None,
@@ -496,6 +516,7 @@ fn sheet_and_records(
         mleader_styles: &mleader_styles,
         dimension_styles: &dimension_styles,
         layouts: &layout_names,
+        annotation_scales: &annotation_scales,
     };
     let mut place = Place::Sheet {
         library: library.as_ref(),
@@ -564,6 +585,11 @@ fn sheet_and_records(
         });
     let layout = layouts.next();
     let other_layouts: Vec<Layout> = layouts.collect();
+    annotation_scale::collect_referenced_scales(
+        &mut annotation_scales,
+        annotation_scale.as_deref(),
+        &objects,
+    );
     let mut sheet = Sheet {
         units,
         block_library,
@@ -588,6 +614,9 @@ fn sheet_and_records(
         image_frame,
         custom_properties,
         groups,
+        annotation_scales,
+        annotation_scale,
+        anno_all_visible,
     };
     if let Some(library) = &library {
         blocks::take_from_library(&mut sheet, library, &fields)?;
@@ -983,6 +1012,7 @@ pub(crate) fn parse_added_object_json(
         table_styles: &[],
         mleader_styles: &[],
         dimension_styles: &[],
+        annotation_scales: &[],
         layouts,
     };
     let mut place = objects::Place::Sheet {

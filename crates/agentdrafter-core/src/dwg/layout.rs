@@ -932,6 +932,7 @@ pub(super) fn read_viewport(
         height: dwg.height,
         view_center: Point3::new(dwg.view_center.x, dwg.view_center.y, 0.0),
         scale,
+        annotation_scale: super::ids::read_viewport_annoscale(&dwg.common),
         locked: status.locked,
         clip,
         frozen_layers,

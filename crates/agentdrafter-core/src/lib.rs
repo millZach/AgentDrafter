@@ -167,7 +167,6 @@ pub use looking_at::{
     LOOKING_AT_FILE, MOST_SELECTED,
 };
 pub use media::{apply_image_adjustments, decode_base64, decode_png_rgba, encode_base64};
-pub use model::Group;
 pub use model::{
     attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, DynamicParameter,
     DynamicParameterKind, DynamicValue, Insert, LookupRow, VisibilityState,
@@ -177,6 +176,7 @@ pub use model::{
     FractionFormat, LaidDimension, Measured, OrdinateAxis, TextPlacement, UnitFormat, DEGREE_SIGN,
     DIAMETER_SIGN, ISO_DIMENSION_STYLE, STANDARD_DIMENSION_STYLE,
 };
+pub use model::{AnnotationScale, Group, DEFAULT_ANNOTATION_SCALE};
 pub use model::{
     Arc, Circle, DecodeReport, Donut, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype,
     Lineweight, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
@@ -215,11 +215,12 @@ pub use plot::{
 };
 pub use plot_style::NotFollowed;
 pub use query::{
-    query, query_with, Answer, AttributeValues, BlockInserts, BlockText, End, Extents, FoundObject,
-    GroupFound, GroupMember, InsertAttributes, LayerUse, Matching, Measure, MeasuredPoint,
-    ObjectGeometry, PageSetupUsed, Query, QueryReport, QueryRequest, Selection, SelectionBox,
-    SheetBlocks, SheetExtents, SheetGroups, SheetLayers, SheetLayout, SnapObject, SnappedFrom,
-    ViewportFound, WrittenAt, EXTENTS_TOLERANCE,
+    query, query_with, AnnotationScaleFound, AnnotativeObjectFound, Answer, AttributeValues,
+    BlockInserts, BlockText, End, Extents, FoundObject, GroupFound, GroupMember, InsertAttributes,
+    LayerUse, Matching, Measure, MeasuredPoint, ObjectGeometry, PageSetupUsed, Query, QueryReport,
+    QueryRequest, Selection, SelectionBox, SheetAnnotationScales, SheetBlocks, SheetExtents,
+    SheetGroups, SheetLayers, SheetLayout, SnapObject, SnappedFrom, ViewportFound, WrittenAt,
+    EXTENTS_TOLERANCE,
 };
 pub use render::{render, render_with, DrawnThrough, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;

@@ -754,6 +754,7 @@ pub(crate) fn plan(
             name: STANDARD.to_owned(),
             font: STANDARD_FONT.to_owned(),
             width_factor: 1.0,
+            annotative: false,
         });
     names
         .width_factors
@@ -2066,6 +2067,7 @@ blocks:
                 objects: Vec::new(),
                 cells: Vec::new(),
                 parameters: Vec::new(),
+                annotative: false,
             },
             not_carried: vec![("DIMENSION", 2), ("LEADER", 1)],
         });

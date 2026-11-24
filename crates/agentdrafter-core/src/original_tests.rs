@@ -3013,6 +3013,9 @@ fn check_preserves_sheet_units_for_viewport_dimensions_and_uses_inch_units_on_ex
         image_frame: read_ref.image_frame,
         custom_properties: read_ref.custom_properties,
         groups: read_ref.groups,
+        annotation_scales: read_ref.annotation_scales,
+        annotation_scale: read_ref.annotation_scale,
+        anno_all_visible: read_ref.anno_all_visible,
     };
     let ref_fonts = crate::text::placement::SheetFonts::find(&ref_sheet, &Settings::default());
     let metric_dl = crate::query::measuring_drawing(&ref_sheet, &ref_fonts);

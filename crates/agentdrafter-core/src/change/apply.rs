@@ -1319,6 +1319,10 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::EditGroup {
                 to: AddTo::Sheet(sheet),
                 ..
+            }
+            | Body::SetAnnotationScale {
+                to: AddTo::Sheet(sheet),
+                ..
             } => (sheet, "sheet"),
             Body::Table {
                 to: AddTo::Template(written),
@@ -1349,6 +1353,10 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 ..
             }
             | Body::EditGroup {
+                to: AddTo::Template(written),
+                ..
+            }
+            | Body::SetAnnotationScale {
                 to: AddTo::Template(written),
                 ..
             } => {
@@ -1398,7 +1406,8 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             Body::Copy { .. }
             | Body::Transform { .. }
             | Body::AddRevisionCloud { .. }
-            | Body::DrawOrder { .. } => continue,
+            | Body::DrawOrder { .. }
+            | Body::SetObjectScales { .. } => continue,
             Body::ReplaceText { sheets, .. } | Body::SetAttributes { sheets, .. } => {
                 if let Some(names) = sheets {
                     for (i, sheet) in names.iter().enumerate() {
@@ -1989,6 +1998,44 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         );
     }
 
+    if let Body::SetAnnotationScale {
+        to,
+        scale,
+        anno_all_visible,
+        add_scales,
+        remove_scales,
+    } = &op.body
+    {
+        return apply_set_annotation_scale(
+            at,
+            op,
+            to,
+            scale.as_deref(),
+            *anno_all_visible,
+            add_scales,
+            remove_scales,
+        );
+    }
+
+    if let Body::SetObjectScales {
+        targets,
+        annotative,
+        scales,
+        add,
+        remove,
+    } = &op.body
+    {
+        return apply_set_object_scales(
+            at,
+            op,
+            targets,
+            *annotative,
+            scales.as_deref(),
+            add,
+            remove,
+        );
+    }
+
     if let Body::Block {
         library,
         import: Some(import),
@@ -2092,6 +2139,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::AddGroup { .. }
         | Body::Ungroup { .. }
         | Body::EditGroup { .. }
+        | Body::SetAnnotationScale { .. }
+        | Body::SetObjectScales { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2586,6 +2635,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::AddGroup { .. }
         | Body::Ungroup { .. }
         | Body::EditGroup { .. }
+        | Body::SetAnnotationScale { .. }
+        | Body::SetObjectScales { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -3189,6 +3240,253 @@ fn apply_page_setup(
     }
 }
 
+/// Applies `set_annotation_scale` (`CANNOSCALE` / `SCALELISTEDIT`) to a
+/// template's top-level `annotation_scales`, `annotation_scale`, and
+/// `anno_all_visible`.
+fn apply_set_annotation_scale(
+    at: &mut Attempt,
+    op: &Operation,
+    to: &AddTo,
+    scale: Option<&str>,
+    anno_all_visible: Option<bool>,
+    add_scales: &std::collections::BTreeMap<String, [f64; 2]>,
+    remove_scales: &[String],
+) -> Applied {
+    let files = at.files;
+    let t = match to {
+        AddTo::Template(written) => files.template(written).expect("checked before"),
+        AddTo::Sheet(sheet) => files.template_of[files.sheet(sheet).expect("checked before")],
+    };
+    let sheets = files.templates[t].sheets.clone();
+    let fail = |code: ErrorCode, message: String, field: &str| Applied {
+        sheets: sheets.clone(),
+        outcome: Err(op_error(op.index, op.spec.name, code, message, field)),
+        refuse: false,
+    };
+    if let Some(refusal) = many_paths(files, FileRef::Template(t), op, "template") {
+        return refusal;
+    }
+    let written = files.templates[t].written.clone();
+    let record = match at.template(t) {
+        Ok(record) => record,
+        Err(e) => return fail(e.code, e.message, ""),
+    };
+    let path = record.path.clone();
+    let summary =
+        match record.set_annotation_scale(scale, anno_all_visible, add_scales, remove_scales) {
+            Ok(s) => s,
+            Err(e) => {
+                let field = e.field.as_deref().unwrap_or("");
+                return fail(e.code, e.message, field);
+            }
+        };
+    Applied {
+        outcome: Ok(empty_done(
+            path,
+            format!(
+                "updates annotation scales ({summary}) in template `{written}`, so on {}",
+                every_sheet(&files.names(&sheets))
+            ),
+        )),
+        sheets,
+        refuse: false,
+    }
+}
+
+/// Applies `set_object_scales` (`OBJECTSCALE` / `ANNOUPDATE`) to one or more
+/// annotative objects (supporting group targets).
+fn apply_set_object_scales(
+    at: &mut Attempt,
+    op: &Operation,
+    targets: &[(Target, String)],
+    annotative: Option<bool>,
+    replace_scales: Option<&[String]>,
+    add: &[String],
+    remove: &[String],
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let mut resolved: Vec<(Found, String)> = Vec::new();
+    for (target, key) in targets {
+        let expanded = match resolve_all(at, target, op) {
+            Ok(list) => list,
+            Err(a) => return keyed(*a, op, key),
+        };
+        for f in expanded {
+            if !resolved.iter().any(|(prev, _)| {
+                prev.file == f.file && prev.list == f.list && prev.index == f.index
+            }) {
+                resolved.push((f, key.clone()));
+            }
+        }
+    }
+    let mut all_sheets: Vec<usize> = Vec::new();
+    for (f, _) in &resolved {
+        for k in at.reach(f.file, f.row) {
+            if !all_sheets.contains(&k) {
+                all_sheets.push(k);
+            }
+        }
+    }
+    // Validate every target is an annotative-capable object kind and unlocked.
+    const SUPPORTED: &[&str] = &["text", "mtext", "dimension", "mleader", "hatch", "insert"];
+    for (f, key) in &resolved {
+        if let Some(layer) = locked_layer(at, f) {
+            return Applied {
+                sheets: all_sheets,
+                outcome: Err(op_err(
+                    ErrorCode::Locked,
+                    format!(
+                        "`{}` sits on layer `{layer}`, which is locked; unlock it first",
+                        f.id
+                    ),
+                    key,
+                )),
+                refuse: false,
+            };
+        }
+        let kind = match at.file(f.file) {
+            Ok(rec) => rec
+                .objects(f.list)
+                .get(f.index)
+                .map(|o| o.kind.clone())
+                .unwrap_or_default(),
+            Err(e) => {
+                return Applied {
+                    sheets: all_sheets,
+                    outcome: Err(op_err(e.code, e.message, key)),
+                    refuse: false,
+                }
+            }
+        };
+        if !SUPPORTED.contains(&kind.as_str()) {
+            return Applied {
+                sheets: all_sheets,
+                outcome: Err(op_err(
+                    ErrorCode::BadValue,
+                    format!(
+                        "`{}` is {} `{kind}`, which does not support annotation scales; only \
+                         text, mtext, dimension, mleader, hatch and insert can be annotative",
+                        f.id,
+                        crate::description::article(&kind)
+                    ),
+                    key,
+                )),
+                refuse: false,
+            };
+        }
+    }
+
+    let mut transformed: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut record_path = PathBuf::new();
+    for (f, key) in &resolved {
+        let reach = at.reach(f.file, f.row);
+        // Active scale on the template for seeding when turning annotative on.
+        let active_scale = at
+            .template(files.template_of[f.row])
+            .ok()
+            .and_then(|tmpl| tmpl.top_scalar("annotation_scale"))
+            .unwrap_or_else(|| crate::model::DEFAULT_ANNOTATION_SCALE.to_owned());
+        let rec = match at.file(f.file) {
+            Ok(r) => r,
+            Err(e) => {
+                return Applied {
+                    sheets: all_sheets,
+                    outcome: Err(op_err(e.code, e.message, key)),
+                    refuse: false,
+                }
+            }
+        };
+        if record_path.as_os_str().is_empty() {
+            record_path = rec.path.clone();
+        }
+        let (was_flag, existing_scales) = rec.object_annotation_state(f.list, f.index);
+        let want_anno = match annotative {
+            Some(false) => false,
+            Some(true) => true,
+            None => {
+                was_flag.unwrap_or(false)
+                    || !existing_scales.is_empty()
+                    || replace_scales.is_some()
+                    || !add.is_empty()
+            }
+        };
+        let (new_flag, new_scales): (Option<bool>, Option<Vec<String>>) = if !want_anno {
+            (Some(false), Some(Vec::new()))
+        } else {
+            let mut list: Vec<String> = Vec::new();
+            if let Some(explicit) = replace_scales {
+                for s in explicit {
+                    if !list.iter().any(|x| x.eq_ignore_ascii_case(s)) {
+                        list.push(s.clone());
+                    }
+                }
+            } else {
+                let seed = if existing_scales.is_empty() {
+                    vec![active_scale]
+                } else {
+                    existing_scales
+                };
+                for s in seed {
+                    if !list.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
+                        list.push(s);
+                    }
+                }
+                for s in add {
+                    if !list.iter().any(|x| x.eq_ignore_ascii_case(s)) {
+                        list.push(s.clone());
+                    }
+                }
+                for s in remove {
+                    list.retain(|x| !x.eq_ignore_ascii_case(s));
+                }
+            }
+            if list.is_empty() {
+                return Applied {
+                    sheets: all_sheets,
+                    outcome: Err(op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "cannot remove the last annotation scale from `{}`; set \
+                             `annotative: false` instead",
+                            f.id
+                        ),
+                        "remove",
+                    )),
+                    refuse: false,
+                };
+            }
+            (Some(true), Some(list))
+        };
+        if let Err(e) =
+            rec.set_object_scales(f.list, f.index, new_flag, new_scales.as_deref(), op.index)
+        {
+            return Applied {
+                sheets: all_sheets,
+                outcome: Err(op_err(e.code, e.message, e.field.as_deref().unwrap_or(key))),
+                refuse: false,
+            };
+        }
+        transformed.push((f.id.clone(), reach));
+    }
+    let ids: Vec<String> = transformed.iter().map(|(id, _)| id.clone()).collect();
+    let mut done = empty_done(
+        record_path,
+        format!("updates annotation scales on {}", join_and(&ids)),
+    );
+    done.transformed = transformed;
+    if ids.len() == 1 {
+        done.id = Some(ids[0].clone());
+    }
+    Applied {
+        sheets: all_sheets,
+        outcome: Ok(done),
+        refuse: false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_attach_xref(
     at: &mut Attempt,
@@ -3565,6 +3863,7 @@ fn apply_bind_xref(
             name: format!("{prefix}{}", s.name),
             font: s.font.clone(),
             width_factor: s.width_factor,
+            annotative: s.annotative,
         })
         .collect();
     let block_renames: Vec<(String, String)> = referenced
@@ -3614,6 +3913,7 @@ fn apply_bind_xref(
                     objects: model_objects,
                     cells: Vec::new(),
                     parameters: Vec::new(),
+                    annotative: false,
                 },
                 not_carried: Vec::new(),
             });
@@ -3630,6 +3930,8 @@ fn apply_bind_xref(
                 name: None,
                 layer: crate::model::LAYER_ZERO.to_owned(),
                 properties: Default::default(),
+                annotative: false,
+                annotation_scales: Vec::new(),
             })]
         } else {
             model_objects
@@ -3641,6 +3943,7 @@ fn apply_bind_xref(
             objects: top_objects,
             cells: Vec::new(),
             parameters: Vec::new(),
+            annotative: false,
         },
         not_carried: Vec::new(),
     });
@@ -12128,6 +12431,10 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::EditGroup {
             to: AddTo::Template(written),
             ..
+        }
+        | Body::SetAnnotationScale {
+            to: AddTo::Template(written),
+            ..
         } => files.template(written) == Some(files.template_of[k]),
         Body::BindXref {
             to: AddTo::Template(written),
@@ -12165,6 +12472,10 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
             ..
         }
         | Body::EditGroup {
+            to: AddTo::Sheet(sheet),
+            ..
+        }
+        | Body::SetAnnotationScale {
             to: AddTo::Sheet(sheet),
             ..
         } => files
@@ -12212,7 +12523,8 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::Transform { targets, .. }
         | Body::DrawOrder { targets, .. }
         | Body::Join { targets, .. }
-        | Body::Explode { targets, .. } => targets.iter().any(|(t, _)| reaches(t)),
+        | Body::Explode { targets, .. }
+        | Body::SetObjectScales { targets, .. } => targets.iter().any(|(t, _)| reaches(t)),
         Body::Block { library, .. } => {
             files.library(library.as_deref()).ok() == files.library_of[files.template_of[k]]
         }
@@ -12302,7 +12614,9 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
         | Body::BindXref { .. }
         | Body::AddGroup { .. }
         | Body::Ungroup { .. }
-        | Body::EditGroup { .. } => {
+        | Body::EditGroup { .. }
+        | Body::SetAnnotationScale { .. }
+        | Body::SetObjectScales { .. } => {
             let key = rest.rsplit('.').next().unwrap_or("");
             if key.is_empty() {
                 "name".to_owned()
@@ -12670,6 +12984,18 @@ fn target_words(op: &Operation) -> String {
         Body::AddGroup { name, .. } | Body::Ungroup { name, .. } | Body::EditGroup { name, .. } => {
             format!("group `{name}`")
         }
+        Body::SetAnnotationScale {
+            to: AddTo::Template(t),
+            ..
+        } => format!("annotation scales in template `{t}`"),
+        Body::SetAnnotationScale {
+            to: AddTo::Sheet(s),
+            ..
+        } => format!("annotation scales of sheet `{s}`'s template"),
+        Body::SetObjectScales { targets, .. } => match targets.as_slice() {
+            [(only, _)] => only.words(),
+            many => format!("{} objects", many.len()),
+        },
         Body::Block {
             import: Some(import),
             ..

@@ -95,6 +95,10 @@ pub enum Query {
     /// The groups of each sheet, with their descriptions, selectability and
     /// member objects.
     Groups,
+    /// Each sheet's active annotation scale (`CANNOSCALE`), `ANNOALLVISIBLE`,
+    /// scale list (`ACAD_SCALELIST`), and every annotative object with its
+    /// supported scales.
+    AnnotationScales,
 }
 
 /// A [`Query`] as it is read. A kind that takes nothing is an empty struct
@@ -114,6 +118,7 @@ enum QueryInput {
     Geometry(Selection),
     Layout {},
     Groups {},
+    AnnotationScales {},
 }
 
 impl From<QueryInput> for Query {
@@ -129,6 +134,7 @@ impl From<QueryInput> for Query {
             QueryInput::Geometry(selection) => Self::Geometry(selection),
             QueryInput::Layout {} => Self::Layout,
             QueryInput::Groups {} => Self::Groups,
+            QueryInput::AnnotationScales {} => Self::AnnotationScales,
         }
     }
 }
@@ -405,6 +411,51 @@ pub enum Answer {
         /// Each sheet looked at, with its groups.
         groups: Vec<SheetGroups>,
     },
+    AnnotationScales {
+        /// How many annotative objects the sheets hold; 0 when none.
+        count: usize,
+        /// Each sheet looked at, with its active scale, scale list and
+        /// annotative objects.
+        annotation_scales: Vec<SheetAnnotationScales>,
+    },
+}
+
+/// One sheet's annotation scale state (`CANNOSCALE`, `ACAD_SCALELIST`,
+/// `ANNOALLVISIBLE`) and annotative objects.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SheetAnnotationScales {
+    pub sheet: String,
+    /// Active annotation scale name (`CANNOSCALE`), such as `1:1` or `1:50`.
+    pub current: String,
+    /// Active annotation scale factor (`paper_units / drawing_units`).
+    pub factor: f64,
+    /// Explicit `ANNOALLVISIBLE` override when set on the sheet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anno_all_visible: Option<bool>,
+    /// Defined and active annotation scales on the sheet (`ACAD_SCALELIST`).
+    pub scales: Vec<AnnotationScaleFound>,
+    /// Annotative objects on the sheet, in order.
+    pub objects: Vec<AnnotativeObjectFound>,
+}
+
+/// One annotation scale entry listed by `query annotation-scales`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AnnotationScaleFound {
+    pub name: String,
+    pub paper_units: f64,
+    pub drawing_units: f64,
+    pub factor: f64,
+}
+
+/// One annotative object listed by `query annotation-scales`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AnnotativeObjectFound {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub scales: Vec<String>,
 }
 
 /// One sheet's groups (`GROUP`).
@@ -674,6 +725,7 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
         }
         Query::Layout => layout::layout(&looked_at, settings, units, &looked),
         Query::Groups => groups(&looked_at, &looked),
+        Query::AnnotationScales => annotation_scales(&looked_at, &looked),
     };
     if objects_not_read > 0 {
         message.push_str(&format!(
@@ -1712,6 +1764,80 @@ fn groups(sheets: &[&SheetRecord], looked: &LookedAt) -> (String, Answer) {
         Answer::Groups {
             count,
             groups: listed,
+        },
+    )
+}
+
+fn annotation_scales(sheets: &[&SheetRecord], looked: &LookedAt) -> (String, Answer) {
+    let listed: Vec<SheetAnnotationScales> = sheets
+        .iter()
+        .map(|record| {
+            let sheet = &record.sheet;
+            let active = sheet.active_annotation_scale();
+            let raw_scales = if sheet.annotation_scales.is_empty() {
+                vec![active.clone()]
+            } else {
+                let mut list = sheet.annotation_scales.clone();
+                if !list
+                    .iter()
+                    .any(|s| s.name.eq_ignore_ascii_case(&active.name))
+                {
+                    list.insert(0, active.clone());
+                }
+                list
+            };
+            let scales: Vec<AnnotationScaleFound> = raw_scales
+                .into_iter()
+                .map(|s| AnnotationScaleFound {
+                    factor: s.factor(),
+                    name: s.name,
+                    paper_units: s.paper_units,
+                    drawing_units: s.drawing_units,
+                })
+                .collect();
+            let objects: Vec<AnnotativeObjectFound> = sheet
+                .objects
+                .iter()
+                .enumerate()
+                .filter(|(_, obj)| sheet.object_is_annotative(obj))
+                .map(|(idx, obj)| AnnotativeObjectFound {
+                    id: record.id(idx),
+                    name: record.objects.get(idx).and_then(|o| o.name.clone()),
+                    kind: obj.type_name().to_owned(),
+                    scales: sheet
+                        .object_annotation_scales(obj)
+                        .into_iter()
+                        .map(|s| s.name)
+                        .collect(),
+                })
+                .collect();
+            let active_factor = active.factor();
+            SheetAnnotationScales {
+                sheet: record.name.clone(),
+                current: active.name,
+                factor: active_factor,
+                anno_all_visible: sheet.anno_all_visible,
+                scales,
+                objects,
+            }
+        })
+        .collect();
+    let count: usize = listed.iter().map(|s| s.objects.len()).sum();
+    let message = match listed.as_slice() {
+        [one] => format!(
+            "sheet `{}` active annotation scale is `{}` with {} and {}",
+            one.sheet,
+            one.current,
+            counted(one.scales.len(), "scale"),
+            counted(one.objects.len(), "annotative object"),
+        ),
+        _ => format!("{} {}", counted(count, "annotative object"), looked.on(),),
+    };
+    (
+        message,
+        Answer::AnnotationScales {
+            count,
+            annotation_scales: listed,
         },
     )
 }

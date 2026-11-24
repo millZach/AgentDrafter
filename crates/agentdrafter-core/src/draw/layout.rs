@@ -38,6 +38,7 @@ pub(super) fn draw(drawer: &Drawer, tolerance: f64, list: &mut DisplayList) {
         }
     }
     for (index, viewport) in sheet.viewports() {
+        let vp_annoscale = sheet.viewport_annotation_scale(viewport).factor();
         let through = Drawer {
             sheet,
             fonts: drawer.fonts,
@@ -46,6 +47,8 @@ pub(super) fn draw(drawer: &Drawer, tolerance: f64, list: &mut DisplayList) {
             purpose: drawer.purpose,
             linetype_factor: drawer.linetype_factor / viewport.scale,
             frozen_here: &viewport.frozen_layers,
+            annotation_scale: vp_annoscale,
+            anno_all_visible: sheet.anno_all_visible.unwrap_or(false),
         };
         let fine = tolerance / viewport.scale;
         let mut model = DisplayList::default();

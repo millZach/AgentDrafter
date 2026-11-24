@@ -24,12 +24,14 @@ pub(crate) const HATCH_PATTERN_KEYS: [&str; 1] = ["lines"];
 pub(crate) const PATTERN_LINE_KEYS: [&str; 4] = ["angle", "origin", "delta", "dashes"];
 
 /// The keys a hatch takes.
-pub(crate) const HATCH_KEYS: [&str; 12] = [
+pub(crate) const HATCH_KEYS: [&str; 14] = [
     "pattern",
     "scale",
     "angle",
     "origin",
     "boundary",
+    super::annotation_scale::ANNOTATIVE_KEY,
+    super::annotation_scale::ANNOTATION_SCALES_KEY,
     "layer",
     "color",
     "linetype",
@@ -201,6 +203,7 @@ pub(super) fn hatch(
     units: Unit,
     layer: String,
     patterns: &[HatchPattern],
+    declared_scales: &[crate::model::AnnotationScale],
 ) -> Result<Hatch, Error> {
     let pattern = pattern(
         fields.require_text("pattern")?,
@@ -241,12 +244,16 @@ pub(super) fn hatch(
         &fields.path_of("boundary"),
         units,
     )?;
+    let (annotative, annotation_scales) =
+        super::annotation_scale::object_annotation(fields, declared_scales)?;
     Ok(Hatch {
         pattern,
         scale,
         angle,
         origin,
         boundary,
+        annotative,
+        annotation_scales,
         layer,
         properties: Default::default(),
     })

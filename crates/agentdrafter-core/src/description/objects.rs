@@ -139,6 +139,8 @@ pub(super) struct Tables<'a> {
     /// The names of the layouts the sheet is drawn in, in order, so that
     /// its objects may be in one's paper space; none in a block.
     pub layouts: &'a [String],
+    /// The named annotation scales declared on the sheet; empty in a block.
+    pub annotation_scales: &'a [crate::model::AnnotationScale],
 }
 
 /// Where an object is: on a sheet, which may insert blocks from its block
@@ -385,11 +387,30 @@ pub(super) fn object(
         ("circle", _) => circle(&fields, units, layer).map(Object::Circle),
         ("ellipse", _) => ellipse(&fields, units, layer).map(Object::Ellipse),
         ("spline", _) => spline(&fields, units, layer).map(Object::Spline),
-        ("hatch", _) => {
-            hatch::hatch(&fields, units, layer, tables.hatch_patterns).map(Object::Hatch)
-        }
-        ("text", _) => text(&fields, units, layer, tables.styles).map(Object::Text),
-        ("mtext", _) => mtext(&fields, units, layer, tables.styles).map(Object::MText),
+        ("hatch", _) => hatch::hatch(
+            &fields,
+            units,
+            layer,
+            tables.hatch_patterns,
+            tables.annotation_scales,
+        )
+        .map(Object::Hatch),
+        ("text", _) => text(
+            &fields,
+            units,
+            layer,
+            tables.styles,
+            tables.annotation_scales,
+        )
+        .map(Object::Text),
+        ("mtext", _) => mtext(
+            &fields,
+            units,
+            layer,
+            tables.styles,
+            tables.annotation_scales,
+        )
+        .map(Object::MText),
         ("table", Place::Sheet { .. }) => {
             table(&fields, units, layer, tables.styles, tables.table_styles).map(Object::Table)
         }
@@ -405,18 +426,29 @@ pub(super) fn object(
             tables.styles,
             tables.mleader_styles,
             *library,
+            tables.annotation_scales,
             noticed,
         )
         .map(Object::MLeader),
         ("leader", Place::Sheet { .. }) => {
             leader(&fields, units, layer, tables.styles).map(Object::Leader)
         }
-        ("dimension", Place::Sheet { .. }) => {
-            dimension(&fields, units, layer, tables.dimension_styles).map(Object::Dimension)
-        }
-        ("viewport", Place::Sheet { .. }) => {
-            viewport(&fields, units, layer, tables.layers).map(Object::Viewport)
-        }
+        ("dimension", Place::Sheet { .. }) => dimension(
+            &fields,
+            units,
+            layer,
+            tables.dimension_styles,
+            tables.annotation_scales,
+        )
+        .map(Object::Dimension),
+        ("viewport", Place::Sheet { .. }) => viewport(
+            &fields,
+            units,
+            layer,
+            tables.layers,
+            tables.annotation_scales,
+        )
+        .map(Object::Viewport),
         ("attdef", Place::Block { noticed, .. }) => {
             attribute_definition(&fields, tables, layer, noticed).map(Object::AttributeDefinition)
         }
@@ -428,13 +460,31 @@ pub(super) fn object(
                 noticed,
                 ..
             },
-        ) => insert(&fields, units, layer, *library, xrefs, noticed).map(Object::Insert),
+        ) => insert(
+            &fields,
+            units,
+            layer,
+            *library,
+            xrefs,
+            tables.annotation_scales,
+            noticed,
+        )
+        .map(Object::Insert),
         (
             "insert",
             Place::Block {
                 library, noticed, ..
             },
-        ) => insert(&fields, units, layer, *library, &[], noticed).map(Object::Insert),
+        ) => insert(
+            &fields,
+            units,
+            layer,
+            *library,
+            &[],
+            tables.annotation_scales,
+            noticed,
+        )
+        .map(Object::Insert),
         (other, _) => unreachable!("object type `{other}` is listed but not read"),
     }?;
     *object.properties_mut() = properties;

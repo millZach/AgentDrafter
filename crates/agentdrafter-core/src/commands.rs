@@ -905,7 +905,9 @@ fn query_does() -> String {
      and nearest `from` a snap of another object, each named by `which` to ask for it again; \
      geometry gives each matching object's length, area, extents and angles; layout lists each \
      sheet's paper-space layouts and viewports; groups lists each sheet's groups (`GROUP`) and \
-     their member objects. Lengths are in the declared unit (null for a \
+     their member objects; annotation_scales lists each sheet's active annotation scale \
+     (`CANNOSCALE`), scale list (`ACAD_SCALELIST`), `anno_all_visible`, and every annotative \
+     object with its supported scales. Lengths are in the declared unit (null for a \
      unitless DWG). On a DWG, each object takes its carried AgentDrafter ID or its drawing name \
      joined to its handle (such as P-101/handle:2F), matching `read` and `display-list`, and \
      objects the core has no model for are counted under `objects_not_read` and named under \
@@ -990,7 +992,7 @@ fn query_schema() -> Value {
         })
     };
     json!({
-        "description": "What to ask, by its `kind`: find, blocks, attributes, measure, extents, layers, snap, geometry, layout or groups.",
+        "description": "What to ask, by its `kind`: find, blocks, attributes, measure, extents, layers, snap, geometry, layout, groups or annotation_scales.",
         "oneOf": [
             selection("find", "The objects that match every part given; with none given, every object."),
             bare("blocks", "The blocks each sheet inserts."),
@@ -1031,6 +1033,12 @@ fn query_schema() -> Value {
                 "groups",
                 "The groups (`GROUP`) of each sheet, with their descriptions, selectability and \
                  member objects.",
+            ),
+            bare(
+                "annotation_scales",
+                "Each sheet's active annotation scale (`CANNOSCALE`), `ANNOALLVISIBLE`, defined \
+                 annotation scales (`ACAD_SCALELIST`), and every annotative object with its \
+                 supported scales.",
             ),
         ],
     })

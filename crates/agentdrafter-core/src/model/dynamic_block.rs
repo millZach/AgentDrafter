@@ -808,6 +808,7 @@ pub fn evaluate_block<'a>(
         objects: final_objects,
         cells: final_cells,
         parameters: block.parameters.clone(),
+        annotative: block.annotative,
     })
 }
 
@@ -1541,6 +1542,7 @@ mod tests {
             base_point: Point3::new(0.0, 0.0, 0.0),
             objects: vec![line(0.0, 0.0, 10.0, 0.0), line(0.0, 0.0, 0.0, 10.0)],
             cells: Vec::new(),
+            annotative: false,
             parameters: vec![DynamicParameter {
                 name: "Visibility".into(),
                 kind: DynamicParameterKind::Visibility {
@@ -1572,6 +1574,7 @@ mod tests {
             base_point: Point3::new(0.0, 0.0, 0.0),
             objects: vec![line(0.0, 0.0, 10.0, 0.0)],
             cells: Vec::new(),
+            annotative: false,
             parameters: vec![DynamicParameter {
                 name: "Length".into(),
                 kind: DynamicParameterKind::Linear {
@@ -1601,6 +1604,7 @@ mod tests {
             base_point: Point3::new(0.0, 0.0, 0.0),
             objects: vec![line(0.0, 0.0, 10.0, 0.0)],
             cells: Vec::new(),
+            annotative: false,
             parameters: vec![
                 DynamicParameter {
                     name: "Angle".into(),

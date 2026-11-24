@@ -71,7 +71,7 @@ const STALE_USAGE: &str =
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description | dwg> [--sheet <sheet>]... [--fonts <folder>]... [--no-system-fonts]";
 const IMPORT_BLOCKS_USAGE: &str = "agentdrafter import-blocks <dwg | dxf> --library <block-library> [--block <name>]... [--replace] [--units <unit>] [--dry-run]";
 const READ_USAGE: &str = "agentdrafter read <dwg> [--mirror <path> | --no-mirror]";
-const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry | layout | groups> <drawing-set-folder | sheet-description | dwg> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --group <group> --space <space> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...] [--no-system-fonts]";
+const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry | layout | groups | annotation-scales> <drawing-set-folder | sheet-description | dwg> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --group <group> --space <space> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...] [--no-system-fonts]";
 
 /// Runs the `agentdrafter` command on `args`, the arguments after its own
 /// name, as the binary does: it prints the reply on standard output, or
@@ -1104,12 +1104,20 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
     if !selecting
         && !matches!(
             kind.as_str(),
-            "blocks" | "measure" | "extents" | "layers" | "snap" | "layout" | "groups"
+            "blocks"
+                | "measure"
+                | "extents"
+                | "layers"
+                | "snap"
+                | "layout"
+                | "groups"
+                | "annotation-scales"
+                | "annotation_scales"
         )
     {
         return Err(usage(format!(
-            "query asks find, blocks, attributes, measure, extents, layers, snap, geometry, layout \
-             or groups, not `{kind}`"
+            "query asks find, blocks, attributes, measure, extents, layers, snap, geometry, layout, \
+             groups or annotation-scales, not `{kind}`"
         )));
     }
     let mut source: Option<PathBuf> = None;
@@ -1272,6 +1280,7 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
         "layers" => Query::Layers,
         "layout" => Query::Layout,
         "groups" => Query::Groups,
+        "annotation-scales" | "annotation_scales" => Query::AnnotationScales,
         _ => Query::Measure(Measure { from, to }),
     };
     let request = QueryRequest {

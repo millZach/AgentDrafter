@@ -679,6 +679,7 @@ mod tests {
             objects,
             cells: Vec::new(),
             parameters: Vec::new(),
+            annotative: false,
         }
     }
 
@@ -936,6 +937,8 @@ mod tests {
             name: None,
             layer: "0".into(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         });
         let b = block("E_INS", vec![diagonal, insert]);
         let blocks = [vbar, b.clone()];

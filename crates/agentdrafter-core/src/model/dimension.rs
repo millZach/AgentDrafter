@@ -305,6 +305,9 @@ pub struct DimensionStyle {
     pub scale: f64,
     /// How far apart a baseline dimension's lines are, 0 or more: DIMDLI.
     pub baseline_spacing: f64,
+    /// Whether this dimension style is annotative (`ANNOTATIVE`).
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub annotative: bool,
 }
 
 impl DimensionStyle {
@@ -343,6 +346,7 @@ impl DimensionStyle {
             suffix: String::new(),
             scale: 1.0,
             baseline_spacing: inch(0.38),
+            annotative: false,
         }
     }
 
@@ -381,6 +385,7 @@ impl DimensionStyle {
             suffix: String::new(),
             scale: 1.0,
             baseline_spacing: mm(3.75),
+            annotative: false,
         }
     }
 
@@ -531,6 +536,12 @@ pub struct Dimension {
     /// nothing while its text is in its own place.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub continued: bool,
+    /// Whether this dimension is annotative (`ANNOTATIVE`).
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub annotative: bool,
+    /// The annotation scales this annotative dimension supports (`OBJECTSCALE`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotation_scales: Vec<String>,
     #[serde(default = "layer_zero")]
     pub layer: String,
     #[serde(flatten)]
@@ -799,6 +810,8 @@ impl Dimension {
             layer: self.layer.clone(),
             field: None,
             properties: self.properties.clone(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         };
         let stacked = pieces
             .iter()
@@ -1367,6 +1380,8 @@ mod tests {
             continued: false,
             layer: "0".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         }
     }
 
@@ -1503,6 +1518,8 @@ mod tests {
                 continued: false,
                 layer: "0".to_owned(),
                 properties: Properties::default(),
+                annotative: false,
+                annotation_scales: Vec::new(),
             }
             .laid_out(&style, Unit::In, &measure)
         };
@@ -1550,6 +1567,8 @@ mod tests {
                 continued: false,
                 layer: "0".to_owned(),
                 properties: Properties::default(),
+                annotative: false,
+                annotation_scales: Vec::new(),
             }
             .laid_out(&style, Unit::In, &measure)
         };

@@ -230,6 +230,9 @@ pub struct MLeaderStyle {
     /// The lineweight they draw with: `ByBlock`, the multileader's own,
     /// unless the style gives another.
     pub leader_lineweight: ObjectLineweight,
+    /// Whether this multileader style is annotative (`ANNOTATIVE`).
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub annotative: bool,
 }
 
 impl MLeaderStyle {
@@ -258,6 +261,7 @@ impl MLeaderStyle {
             attachment: LeaderAttachment::MiddleOfTopLine,
             leader_color: ObjectColor::ByBlock,
             leader_lineweight: ObjectLineweight::ByBlock,
+            annotative: false,
         }
     }
 }
@@ -359,6 +363,12 @@ pub struct MLeader {
     /// The multileader style it draws with.
     #[serde(default = "standard_mleader_style")]
     pub mleader_style: String,
+    /// Whether this multileader is annotative (`ANNOTATIVE`).
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub annotative: bool,
+    /// The annotation scales this annotative multileader supports (`OBJECTSCALE`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotation_scales: Vec<String>,
     #[serde(default = "layer_zero")]
     pub layer: String,
     #[serde(flatten)]
@@ -505,6 +515,8 @@ impl MLeader {
                     state: std::collections::BTreeMap::new(),
                     evaluated_block: None,
                     name: None,
+                    annotative: false,
+                    annotation_scales: Vec::new(),
                     layer: self.layer.clone(),
                     properties: self.properties.clone(),
                 },
@@ -528,6 +540,8 @@ impl MLeader {
                     state: std::collections::BTreeMap::new(),
                     evaluated_block: None,
                     name: None,
+                    annotative: false,
+                    annotation_scales: Vec::new(),
                     layer: self.layer.clone(),
                     properties: self.properties.clone(),
                 };
@@ -588,6 +602,8 @@ impl MLeader {
             },
             layer: self.layer.clone(),
             field: None,
+            annotative: false,
+            annotation_scales: Vec::new(),
             properties: self.properties.clone(),
         };
         let measured = measure(&text);
@@ -601,6 +617,31 @@ impl MLeader {
             measured,
             attachment,
         }
+    }
+
+    /// Returns a copy of this multileader and its style with all paper-sized
+    /// dimensions (text height, arrow size, landing, gap, block scale)
+    /// multiplied by `inv` (`drawing_units / paper_units`) for annotation
+    /// scaling, keeping leader vertex positions anchored in model space.
+    pub fn scaled_for_annotation(&self, style: &MLeaderStyle, inv: f64) -> (MLeader, MLeaderStyle) {
+        let mut s = style.clone();
+        s.text_height *= inv;
+        s.arrow_size *= inv;
+        s.landing *= inv;
+        s.landing_gap *= inv;
+        let mut m = self.clone();
+        m.landing = m.landing.map(|v| v * inv);
+        m.gap = m.gap.map(|v| v * inv);
+        m.arrow_size = m.arrow_size.map(|v| v * inv);
+        match &mut m.content {
+            MLeaderContent::Text(t) => {
+                t.height = t.height.map(|v| v * inv);
+            }
+            MLeaderContent::Block(b) => {
+                b.scale *= inv;
+            }
+        }
+        (m, s)
     }
 }
 
@@ -725,6 +766,8 @@ impl Leader {
             layer: self.layer.clone(),
             field: None,
             properties: self.properties.clone(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         })
     }
 }
@@ -897,6 +940,8 @@ mod tests {
             mleader_style: STANDARD_MLEADER_STYLE.to_owned(),
             layer: "0".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         };
         let measure = |_: &MText| MTextBox {
             width: 9.6905,

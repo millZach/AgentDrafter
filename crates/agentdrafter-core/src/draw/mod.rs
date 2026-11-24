@@ -734,6 +734,12 @@ struct Drawer<'a> {
     /// for model space seen through a viewport, the layers frozen in it,
     /// as AutoCAD's VPLAYER freezes them; none elsewhere.
     frozen_here: &'a [String],
+    /// Active annotation scale factor (`paper_units / drawing_units`) for
+    /// annotative model-space objects.
+    annotation_scale: f64,
+    /// Whether annotative model-space objects draw even when their supported
+    /// scale list does not match `annotation_scale` (`ANNOALLVISIBLE`).
+    anno_all_visible: bool,
 }
 
 impl<'a> Drawer<'a> {
@@ -851,8 +857,30 @@ impl<'a> Drawer<'a> {
 
     /// Adds what the sheet's object at `index` draws to `list`.
     fn sheet_object(&self, index: usize, object: &Object, tolerance: f64, list: &mut DisplayList) {
+        let in_model = self.sheet.in_model_space(index);
+        let is_annotative = in_model && self.sheet.object_is_annotative(object);
+        if is_annotative
+            && !self.sheet.object_visible_at_scale(
+                object,
+                self.annotation_scale,
+                self.anno_all_visible,
+            )
+        {
+            return;
+        }
+        let inv = if is_annotative && self.annotation_scale > 0.0 {
+            1.0 / self.annotation_scale
+        } else {
+            1.0
+        };
         if let Object::Insert(insert) = object {
-            self.insert(index, insert, tolerance, list);
+            if inv != 1.0 {
+                let mut scaled = insert.clone();
+                scaled.scale *= inv;
+                self.insert(index, &scaled, tolerance, list);
+            } else {
+                self.insert(index, insert, tolerance, list);
+            }
             return;
         }
         if let Object::Table(table) = object {
@@ -860,7 +888,7 @@ impl<'a> Drawer<'a> {
             return;
         }
         if let Object::MLeader(mleader) = object {
-            self.mleader(index, mleader, tolerance, list);
+            self.mleader(index, mleader, inv, tolerance, list);
             return;
         }
         if let Object::Leader(leader) = object {
@@ -868,7 +896,7 @@ impl<'a> Drawer<'a> {
             return;
         }
         if let Object::Dimension(dimension) = object {
-            self.dimension(index, dimension, tolerance, list);
+            self.dimension(index, dimension, inv, tolerance, list);
             return;
         }
         let shown = self.shown(object.layer());
@@ -884,7 +912,31 @@ impl<'a> Drawer<'a> {
                 pen.lineweight = 0.0;
             }
         }
-        let drawn = self.object(object, pen, tolerance, None);
+        let scaled_owned: Option<Object> = if inv != 1.0 {
+            match object {
+                Object::Text(t) => {
+                    let mut s = t.clone();
+                    s.height *= inv;
+                    Some(Object::Text(s))
+                }
+                Object::MText(m) => {
+                    let mut s = m.clone();
+                    s.height *= inv;
+                    s.width *= inv;
+                    Some(Object::MText(s))
+                }
+                Object::Hatch(h) if !h.is_solid() => {
+                    let mut s = h.clone();
+                    s.scale *= inv;
+                    Some(Object::Hatch(s))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let target = scaled_owned.as_ref().unwrap_or(object);
+        let drawn = self.object(target, pen, tolerance, None);
         // Only a hatch that draws is reported as cut short.
         if drawn.cut_short && shown == Shown::Drawn {
             list.hatches_cut_short
@@ -1375,7 +1427,14 @@ impl<'a> Drawer<'a> {
     /// text, in the multileader's own pen, as its `part` 0, or its block,
     /// as an insert of the block on the multileader's layer and in its pen
     /// draws it, each of the block's objects its part.
-    fn mleader(&self, index: usize, mleader: &MLeader, tolerance: f64, list: &mut DisplayList) {
+    fn mleader(
+        &self,
+        index: usize,
+        mleader: &MLeader,
+        inv: f64,
+        tolerance: f64,
+        list: &mut DisplayList,
+    ) {
         let shown = self.shown(&mleader.layer);
         if shown == Shown::Hidden {
             return;
@@ -1385,8 +1444,13 @@ impl<'a> Drawer<'a> {
             .sheet
             .mleader_style(&mleader.mleader_style)
             .unwrap_or_else(|| MLeaderStyle::standard(self.sheet.units));
-        let laid = mleader.laid_out(
-            &style,
+        let scaled = (inv != 1.0).then(|| mleader.scaled_for_annotation(&style, inv));
+        let (effective_mleader, effective_style) = match &scaled {
+            Some((m, s)) => (m, s),
+            None => (mleader, &style),
+        };
+        let laid = effective_mleader.laid_out(
+            effective_style,
             &|t| text::mtext_box(t, self.fonts),
             &self.sheet.blocks,
         );
@@ -1470,6 +1534,7 @@ impl<'a> Drawer<'a> {
         &self,
         index: usize,
         dimension: &Dimension,
+        inv: f64,
         tolerance: f64,
         list: &mut DisplayList,
     ) {
@@ -1477,9 +1542,12 @@ impl<'a> Drawer<'a> {
         if shown == Shown::Hidden {
             return;
         }
-        let Some(style) = self.sheet.dimension_style(&dimension.dimension_style) else {
+        let Some(mut style) = self.sheet.dimension_style(&dimension.dimension_style) else {
             return;
         };
+        if inv != 1.0 {
+            style.scale *= inv;
+        }
         let own = self.pen(&dimension.layer, &dimension.properties, None);
         let block = |lineweight: ObjectLineweight| Properties {
             color: ObjectColor::ByBlock,
@@ -1562,6 +1630,8 @@ impl<'a> Drawer<'a> {
                             justify: crate::text::Justify::Left,
                             layer: laid.text.layer.clone(),
                             field: None,
+                            annotative: false,
+                            annotation_scales: Vec::new(),
                             properties: laid.text.properties.clone(),
                         };
                         let lettering =
@@ -1829,6 +1899,7 @@ pub(crate) fn draw_sheet_for(
     purpose: Purpose,
 ) -> DisplayList {
     let tolerance = if tolerance > 0.0 { tolerance } else { 1e-3 };
+    let is_layout = sheet.layout.is_some();
     let drawer = Drawer {
         sheet,
         fonts,
@@ -1837,10 +1908,20 @@ pub(crate) fn draw_sheet_for(
         purpose,
         linetype_factor: 1.0,
         frozen_here: &[],
+        annotation_scale: if is_layout {
+            1.0
+        } else {
+            sheet.active_annotation_scale().factor()
+        },
+        anno_all_visible: if is_layout {
+            true
+        } else {
+            sheet.anno_all_visible.unwrap_or(true)
+        },
     };
     let mut list = DisplayList::default();
     populate_images(sheet, &mut list);
-    if sheet.layout.is_some() {
+    if is_layout {
         // A sheet drawn in a layout prints its layout.
         layout::draw(&drawer, tolerance, &mut list);
         return list;
@@ -1886,6 +1967,8 @@ pub(crate) fn draw_objects(
         purpose: Purpose::Screen,
         linetype_factor: 1.0,
         frozen_here: &[],
+        annotation_scale: sheet.active_annotation_scale().factor(),
+        anno_all_visible: true,
     };
     let mut list = DisplayList::default();
     populate_images(sheet, &mut list);

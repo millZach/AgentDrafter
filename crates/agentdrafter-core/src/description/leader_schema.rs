@@ -195,6 +195,9 @@ pub(super) fn leader_defs(defs: &mut Map<String, Value>) {
                                     lineweight is written. Without it, `ByBlock`: the \
                                     multileader's own lineweight.",
                 },
+                "annotative": super::annotation_scale::annotative_property(
+                    "Whether multileaders in this style are annotative by default. Without it, false."
+                ),
             },
         }),
     );
@@ -270,6 +273,8 @@ pub(super) fn leader_defs(defs: &mut Map<String, Value>) {
                 ),
                 "type": TEXT_TYPES,
             })),
+            "annotative": { "$ref": "#/$defs/annotative" },
+            "annotation_scales": { "$ref": "#/$defs/object_annotation_scales" },
         }),
     );
     // Block content takes no gap, and a landing it gives is more than 0.

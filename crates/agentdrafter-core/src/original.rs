@@ -264,6 +264,9 @@ fn check_drawing_media(
         image_frame: drawing.image_frame,
         custom_properties: std::collections::BTreeMap::new(),
         groups: Vec::new(),
+        annotation_scales: Vec::new(),
+        annotation_scale: None,
+        anno_all_visible: None,
     };
     let dir = source.parent().unwrap_or_else(|| Path::new("."));
     crate::media::resolve_sheet_media(&mut sheet, &[dir]).unresolved
@@ -407,6 +410,9 @@ pub(crate) fn dwg_loaded_from_drawing(
         image_frame: drawing.image_frame,
         custom_properties: drawing.custom_properties,
         groups: drawing.groups,
+        annotation_scales: drawing.annotation_scales,
+        annotation_scale: drawing.annotation_scale,
+        anno_all_visible: drawing.anno_all_visible,
     };
     let unresolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source).unresolved;
     let dir = source.parent().unwrap_or_else(|| Path::new("."));

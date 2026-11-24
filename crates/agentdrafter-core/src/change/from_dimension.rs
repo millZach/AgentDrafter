@@ -194,6 +194,8 @@ mod tests {
             continued: false,
             layer: "0".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         }
     }
 

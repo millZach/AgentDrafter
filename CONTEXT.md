@@ -92,6 +92,14 @@ _Avoid_: clip path (the PDF's way of cutting ink), mask (the PNG's), polygonal v
 A layer frozen in one viewport alone, as AutoCAD's VPLAYER freezes it: its objects neither draw nor plot through that viewport, and are not checked through it, but draw through the sheet's other viewports. A layer frozen everywhere is frozen on the layer itself.
 _Avoid_: VP freeze, hidden, off (a layer that is off draws nowhere and still counts)
 
+**Annotation scale**:
+A named paper-to-model scale ratio (such as `1:50` or `1/4" = 1'-0"`, AutoCAD's `ACAD_SCALELIST` and active `CANNOSCALE`) that sizes annotative objects on paper regardless of the viewport scale they are viewed through. Managed in sheet descriptions with `annotation_scales`, `annotation_scale`, `anno_all_visible` (`ANNOALLVISIBLE`) and per-viewport `annotation_scale`, queried with `query annotation-scales`, and edited with `set_annotation_scale` (`CANNOSCALE` / `SCALELISTEDIT`) and `set_object_scales` (`OBJECTSCALE` / `ANNOUPDATE`).
+_Avoid_: text scale, viewport scale (a viewport's scale projects model geometry; its annotation scale sizes and filters annotative objects)
+
+**Annotative**:
+An object (`text`, `mtext`, `dimension`, `mleader`, `hatch`, or `insert`), style (`text_styles`, `dimension_styles`, `mleader_styles`), or block definition marked `annotative: true` (AutoCAD's `ANNOTATIVE` / `AcadAnnotative` XDATA and `ACDB_ANNOTATIONSCALES` context data) whose declared size is its paper size: it draws at that exact size on paper through every viewport whose scale is in its `annotation_scales`, and hides in viewports whose scale it does not support unless `anno_all_visible` is true.
+_Avoid_: auto-scaling, scale-independent
+
 **Drawing set**:
 A job's sheets together with the block library, templates and data they share. It is the unit AgentDrafter works on: a change can span its sheets and is undone as one.
 _Avoid_: project, package, workspace

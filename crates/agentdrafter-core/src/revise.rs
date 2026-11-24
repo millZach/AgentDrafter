@@ -995,6 +995,91 @@ fn prepare_revision(
                 description.as_deref(),
                 *selectable,
             )?,
+            Body::SetAnnotationScale {
+                to,
+                scale,
+                anno_all_visible,
+                add_scales,
+                remove_scales,
+            } => {
+                check_add_target_sheet(to, &sheet_name, op)?;
+                let (msg, handles) = session
+                    .set_annotation_scale(
+                        scale.as_deref(),
+                        *anno_all_visible,
+                        add_scales,
+                        remove_scales,
+                    )
+                    .map_err(|e| {
+                        let f = e.field.as_deref().unwrap_or("");
+                        op_error(op.index, op.spec.name, e.code, e.message, f)
+                    })?;
+                RevisionOperationOutcome {
+                    index: op.index,
+                    op: op.spec.name.to_owned(),
+                    ok: true,
+                    message: msg,
+                    id: None,
+                    handle: handles.touched.first().cloned(),
+                    handles_touched: handles.touched,
+                    handles_added: handles.added,
+                    handles_deleted: handles.deleted,
+                    copies: Vec::new(),
+                    snapped: Vec::new(),
+                    replacements: Vec::new(),
+                    attributes_set: Vec::new(),
+                    split_id: None,
+                    deleted: Vec::new(),
+                    transformed: Vec::new(),
+                    created: Vec::new(),
+                }
+            }
+            Body::SetObjectScales {
+                targets,
+                annotative,
+                scales,
+                add,
+                remove,
+            } => {
+                let record = ensure_record(&session, &mut cached_record, source, &sheet_name)?;
+                let mut hexes: Vec<String> = Vec::new();
+                let mut ids: Vec<String> = Vec::new();
+                for (target, field) in targets {
+                    for found in
+                        resolve_target_all(&session, record, target, &sheet_name, op, field)?
+                    {
+                        if !hexes.iter().any(|h| h.eq_ignore_ascii_case(&found.handle)) {
+                            hexes.push(found.handle);
+                            ids.push(found.id);
+                        }
+                    }
+                }
+                let handles = session
+                    .set_object_scales(&hexes, *annotative, scales.as_deref(), add, remove)
+                    .map_err(|e| {
+                        let f = e.field.as_deref().unwrap_or("target");
+                        op_error(op.index, op.spec.name, e.code, e.message, f)
+                    })?;
+                RevisionOperationOutcome {
+                    index: op.index,
+                    op: op.spec.name.to_owned(),
+                    ok: true,
+                    message: format!("updated annotation scales on {}", ids.join(", ")),
+                    id: (ids.len() == 1).then(|| ids[0].clone()),
+                    handle: handles.touched.first().cloned(),
+                    handles_touched: handles.touched,
+                    handles_added: handles.added,
+                    handles_deleted: handles.deleted,
+                    copies: Vec::new(),
+                    snapped: Vec::new(),
+                    replacements: Vec::new(),
+                    attributes_set: Vec::new(),
+                    split_id: None,
+                    deleted: Vec::new(),
+                    transformed: ids,
+                    created: Vec::new(),
+                }
+            }
             _ => apply_revision_op(
                 &mut session,
                 &mut cached_record,
@@ -1813,6 +1898,8 @@ fn revise_attach_xref(
         name: insert_name.map(str::to_owned),
         layer: layer.to_owned(),
         properties: Default::default(),
+        annotative: false,
+        annotation_scales: Vec::new(),
     };
     let (hex, handles) = if place {
         session
@@ -1948,6 +2035,9 @@ fn revise_bind_xref(
         image_frame: crate::model::WipeoutFrame::Off,
         custom_properties: std::collections::BTreeMap::new(),
         groups: Vec::new(),
+        annotation_scales: Vec::new(),
+        annotation_scale: None,
+        anno_all_visible: None,
     };
     let fonts = SheetFonts::find(&style_sheet, settings);
     let start_of = |t: &crate::text::Text| fonts.start(t);
@@ -4488,7 +4578,9 @@ fn apply_revision_op(
         | Body::BindXref { .. }
         | Body::AddGroup { .. }
         | Body::Ungroup { .. }
-        | Body::EditGroup { .. } => {
+        | Body::EditGroup { .. }
+        | Body::SetAnnotationScale { .. }
+        | Body::SetObjectScales { .. } => {
             unreachable!("handled before apply_revision_op")
         }
         Body::Table {

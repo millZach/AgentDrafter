@@ -113,6 +113,9 @@ pub(crate) fn check_drawing_xrefs(
         image_frame: drawing.image_frame,
         custom_properties: drawing.custom_properties.clone(),
         groups: drawing.groups.clone(),
+        annotation_scales: drawing.annotation_scales.clone(),
+        annotation_scale: drawing.annotation_scale.clone(),
+        anno_all_visible: drawing.anno_all_visible,
     };
     resolve_sheet_xrefs(&mut sheet, host_path).unresolved
 }
@@ -301,6 +304,7 @@ fn resolve_one(
                 objects: prefixed_objects,
                 cells: Vec::new(),
                 parameters: Vec::new(),
+                annotative: false,
             },
         );
         let wrapper_insert = Object::Insert(Insert {
@@ -316,6 +320,8 @@ fn resolve_one(
             name: None,
             layer: LAYER_ZERO.to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         });
         push_resolved_block(
             host,
@@ -325,6 +331,7 @@ fn resolve_one(
                 objects: vec![wrapper_insert],
                 cells: Vec::new(),
                 parameters: Vec::new(),
+                annotative: false,
             },
         );
     } else {
@@ -336,6 +343,7 @@ fn resolve_one(
                 objects: prefixed_objects,
                 cells: Vec::new(),
                 parameters: Vec::new(),
+                annotative: false,
             },
         );
     }
@@ -428,6 +436,7 @@ fn merge_xref_tables(host: &mut Sheet, drawing: &DrawingContents, prefix: &str, 
                 name,
                 font: style.font.clone(),
                 width_factor: style.width_factor,
+                annotative: style.annotative,
             });
         }
     }

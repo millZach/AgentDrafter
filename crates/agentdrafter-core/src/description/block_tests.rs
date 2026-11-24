@@ -188,6 +188,8 @@ fn an_insert_reads_every_key_and_fills_in_attributes_it_leaves_out() {
             name: Some("m1".into()),
             layer: "0".into(),
             properties: Default::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         })]
     );
     let plain = with_library(&one_object("insert: {block: ARROW, position: [0, 0, 0]}"));
@@ -344,7 +346,7 @@ fn an_inserts_values_are_checked() {
             "insert: {block: MARKER, position: [0, 0, 0], colour: red}",
             ErrorCode::UnknownKey,
             "objects[0].insert.colour",
-            &["an insert takes block, position, scale, rotation, mirrored, readable_attributes, attributes, attribute_fields, state, layer, color, linetype, lineweight, linetype_scale, plot_style, transparency, id, name"],
+            &["an insert takes block, position, scale, rotation, mirrored, readable_attributes, attributes, attribute_fields, state, annotative, annotation_scales, layer, color, linetype, lineweight, linetype_scale, plot_style, transparency, id, name"],
         ),
         (
             "insert: {position: [0, 0, 0]}",

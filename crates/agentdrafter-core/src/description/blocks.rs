@@ -73,7 +73,12 @@ pub(crate) const LIBRARY_KEYS: [&str; 6] = [
 ];
 
 /// The keys a block takes.
-pub(crate) const BLOCK_KEYS: [&str; 3] = ["base_point", "objects", "parameters"];
+pub(crate) const BLOCK_KEYS: [&str; 4] = [
+    "base_point",
+    "objects",
+    "parameters",
+    super::annotation_scale::ANNOTATIVE_KEY,
+];
 
 /// The key a block's text or attribute definition declares its cell under.
 pub(crate) const CELL_KEY: &str = "cell";
@@ -106,7 +111,7 @@ pub(crate) const ATTDEF_KEYS: [&str; 22] = [
 
 /// The keys a single line of text takes in a block: a sheet's, and its
 /// cell.
-pub(crate) const BLOCK_TEXT_KEYS: [&str; 16] = [
+pub(crate) const BLOCK_TEXT_KEYS: [&str; 18] = [
     "contents",
     "field",
     "position",
@@ -115,6 +120,8 @@ pub(crate) const BLOCK_TEXT_KEYS: [&str; 16] = [
     "width_factor",
     "rotation",
     "justify",
+    super::annotation_scale::ANNOTATIVE_KEY,
+    super::annotation_scale::ANNOTATION_SCALES_KEY,
     "layer",
     "color",
     "linetype",
@@ -126,7 +133,7 @@ pub(crate) const BLOCK_TEXT_KEYS: [&str; 16] = [
 ];
 
 /// The keys an insert takes, besides those every object on a sheet takes.
-pub(crate) const INSERT_KEYS: [&str; 16] = [
+pub(crate) const INSERT_KEYS: [&str; 18] = [
     "block",
     "position",
     "scale",
@@ -136,6 +143,8 @@ pub(crate) const INSERT_KEYS: [&str; 16] = [
     "attributes",
     "attribute_fields",
     "state",
+    super::annotation_scale::ANNOTATIVE_KEY,
+    super::annotation_scale::ANNOTATION_SCALES_KEY,
     "layer",
     "color",
     "linetype",
@@ -215,6 +224,7 @@ pub(crate) fn read_block_library(text: &str) -> Result<(BlockLibrary, Vec<Notice
         mleader_styles: &[],
         dimension_styles: &[],
         layouts: &[],
+        annotation_scales: &[],
     };
     let entries = named_entries(fields.require("blocks")?, "blocks", "block")?;
     // A block that inserts another is read after it, so that its insert can
@@ -470,12 +480,14 @@ fn block(
         )?,
         None => Vec::new(),
     };
+    let annotative = super::annotation_scale::optional_annotative(&fields)?;
     let block = Block {
         name: name.to_owned(),
         base_point,
         objects,
         cells,
         parameters,
+        annotative,
     };
     Ok((block, noticed))
 }
@@ -630,6 +642,7 @@ pub(super) fn insert(
     layer: String,
     library: Option<&BlockLibrary>,
     xrefs: &[Xref],
+    declared_scales: &[crate::model::AnnotationScale],
     noticed: &mut Vec<Noticed>,
 ) -> Result<Insert, Error> {
     let (scale, rotation) = scale_and_rotation(fields)?;
@@ -646,6 +659,8 @@ pub(super) fn insert(
         &fields.path_of("position"),
         units,
     )?;
+    let (annotative, annotation_scales) =
+        super::annotation_scale::object_annotation(fields, declared_scales)?;
     if let Some(xref) = xref_named(fields, library, xrefs)? {
         for forbidden in ["attributes", "attribute_fields", "state"] {
             if let Some(node) = fields.get(forbidden) {
@@ -671,6 +686,8 @@ pub(super) fn insert(
             state: std::collections::BTreeMap::new(),
             evaluated_block: None,
             name: None,
+            annotative,
+            annotation_scales,
             layer,
             properties: Default::default(),
         });
@@ -689,6 +706,8 @@ pub(super) fn insert(
         state,
         evaluated_block: None,
         name: None,
+        annotative,
+        annotation_scales,
         layer,
         properties: Default::default(),
     })

@@ -103,6 +103,7 @@ fn set_style_properties(dwg_style: &mut DwgTextStyle, style: &TextStyle) {
     dwg_style.font_file = style.font.clone();
     dwg_style.true_type_font = String::new();
     dwg_style.width_factor = style.width_factor;
+    dwg_style.annotative = style.annotative;
 }
 
 /// A single line of text whose baseline starts at `start`: its position
@@ -171,7 +172,6 @@ fn read_text_style(dwg_style: &DwgTextStyle) -> Option<TextStyle> {
         && !dwg_style.flags.backward
         && !dwg_style.flags.upside_down
         && !dwg_style.is_vertical
-        && !dwg_style.annotative
         && (narrowest..=widest).contains(&dwg_style.width_factor);
     if !plain {
         return None;
@@ -186,6 +186,7 @@ fn read_text_style(dwg_style: &DwgTextStyle) -> Option<TextStyle> {
         name: dwg_style.name.clone(),
         font,
         width_factor: dwg_style.width_factor,
+        annotative: dwg_style.annotative,
     })
 }
 
@@ -216,6 +217,8 @@ pub(super) fn read_text(dwg_text: &DwgText, layer: String) -> Option<Text> {
         justify,
         layer,
         field: None,
+        annotative: false,
+        annotation_scales: Vec::new(),
         properties: Default::default(),
     })
 }
@@ -232,7 +235,6 @@ pub(super) fn read_mtext(dwg_text: &DwgMText, layer: String) -> Option<MText> {
         && dwg_text.line_spacing_style == LineSpacingStyle::AtLeast
         && dwg_text.background_fill_flags == 0
         && dwg_text.column_data.column_type == 0
-        && !dwg_text.is_annotative
         && dwg_text.rectangle_height.unwrap_or(0.0) == 0.0;
     if !plain {
         return None;
@@ -252,6 +254,8 @@ pub(super) fn read_mtext(dwg_text: &DwgMText, layer: String) -> Option<MText> {
         justify,
         layer,
         field: None,
+        annotative: dwg_text.is_annotative,
+        annotation_scales: Vec::new(),
         properties: Default::default(),
     })
 }
@@ -439,6 +443,8 @@ mod tests {
             layer: "0".into(),
             field: None,
             properties: Default::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         };
         let start = Point3::new(7.5, 20.0, 1.0);
         let written = dwg_text(&text, start);

@@ -211,6 +211,7 @@ fn dwg_style(
     s.dimcen = style.center_mark;
     s.dimscale = style.scale;
     s.dimdli = style.baseline_spacing;
+    s.annotative = style.annotative;
     s.dimlunit = style.unit_format.code();
     s.dimdec = i16::from(style.precision);
     s.dimfrac = style.fraction_format.code();
@@ -676,7 +677,6 @@ fn read_style(drawing: &CadDocument, s: &DimStyle) -> Option<DimensionStyle> {
         && s.dimltex_handle.is_null()
         && s.dimltex1_handle.is_null()
         && s.dimltex2_handle.is_null()
-        && !s.annotative
         && s.dimscale > 0.0
         && s.dimasz > 0.0
         && s.dimtxt > 0.0
@@ -745,6 +745,7 @@ fn read_style(drawing: &CadDocument, s: &DimStyle) -> Option<DimensionStyle> {
         suffix,
         scale: s.dimscale,
         baseline_spacing: s.dimdli,
+        annotative: s.annotative,
     })
 }
 
@@ -963,6 +964,8 @@ pub(super) fn read_dimension(
         dimension_style: style.name.clone(),
         text,
         continued,
+        annotative: false,
+        annotation_scales: Vec::new(),
         layer,
         properties: Default::default(),
     };
@@ -1143,6 +1146,8 @@ mod tests {
             continued: false,
             layer: "0".to_owned(),
             properties: Default::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         };
         let measure = |t: &MText| MTextBox {
             width: 3.0,

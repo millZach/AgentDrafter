@@ -56,6 +56,9 @@ fn reads_one_line() {
             image_frame: Default::default(),
             custom_properties: Default::default(),
             groups: Vec::new(),
+            annotation_scales: Vec::new(),
+            annotation_scale: None,
+            anno_all_visible: None,
             layout: None,
             other_layouts: Vec::new(),
         }

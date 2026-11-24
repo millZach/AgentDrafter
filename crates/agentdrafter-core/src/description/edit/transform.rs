@@ -776,6 +776,8 @@ impl At<'_> {
             continued: false,
             layer: String::new(),
             properties: Default::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         };
         let Some(sector) = probe.sector() else {
             return false;

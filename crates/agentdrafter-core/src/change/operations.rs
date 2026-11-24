@@ -124,6 +124,12 @@ pub(crate) enum Kind {
     /// Edits a named group (add/remove members, rename, description,
     /// selectable): AutoCAD's GROUPEDIT.
     EditGroup,
+    /// Sets the active annotation scale (`CANNOSCALE`), `ANNOALLVISIBLE`, or
+    /// edits the drawing's scale list (`SCALELISTEDIT`).
+    SetAnnotationScale,
+    /// Adds, removes, or replaces supported annotation scales on annotative
+    /// objects, or toggles their `annotative` flag (`OBJECTSCALE` / `ANNOUPDATE`).
+    SetObjectScales,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -303,6 +309,8 @@ impl Spec {
             Kind::Explode => &["X"],
             Kind::AttachXref => &["XREF"],
             Kind::AddGroup => &["G"],
+            Kind::SetAnnotationScale => &["SCALELISTEDIT"],
+            Kind::SetObjectScales => &["ANNOUPDATE"],
             Kind::Add("image", None) => &["IMAGE"],
             Kind::Add("pdf_underlay", None) => &["PDFUNDERLAY"],
             _ => &[],
@@ -356,7 +364,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 90] = [
+pub(crate) const SPECS: [Spec; 92] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -622,6 +630,16 @@ pub(crate) const SPECS: [Spec; 90] = [
         name: "edit_group",
         alias: "GROUPEDIT",
         kind: Kind::EditGroup,
+    },
+    Spec {
+        name: "set_annotation_scale",
+        alias: "CANNOSCALE",
+        kind: Kind::SetAnnotationScale,
+    },
+    Spec {
+        name: "set_object_scales",
+        alias: "OBJECTSCALE",
+        kind: Kind::SetObjectScales,
     },
 ];
 
@@ -1245,6 +1263,19 @@ fn does(spec: &Spec) -> String {
         Kind::EditGroup => "Edits the named group `name`: adds objects (`add`), removes objects \
                             (`remove`), renames it (`rename`), or updates its `description` or \
                             `selectable` flag. AutoCAD's GROUPEDIT."
+            .to_owned(),
+        Kind::SetAnnotationScale => "Sets the active annotation scale (`scale`, AutoCAD's \
+                                     CANNOSCALE), toggles `anno_all_visible` (ANNOALLVISIBLE), or \
+                                     adds/removes named scales in `annotation_scales` \
+                                     (`add_scales`, `remove_scales`, AutoCAD's SCALELISTEDIT) on a \
+                                     template or original DWG. AutoCAD's CANNOSCALE / SCALELISTEDIT."
+            .to_owned(),
+        Kind::SetObjectScales => "Adds (`add`), removes (`remove`), or replaces (`scales`) the \
+                                  supported annotation scales on one or more annotative objects \
+                                  (`target` or `targets`, including group targets), or toggles \
+                                  their `annotative` flag (`text`, `mtext`, `dimension`, \
+                                  `mleader`, `hatch`, or `insert`). AutoCAD's OBJECTSCALE / \
+                                  ANNOUPDATE."
             .to_owned(),
     }
 }
@@ -3195,6 +3226,100 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
             }
             schema
         }
+        Kind::SetAnnotationScale => {
+            let mut schema = json!({
+                "type": "object",
+                "required": [],
+                "additionalProperties": false,
+                "properties": {
+                    "sheet": {
+                        "description": "A sheet built from the template to edit (optional on an \
+                                        original DWG).",
+                        "$ref": "#/$defs/sheet_name",
+                    },
+                    "template": {
+                        "description": "The template to edit. Give sheet or template.",
+                        "$ref": "#/$defs/template_path",
+                    },
+                    "scale": {
+                        "description": "New active annotation scale (`CANNOSCALE`), such as \
+                                        `1:50` or a name in `annotation_scales`.",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "anno_all_visible": {
+                        "description": "Sets `ANNOALLVISIBLE`: true draws every annotative object \
+                                        regardless of viewport scale; false hides annotative \
+                                        objects that do not support a viewport's scale.",
+                        "type": "boolean",
+                    },
+                    "add_scales": {
+                        "description": "Mapping from scale name to `[paper_units, drawing_units]` \
+                                        to add or update in `annotation_scales` (`ACAD_SCALELIST`).",
+                        "type": "object",
+                        "minProperties": 1,
+                        "additionalProperties": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "items": { "type": "number", "exclusiveMinimum": 0 },
+                        },
+                    },
+                    "remove_scales": {
+                        "description": "Names of annotation scales to remove from \
+                                        `annotation_scales` (`ACAD_SCALELIST`).",
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string", "minLength": 1 },
+                    },
+                },
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
+        Kind::SetObjectScales => {
+            let mut schema = json!({
+                "type": "object",
+                "required": [],
+                "additionalProperties": false,
+                "properties": {
+                    "annotative": {
+                        "description": "Turns annotative scaling on (`true`) or off (`false`) on \
+                                        the targeted objects.",
+                        "type": "boolean",
+                    },
+                    "scales": {
+                        "description": "Replaces each object's supported `annotation_scales` list \
+                                        with these scale names (cannot be combined with `add` or \
+                                        `remove`).",
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string", "minLength": 1 },
+                    },
+                    "add": {
+                        "description": "Annotation scale names to add to each object's supported \
+                                        scale list.",
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string", "minLength": 1 },
+                    },
+                    "remove": {
+                        "description": "Annotation scale names to remove from each object's \
+                                        supported scale list.",
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string", "minLength": 1 },
+                    },
+                },
+            });
+            copied_objects_properties(&mut schema);
+            schema["allOf"] = json!([copied_objects_rule()]);
+            schema
+        }
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
@@ -4076,6 +4201,275 @@ fn read_edit_group_body(
         rename,
         description,
         selectable,
+    })
+}
+
+#[inline(never)]
+fn read_scale_name_array(
+    value: &Value,
+    field: &str,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Vec<String>, Error> {
+    let Value::Array(items) = value else {
+        return Err(fail(
+            ErrorCode::WrongType,
+            format!("expected `{field}`, a list of annotation scale names"),
+            field,
+        ));
+    };
+    if items.is_empty() {
+        return Err(fail(
+            ErrorCode::BadValue,
+            format!("`{field}` must list at least one annotation scale name"),
+            field,
+        ));
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let key = format!("{field}[{i}]");
+        match item {
+            Value::String(s) if !s.trim().is_empty() => out.push(s.trim().to_owned()),
+            Value::String(_) => {
+                return Err(fail(
+                    ErrorCode::BadValue,
+                    "an annotation scale name cannot be empty".to_owned(),
+                    &key,
+                ));
+            }
+            _ => {
+                return Err(fail(
+                    ErrorCode::WrongType,
+                    "expected an annotation scale name such as `1:50`".to_owned(),
+                    &key,
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[inline(never)]
+fn read_set_annotation_scale_body(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let to = parse_template_or_sheet_target(map, default_sheet, fail)?;
+    let scale = match map.get("scale") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
+        Some(Value::String(_)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                "`scale` cannot be empty".to_owned(),
+                "scale",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected an annotation scale name under `scale`".to_owned(),
+                "scale",
+            ))
+        }
+    };
+    let anno_all_visible = match map.get("anno_all_visible") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected true or false under `anno_all_visible`".to_owned(),
+                "anno_all_visible",
+            ))
+        }
+    };
+    let mut add_scales = std::collections::BTreeMap::new();
+    match map.get("add_scales") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(entries)) if !entries.is_empty() => {
+            for (name, val) in entries {
+                let trimmed = name.trim();
+                let key = format!("add_scales.{name}");
+                if trimmed.is_empty() || trimmed != name || trimmed.chars().any(char::is_control) {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "an annotation scale name cannot be empty, start or end with a space, or \
+                         hold control characters"
+                            .to_owned(),
+                        &key,
+                    ));
+                }
+                let Value::Array(pair) = val else {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected [paper_units, drawing_units], two positive numbers".to_owned(),
+                        &key,
+                    ));
+                };
+                if pair.len() != 2 {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        format!(
+                            "an annotation scale takes [paper_units, drawing_units] (2 numbers); \
+                             found {}",
+                            pair.len()
+                        ),
+                        &key,
+                    ));
+                }
+                let p = pair[0].as_f64().unwrap_or(f64::NAN);
+                let d = pair[1].as_f64().unwrap_or(f64::NAN);
+                if !p.is_finite() || p <= 0.0 || !d.is_finite() || d <= 0.0 {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "paper_units and drawing_units must be finite numbers greater than 0"
+                            .to_owned(),
+                        &key,
+                    ));
+                }
+                add_scales.insert(name.clone(), [p, d]);
+            }
+        }
+        Some(Value::Object(_)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                "`add_scales` must name at least one scale".to_owned(),
+                "add_scales",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected a mapping from scale name to [paper_units, drawing_units] under \
+                 `add_scales`"
+                    .to_owned(),
+                "add_scales",
+            ))
+        }
+    }
+    let remove_scales = match map.get("remove_scales") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => read_scale_name_array(v, "remove_scales", fail)?,
+    };
+    if scale.is_none()
+        && anno_all_visible.is_none()
+        && add_scales.is_empty()
+        && remove_scales.is_empty()
+    {
+        return Err(fail(
+            ErrorCode::MissingKey,
+            "set_annotation_scale needs at least one of `scale`, `anno_all_visible`, `add_scales`, \
+             or `remove_scales`"
+                .to_owned(),
+            "",
+        ));
+    }
+    Ok(Body::SetAnnotationScale {
+        to,
+        scale,
+        anno_all_visible,
+        add_scales,
+        remove_scales,
+    })
+}
+
+#[inline(never)]
+fn read_set_object_scales_body(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let targets = match (map.get("target"), map.get("targets")) {
+        (Some(_), Some(_)) => {
+            return Err(fail(
+                ErrorCode::Usage,
+                "give `target` or `targets`, not both".to_owned(),
+                "",
+            ))
+        }
+        (None, None) => {
+            return Err(fail(
+                ErrorCode::MissingKey,
+                "missing `target` (or `targets`): the annotative object(s) to update".to_owned(),
+                "target",
+            ))
+        }
+        (Some(one), None) => {
+            let mut t = read_target(one).map_err(|(code, msg, sub)| {
+                let field = if sub.is_empty() {
+                    "target".to_owned()
+                } else if sub.starts_with("target") {
+                    sub
+                } else {
+                    format!("target.{sub}")
+                };
+                fail(code, msg, &field)
+            })?;
+            if let Some(ds) = default_sheet {
+                match &mut t {
+                    Target::Name { sheet, .. } | Target::Group { sheet, .. } if sheet.is_none() => {
+                        *sheet = Some(ds.to_owned());
+                    }
+                    _ => {}
+                }
+            }
+            vec![(t, "target".to_owned())]
+        }
+        (None, Some(many)) => read_target_array(many, "targets", default_sheet, fail)?,
+    };
+    let annotative = match map.get("annotative") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected true or false under `annotative`".to_owned(),
+                "annotative",
+            ))
+        }
+    };
+    let scales = match map.get("scales") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(read_scale_name_array(v, "scales", fail)?),
+    };
+    let add = match map.get("add") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => read_scale_name_array(v, "add", fail)?,
+    };
+    let remove = match map.get("remove") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => read_scale_name_array(v, "remove", fail)?,
+    };
+    if scales.is_some() && (!add.is_empty() || !remove.is_empty()) {
+        return Err(fail(
+            ErrorCode::Usage,
+            "give `scales` (to replace the list) or `add`/`remove` (to edit it), not both"
+                .to_owned(),
+            "scales",
+        ));
+    }
+    if annotative == Some(false) && (scales.is_some() || !add.is_empty()) {
+        return Err(fail(
+            ErrorCode::BadValue,
+            "cannot add or assign `scales` while turning `annotative: false`".to_owned(),
+            "annotative",
+        ));
+    }
+    if annotative.is_none() && scales.is_none() && add.is_empty() && remove.is_empty() {
+        return Err(fail(
+            ErrorCode::MissingKey,
+            "set_object_scales needs at least one of `annotative`, `scales`, `add`, or `remove`"
+                .to_owned(),
+            "",
+        ));
+    }
+    Ok(Body::SetObjectScales {
+        targets,
+        annotative,
+        scales,
+        add,
+        remove,
     })
 }
 
@@ -5217,6 +5611,24 @@ pub(crate) enum Body {
         rename: Option<String>,
         description: Option<String>,
         selectable: Option<bool>,
+    },
+    /// Sets the active annotation scale (`CANNOSCALE`), `ANNOALLVISIBLE`, or
+    /// edits `annotation_scales` (`SCALELISTEDIT`).
+    SetAnnotationScale {
+        to: AddTo,
+        scale: Option<String>,
+        anno_all_visible: Option<bool>,
+        add_scales: std::collections::BTreeMap<String, [f64; 2]>,
+        remove_scales: Vec<String>,
+    },
+    /// Adds, removes, or replaces supported annotation scales on annotative
+    /// objects, or toggles their `annotative` flag (`OBJECTSCALE` / `ANNOUPDATE`).
+    SetObjectScales {
+        targets: Vec<(Target, String)>,
+        annotative: Option<bool>,
+        scales: Option<Vec<String>>,
+        add: Vec<String>,
+        remove: Vec<String>,
     },
 }
 
@@ -6771,6 +7183,21 @@ fn operation(
                 "selectable",
             ])?;
             read_edit_group_body(map, default_sheet, &fail)?
+        }
+        Kind::SetAnnotationScale => {
+            keys(&[
+                "sheet",
+                "template",
+                "scale",
+                "anno_all_visible",
+                "add_scales",
+                "remove_scales",
+            ])?;
+            read_set_annotation_scale_body(map, default_sheet, &fail)?
+        }
+        Kind::SetObjectScales => {
+            keys(&["target", "targets", "annotative", "scales", "add", "remove"])?;
+            read_set_object_scales_body(map, default_sheet, &fail)?
         }
         Kind::SetAttributes => {
             keys(&[
