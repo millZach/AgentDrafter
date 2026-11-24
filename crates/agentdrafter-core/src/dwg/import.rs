@@ -142,6 +142,7 @@ pub(crate) fn read_blocks(path: &Path, dxf: bool) -> Result<DrawingBlocks, Error
                 base_point: point(record.base_point),
                 objects,
                 cells: Vec::new(),
+                parameters: Vec::new(),
             },
             not_carried,
         }

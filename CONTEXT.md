@@ -229,8 +229,16 @@ The label an attribute is filled in by, such as `TAG` or `TERMINAL`, kept in cap
 _Avoid_: attribute name, field name
 
 **Insert**:
-One placement of a block on a sheet, at a position, scale and rotation, carrying a value for each of the block's attributes. AutoCAD calls it a block reference.
+One placement of a block on a sheet, at a position, scale and rotation, carrying a value for each of the block's attributes and, for a dynamic block, its chosen parameter values under `state`. AutoCAD calls it a block reference.
 _Avoid_: instance, block reference
+
+**Dynamic block**:
+A block that declares named parameters — visibility states, lookup tables, flips, linear stretch distances, or rotations — so each insert can be placed in a chosen state without defining a separate block for every variant. Its chosen state draws through the one drawing pipeline, writes into a built DWG via an evaluated anonymous block (`*U<n>`), and is edited with `set_block_state` (`PROPERTIES`). Existing plant dynamic blocks (`ACAD_ENHANCEDBLOCK`) are read whole and preserved unchanged through revisions (ADR-0004).
+_Avoid_: smart block, parametric symbol
+
+**Visibility state**:
+One named state of a dynamic block's visibility parameter, listing which of the block's objects draw when that state is active.
+_Avoid_: layer state (layers are sheet-wide; visibility states belong to one dynamic block)
 
 **Nested block**:
 A block that another block inserts, such as a terminal in a terminal strip. The insert that places it is one of the outer block's objects, and the outer block's definition fills in its attributes, once for every insert of the outer block.

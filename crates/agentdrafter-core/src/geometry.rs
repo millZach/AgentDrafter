@@ -218,10 +218,6 @@ fn path_through(points: &[P3]) -> Vec<(String, Curve)> {
 }
 
 impl<'a> Reader<'a> {
-    fn block(&self, name: &str) -> Option<&'a Block> {
-        self.sheet.blocks.iter().find(|b| b.name == name)
-    }
-
     /// The curves an object of the sheet's own, or of a block, is made of,
     /// in its own coordinates, with their places; none for an insert, whose
     /// block's curves [`Reader::parts`] reads. A hatch, text and a
@@ -360,9 +356,10 @@ impl<'a> Reader<'a> {
 
     fn parts_into(&self, object: &Object, chain: &Chain, path: &str, out: &mut Vec<Part>) {
         if let Object::Insert(insert) = object {
-            let Some(block) = self.block(&insert.block) else {
+            let Some(block) = self.sheet.block_for_insert(insert) else {
                 return;
             };
+            let block = block.as_ref();
             let inner = chain.within(insert, block);
             for (k, object) in block.objects.iter().enumerate() {
                 let here = join(path, &format!("objects[{k}]"));
@@ -405,9 +402,10 @@ impl<'a> Reader<'a> {
                 if chain.blocks.is_empty() {
                     add(SnapKind::Insertion, "position", p3(insert.position));
                 }
-                let Some(block) = self.block(&insert.block) else {
+                let Some(block) = self.sheet.block_for_insert(insert) else {
                     return;
                 };
+                let block = block.as_ref();
                 let inner = chain.within(insert, block);
                 for (k, object) in block.objects.iter().enumerate() {
                     let here = join(path, &format!("objects[{k}]"));

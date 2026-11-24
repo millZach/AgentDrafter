@@ -2069,6 +2069,68 @@ fn apply_revision_op(
                 snapped: Vec::new(),
             })
         }
+        Body::SetBlockState { target, state } => {
+            let record = ensure_record(session, cached, source, sheet_name)?;
+            let found = resolve_target(session, record, target, sheet_name, op, "target")?;
+            check_unlocked(session, &found.handle, &found.id, op, "target")?;
+            let mut dyn_state = std::collections::BTreeMap::new();
+            for (k, v) in state {
+                let parsed = match v {
+                    Value::Bool(b) => crate::model::DynamicValue::Bool(*b),
+                    Value::Number(n) => {
+                        let Some(f) = n.as_f64().filter(|f| f.is_finite()) else {
+                            return Err(op_error(
+                                index,
+                                op_name,
+                                ErrorCode::BadValue,
+                                format!("dynamic parameter `{k}` must be a finite number"),
+                                &format!("state.{k}"),
+                            ));
+                        };
+                        crate::model::DynamicValue::Number(f)
+                    }
+                    Value::String(s) => crate::model::DynamicValue::Text(s.clone()),
+                    Value::Null => {
+                        return Err(op_error(
+                            index,
+                            op_name,
+                            ErrorCode::BadValue,
+                            format!(
+                                "resetting `{k}` with null is not supported on an original DWG; \
+                                 pass the explicit state name"
+                            ),
+                            &format!("state.{k}"),
+                        ))
+                    }
+                    _ => {
+                        return Err(op_error(
+                            index,
+                            op_name,
+                            ErrorCode::WrongType,
+                            format!("dynamic parameter `{k}` takes a string, number, or boolean"),
+                            &format!("state.{k}"),
+                        ))
+                    }
+                };
+                dyn_state.insert(k.clone(), parsed);
+            }
+            let (msg, handles) = session
+                .set_block_state(&found.handle, &dyn_state)
+                .map_err(|e| op_error(index, op_name, e.code, e.message, "state"))?;
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message: format!("{msg} on `{}` (handle `{}`)", found.id, found.handle),
+                id: Some(found.id),
+                handle: Some(found.handle),
+                handles_touched: handles.touched,
+                handles_added: handles.added,
+                handles_deleted: handles.deleted,
+                copies: Vec::new(),
+                snapped: Vec::new(),
+            })
+        }
         Body::Change {
             target,
             set,

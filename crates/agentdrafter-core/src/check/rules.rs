@@ -342,9 +342,10 @@ impl Sheet<'_> {
             let Object::Insert(insert) = object else {
                 continue;
             };
-            let Some(block) = self.block(insert) else {
+            let Some(block) = self.record.sheet.block_for_insert(insert) else {
                 continue;
             };
+            let block = block.as_ref();
             let Some((list, view, through)) = self.measured_in(i) else {
                 continue;
             };
@@ -767,11 +768,6 @@ impl Sheet<'_> {
             },
             None => words,
         }
-    }
-
-    /// The block an insert places, as the sheet holds it.
-    fn block(&self, insert: &Insert) -> Option<&Block> {
-        self.block_with_index(insert).map(|(_, b)| b)
     }
 
     /// The index and definition of the block an insert places, as the sheet holds it.

@@ -1189,6 +1189,7 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::Move { target, .. }
             | Body::Delete { target }
             | Body::SetAttribute { target, .. }
+            | Body::SetBlockState { target, .. }
             | Body::TableEdit { target, .. }
             | Body::LeaderLine { target, .. }
             | Body::DimensionFrom { target, .. } => match target {
@@ -1507,6 +1508,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Move { target, .. }
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
+        | Body::SetBlockState { target, .. }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. } => target,
         Body::Add { .. }
@@ -1848,6 +1850,31 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                     return fail(reach, op_err(e.code, e.message, field));
                 }
             }
+        }
+        Body::SetBlockState { state, .. } => {
+            if let Err(e) = record.set_block_state(list, index, state, op.index) {
+                let field = if e.code == ErrorCode::BadValue {
+                    "target"
+                } else {
+                    "state"
+                };
+                return fail(reach, op_err(e.code, e.message, field));
+            }
+            if let Some(refusal) = many_paths(files, file, op, "target") {
+                return refusal;
+            }
+            let summary = state
+                .iter()
+                .map(|(k, v)| {
+                    if v.is_null() {
+                        format!("{k}=default")
+                    } else {
+                        format!("{k}={v}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            done.message = format!("sets block state ({summary}) of `{id}`{template_note}");
         }
         Body::TableEdit { edit, .. } => match record.table_edit(list, index, edit, op.index) {
             Ok(edited) => {
@@ -6301,6 +6328,7 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::Move { target, .. }
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
+        | Body::SetBlockState { target, .. }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => reaches(target),
@@ -6432,6 +6460,13 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
                 "tag".to_owned()
             } else {
                 "value".to_owned()
+            }
+        }
+        Body::SetBlockState { .. } => {
+            if rest.starts_with("state.") {
+                rest.to_owned()
+            } else {
+                "state".to_owned()
             }
         }
     }
@@ -6603,6 +6638,7 @@ fn target_words(op: &Operation) -> String {
         | Body::Move { target, .. }
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
+        | Body::SetBlockState { target, .. }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => target.words(),

@@ -163,7 +163,10 @@ pub use looking_at::{
     look_at, looking_at, looking_at_left_off, LookAtRequest, LookingAtReport, LookingAtRequest,
     LOOKING_AT_FILE, MOST_SELECTED,
 };
-pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
+pub use model::{
+    attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, DynamicParameter,
+    DynamicParameterKind, DynamicValue, Insert, LookupRow, VisibilityState,
+};
 pub use model::{
     AngularUnit, DecimalSeparator, Dimension, DimensionKind, DimensionPart, DimensionStyle,
     FractionFormat, LaidDimension, Measured, OrdinateAxis, TextPlacement, UnitFormat, DEGREE_SIGN,

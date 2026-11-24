@@ -1924,6 +1924,64 @@ impl RecordFile {
         Ok(AttributeSet::Written)
     }
 
+    /// Sets one or more dynamic block parameters under `state:` of the insert
+    /// of `list` at `index`, as operation `operation`. A `Value::Null` value
+    /// removes that parameter from `state:` so it falls back to its default.
+    pub(crate) fn set_block_state(
+        &mut self,
+        list: ObjectList,
+        index: usize,
+        state: &Map<String, Value>,
+        operation: usize,
+    ) -> Result<(), Error> {
+        self.state(list);
+        let items = self.items_mut(list)?;
+        let item = &mut items[index];
+        let kind = object_parts(item).0.unwrap_or_default().to_owned();
+        if kind != "insert" {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "the object is {} {kind}, and only an insert has dynamic block state",
+                    article(&kind)
+                ),
+            )
+            .at_field("target"));
+        }
+        let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
+        let state_pos = match keys.iter().position(|e| e.key == "state") {
+            Some(p) => p,
+            None => {
+                keys.push(new_entry("state", Node::new(Kind::Mapping(Vec::new()))));
+                keys.len() - 1
+            }
+        };
+        let Kind::Mapping(entries) = &mut keys[state_pos].value.kind else {
+            return Err(record_shape(&kind));
+        };
+        let mut touched = Vec::with_capacity(state.len());
+        for (param, value) in state {
+            let entry_key = key_path("state", param);
+            touched.push(entry_key);
+            if value.is_null() {
+                if let Some(p) = entries.iter().position(|e| e.key == *param) {
+                    entries.remove(p);
+                }
+                continue;
+            }
+            let node = node_of(value);
+            match entries.iter().position(|e| e.key == *param) {
+                Some(p) => entries[p].value = node,
+                None => entries.push(new_entry(param, node)),
+            }
+        }
+        if entries.is_empty() {
+            keys.remove(state_pos);
+        }
+        self.touch(list, index, operation, Touch::Keys(touched));
+        Ok(())
+    }
+
     /// Edits the grid of the table of `list` at `index`, as operation
     /// `operation`: sets a cell's keys, or adds or deletes a row or a
     /// column, keeping its merges, title and header in line. A cell's text

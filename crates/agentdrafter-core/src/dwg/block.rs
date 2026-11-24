@@ -271,7 +271,19 @@ pub(super) fn read_attribute_definition(
 /// constant ones, each where the block puts it. One not mirrored whose
 /// attributes read forwards where its turn alone would not leave them so
 /// reads back with [`Insert::readable_attributes`].
+#[cfg(test)]
 pub(super) fn read_insert(dwg: &DwgInsert, layer: String, blocks: &[Block]) -> Option<Insert> {
+    read_insert_in(None, dwg, layer, blocks)
+}
+
+/// Reads an insert, resolving dynamic block effective names and saved parameter
+/// states when `drawing` is provided.
+pub(super) fn read_insert_in(
+    drawing: Option<&CadDocument>,
+    dwg: &DwgInsert,
+    layer: String,
+    blocks: &[Block],
+) -> Option<Insert> {
     let scale = dwg.y_scale();
     let mirrored = dwg.x_scale() == -scale;
     let plain = dwg.normal == Vector3::UNIT_Z
@@ -285,18 +297,23 @@ pub(super) fn read_insert(dwg: &DwgInsert, layer: String, blocks: &[Block]) -> O
         return None;
     }
     let block = blocks.iter().find(|b| b.name == dwg.block_name)?;
+    let (effective_block, state, evaluated_block) = drawing
+        .and_then(|d| super::dynamic_block::read_insert_dynamic_info(d, dwg))
+        .unwrap_or_else(|| (block.name.clone(), std::collections::BTreeMap::new(), None));
     let definitions: Vec<&AttributeDefinition> = block.carried_attributes().collect();
     if definitions.len() != dwg.attributes.len() {
         return None;
     }
     let insert = Insert {
-        block: block.name.clone(),
+        block: effective_block,
         position: point(dwg.insert_point),
         scale,
         rotation: normalize_degrees(dwg.rotation.to_degrees()),
         mirrored,
         readable_attributes: false,
         attributes: Vec::with_capacity(definitions.len()),
+        state,
+        evaluated_block,
         name: super::ids::read_name(&dwg.common),
         layer,
         properties: Default::default(),
@@ -448,6 +465,7 @@ mod tests {
                 crate::model::Object::AttributeDefinition(definition("NOTE", Justify::Left)),
             ],
             cells: Vec::new(),
+            parameters: Vec::new(),
         }
     }
 
@@ -469,6 +487,8 @@ mod tests {
                     value: String::new(),
                 },
             ],
+            state: std::collections::BTreeMap::new(),
+            evaluated_block: None,
             name: Some("mark-1".into()),
             layer: "symbols".into(),
             properties: Default::default(),
@@ -542,6 +562,7 @@ mod tests {
             base_point: Point3::new(0.0, 0.0, 0.0),
             objects: vec![crate::model::Object::AttributeDefinition(ours.clone())],
             cells: Vec::new(),
+            parameters: Vec::new(),
         };
         let written = dwg_attribute_definition(&ours, &|t| t.position);
         let mut read_block = block.clone();
