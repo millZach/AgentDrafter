@@ -179,6 +179,7 @@ pub(crate) fn read_record_with_recovery(
             wipeout_frame: drawing.wipeout_frame,
             image_frame: drawing.image_frame,
             custom_properties: drawing.custom_properties,
+            groups: drawing.groups,
         };
         let resolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source);
         files.extend(resolved_xrefs.files);

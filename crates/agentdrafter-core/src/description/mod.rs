@@ -23,6 +23,7 @@ pub(crate) mod dynamic_block;
 pub(crate) mod edit;
 mod emit;
 pub(crate) mod field;
+pub(crate) mod group;
 mod hatch;
 mod hatch_schema;
 pub(crate) mod ids;
@@ -90,7 +91,7 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 19] = [
+pub(crate) const SHEET_KEYS: [&str; 20] = [
     "units",
     "block_library",
     "ltscale",
@@ -106,6 +107,7 @@ pub(crate) const SHEET_KEYS: [&str; 19] = [
     "dimension_styles",
     xref::XREFS_KEY,
     "objects",
+    group::GROUPS_KEY,
     paper::PAPER_KEY,
     page_setup::PAGE_SETUP_KEY,
     layout::LAYOUT_KEY,
@@ -219,6 +221,7 @@ struct RowObjects<'a> {
     /// Their path in the rows file, such as `rows[1].objects`.
     pub(super) path: String,
     pub(super) file: &'a Path,
+    pub(super) groups: &'a [group::RawGroup],
 }
 
 /// Where a drawing set's files are read from: the disk, or, for the set as
@@ -515,7 +518,15 @@ fn sheet_and_records(
         unreachable!("a sheet's objects are read on a sheet")
     };
     noticed.append(template_noticed);
+    let raw_sheet_groups = match fields.get(group::GROUPS_KEY) {
+        Some(node) => group::read_raw_groups(node, group::GROUPS_KEY)?,
+        None => Vec::new(),
+    };
     let row_objects_file = row_objects.as_ref().map(|row| row.file.to_owned());
+    let row_groups_raw: Option<(Vec<group::RawGroup>, &Path)> = row_objects
+        .as_ref()
+        .filter(|row| !row.groups.is_empty())
+        .map(|row| (row.groups.to_vec(), row.file));
     if let Some(row) = row_objects {
         for (j, node) in row.items.iter().enumerate() {
             let path = index_path(&row.path, j);
@@ -541,6 +552,7 @@ fn sheet_and_records(
     for record in &mut records[in_template..] {
         record.in_row = true;
     }
+    let groups = group::resolve_groups(raw_sheet_groups, row_groups_raw, &records, sheet_name)?;
     let mut layouts = layouts
         .into_iter()
         .enumerate()
@@ -575,6 +587,7 @@ fn sheet_and_records(
         wipeout_frame,
         image_frame,
         custom_properties,
+        groups,
     };
     if let Some(library) = &library {
         blocks::take_from_library(&mut sheet, library, &fields)?;

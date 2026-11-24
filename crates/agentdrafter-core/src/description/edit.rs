@@ -199,6 +199,8 @@ pub(crate) struct RecordFile {
     tables: Vec<String>,
     /// The tables an edit changed otherwise than by adding an entry.
     rewritten: Vec<String>,
+    /// Rows whose `groups:` mapping was added or edited.
+    row_groups: Vec<usize>,
     /// The blocks of a block library an edit set or changed, each written
     /// again whole on its own lines.
     blocks: Vec<BlockEdit>,
@@ -319,6 +321,7 @@ impl RecordFile {
             added_values: Vec::new(),
             tables: Vec::new(),
             rewritten: Vec::new(),
+            row_groups: Vec::new(),
             blocks: Vec::new(),
         })
     }
@@ -328,6 +331,7 @@ impl RecordFile {
         !self.values.is_empty()
             || !self.added_values.is_empty()
             || !self.tables.is_empty()
+            || !self.row_groups.is_empty()
             || !self.blocks.is_empty()
             || self.lists.iter().any(|(_, state)| state.dirty())
     }
@@ -677,6 +681,231 @@ impl RecordFile {
         self.table_mut(table)?.retain(|e| e.key != name);
         self.note_rewrite(table);
         Ok(())
+    }
+
+    /// The names of the groups defined on `row` (when `Some(row)`) or at the
+    /// top level of the template (when `None`), in order.
+    pub(crate) fn group_names(&self, row: Option<usize>) -> Vec<String> {
+        let parent = match row {
+            None => &self.root,
+            Some(r) => match self.row_node(r) {
+                Some(n) => n,
+                None => return Vec::new(),
+            },
+        };
+        match mapping_entry(parent, super::group::GROUPS_KEY).map(|g| &g.kind) {
+            Some(Kind::Mapping(entries)) => entries.iter().map(|e| e.key.clone()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Reads `(canonical_name, objects, description, selectable)` for group
+    /// `name` (case-insensitive) from `row` (`Some`) or top-level template
+    /// (`None`).
+    pub(crate) fn group_entry(
+        &self,
+        row: Option<usize>,
+        name: &str,
+    ) -> Option<(String, Vec<String>, String, bool)> {
+        let parent = match row {
+            None => &self.root,
+            Some(r) => self.row_node(r)?,
+        };
+        let Kind::Mapping(entries) = &mapping_entry(parent, super::group::GROUPS_KEY)?.kind else {
+            return None;
+        };
+        let entry = entries.iter().find(|e| e.key.eq_ignore_ascii_case(name))?;
+        let Kind::Mapping(keys) = &entry.value.kind else {
+            return None;
+        };
+        let objects = match keys
+            .iter()
+            .find(|k| k.key == "objects")
+            .map(|k| &k.value.kind)
+        {
+            Some(Kind::Sequence(items)) => items
+                .iter()
+                .filter_map(|item| match &item.kind {
+                    Kind::Scalar(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let description = scalar_of(keys, "description")
+            .unwrap_or_default()
+            .to_owned();
+        let selectable = scalar_of(keys, "selectable")
+            .map(|s| !s.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        Some((entry.key.clone(), objects, description, selectable))
+    }
+
+    /// Adds a group entry `name` with `keys` to `row`'s `groups:` mapping.
+    pub(crate) fn row_group_add(
+        &mut self,
+        row: usize,
+        name: &str,
+        keys: &Map<String, Value>,
+    ) -> Result<(), Error> {
+        let order = &super::group::GROUP_KEYS;
+        let mut ordered: Vec<(&String, &Value)> = keys.iter().collect();
+        ordered.sort_by_key(|(key, _)| order.iter().position(|k| k == key).unwrap_or(order.len()));
+        let value = Node::new(Kind::Mapping(
+            ordered
+                .into_iter()
+                .map(|(key, value)| new_entry(key, node_of(value)))
+                .collect(),
+        ));
+        self.row_groups_mut(row)?.push(new_entry(name, value));
+        self.note_row_groups(row);
+        Ok(())
+    }
+
+    /// Updates keys of group `name` on `row`'s `groups:` mapping.
+    pub(crate) fn row_group_change(
+        &mut self,
+        row: usize,
+        name: &str,
+        set: &Map<String, Value>,
+    ) -> Result<(), Error> {
+        let order = &super::group::GROUP_KEYS;
+        let entries = self.row_groups_mut(row)?;
+        let Some(entry) = entries.iter_mut().find(|e| e.key == name) else {
+            return Ok(());
+        };
+        if !matches!(entry.value.kind, Kind::Mapping(_)) {
+            entry.value = Node::new(Kind::Mapping(Vec::new()));
+        }
+        let Kind::Mapping(keys) = &mut entry.value.kind else {
+            unreachable!("a mapping")
+        };
+        for (key, value) in set {
+            let pos = keys.iter().position(|e| e.key == *key);
+            match (value, pos) {
+                (Value::Null, Some(p)) => {
+                    keys.remove(p);
+                }
+                (Value::Null, None) => {}
+                (value, Some(p)) => keys[p].value = node_of(value),
+                (value, None) => keys.push(new_entry(key, node_of(value))),
+            }
+        }
+        keys.sort_by_key(|k| {
+            order
+                .iter()
+                .position(|o| *o == k.key)
+                .unwrap_or(order.len())
+        });
+        self.note_row_groups(row);
+        Ok(())
+    }
+
+    /// Renames group `name` to `to` in `row`'s `groups:` mapping.
+    pub(crate) fn row_group_rename(
+        &mut self,
+        row: usize,
+        name: &str,
+        to: &str,
+    ) -> Result<(), Error> {
+        let entries = self.row_groups_mut(row)?;
+        if let Some(entry) = entries.iter_mut().find(|e| e.key == name) {
+            to.clone_into(&mut entry.key);
+        }
+        self.note_row_groups(row);
+        Ok(())
+    }
+
+    /// Removes group `name` from `row`'s `groups:` mapping.
+    pub(crate) fn row_group_delete(&mut self, row: usize, name: &str) -> Result<(), Error> {
+        self.row_groups_mut(row)?.retain(|e| e.key != name);
+        self.note_row_groups(row);
+        Ok(())
+    }
+
+    /// Prunes any references matching `deleted_refs` (case-insensitive) from
+    /// every group in `row` (`Some(r)`) or top-level template (`None`). Any
+    /// group left with zero members is removed so the record remains valid.
+    pub(crate) fn prune_group_members(&mut self, row: Option<usize>, deleted_refs: &[String]) {
+        if deleted_refs.is_empty() {
+            return;
+        }
+        let matches_deleted = |s: &str| deleted_refs.iter().any(|d| d.eq_ignore_ascii_case(s));
+        let parent = match row {
+            None => &mut self.root,
+            Some(r) => match self.row_node_mut(r) {
+                Some(n) => n,
+                None => return,
+            },
+        };
+        let Some(Kind::Mapping(entries)) =
+            mapping_entry_mut(parent, super::group::GROUPS_KEY).map(|g| &mut g.kind)
+        else {
+            return;
+        };
+        let mut changed = false;
+        let mut empty_names: Vec<String> = Vec::new();
+        for entry in entries.iter_mut() {
+            if let Kind::Mapping(keys) = &mut entry.value.kind {
+                if let Some(obj_entry) = keys.iter_mut().find(|k| k.key == "objects") {
+                    if let Kind::Sequence(items) = &mut obj_entry.value.kind {
+                        let before = items.len();
+                        items.retain(|item| match &item.kind {
+                            Kind::Scalar(s) => !matches_deleted(s),
+                            _ => true,
+                        });
+                        if items.len() != before {
+                            changed = true;
+                            if items.is_empty() {
+                                empty_names.push(entry.key.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !empty_names.is_empty() {
+            entries.retain(|e| !empty_names.contains(&e.key));
+        }
+        if changed {
+            match row {
+                None => self.note_rewrite(super::group::GROUPS_KEY),
+                Some(r) => self.note_row_groups(r),
+            }
+        }
+    }
+
+    fn note_row_groups(&mut self, row: usize) {
+        if !self.row_groups.contains(&row) {
+            self.row_groups.push(row);
+        }
+    }
+
+    fn row_groups_mut(&mut self, row: usize) -> Result<&mut Vec<Entry>, Error> {
+        let path = self.path.clone();
+        let parent = self
+            .row_node_mut(row)
+            .ok_or_else(|| record_shape_in("a row", &path))?;
+        let Kind::Mapping(entries) = &mut parent.kind else {
+            return Err(record_shape_in("a mapping", &path));
+        };
+        if !entries.iter().any(|e| e.key == super::group::GROUPS_KEY) {
+            entries.push(new_entry(
+                super::group::GROUPS_KEY,
+                Node::new(Kind::Mapping(Vec::new())),
+            ));
+        }
+        let entry = entries
+            .iter_mut()
+            .find(|e| e.key == super::group::GROUPS_KEY)
+            .expect("just made");
+        if entry.value.is_bare_null() {
+            entry.value = Node::new(Kind::Mapping(Vec::new()));
+        }
+        match &mut entry.value.kind {
+            Kind::Mapping(entries) => Ok(entries),
+            _ => Err(record_shape_in("a mapping under `groups`", &path)),
+        }
     }
 
     /// The IDs in its file of each object of `list` whose `key` is
@@ -3269,6 +3498,7 @@ impl RecordFile {
                 self.list_splices(*list, state, &mut splices)?;
             }
         }
+        self.row_groups_splices(&mut splices)?;
         self.block_splices(&mut splices)?;
         self.added_value_splices(&mut splices)?;
         for edit in &self.values {
@@ -3469,6 +3699,94 @@ impl RecordFile {
             }
             with.push_str(&added);
             splices.push((at, at, with));
+        }
+        Ok(())
+    }
+
+    /// Emits splices for any row whose `groups:` mapping was added or modified.
+    fn row_groups_splices(&self, splices: &mut Vec<(usize, usize, String)>) -> Result<(), Error> {
+        let nl = self.newline;
+        let emitter = self.emitter();
+        for &row in &self.row_groups {
+            let parent = self
+                .row_node(row)
+                .ok_or_else(|| record_shape_in("a row", &self.path))?;
+            let Kind::Mapping(parent_entries) = &parent.kind else {
+                return Err(record_shape_in("a mapping", &self.path));
+            };
+            let Some(entry) = parent_entries
+                .iter()
+                .find(|e| e.key == super::group::GROUPS_KEY)
+            else {
+                continue;
+            };
+            let Kind::Mapping(entries) = &entry.value.kind else {
+                return Err(record_shape_in("a mapping under `groups`", &self.path));
+            };
+            let parent_flow = parent.source.is_some_and(|s| s.style == Style::Flow);
+            let render = |column: usize| -> String {
+                let indent = " ".repeat(column);
+                if entries.is_empty() {
+                    return format!("{indent}groups: {{}}{nl}");
+                }
+                let mut with = format!("{indent}groups:{nl}");
+                for e in entries {
+                    with.push_str(&" ".repeat(column + 2));
+                    with.push_str(&scalar_text(&e.key, Context::Flow, column + 2, nl));
+                    with.push_str(": ");
+                    with.push_str(&emitter.flow(&e.value));
+                    with.push_str(nl);
+                }
+                with
+            };
+            if entry.key_end > 0 {
+                if parent_flow {
+                    let source = entry.value.source.ok_or_else(|| {
+                        self.cannot_write("a row's groups are not where the file wrote them")
+                    })?;
+                    splices.push((source.start, source.end, emitter.flow(&entry.value)));
+                } else {
+                    let column = entry.key_at.column.saturating_sub(1);
+                    let start = line_start(&self.text, entry.key_end);
+                    let end = entry.value.source.map_or_else(
+                        || line_end(&self.text, entry.key_end),
+                        |s| line_end(&self.text, s.end),
+                    );
+                    let mut with = render(column);
+                    if end == self.text.len() && !self.text.ends_with('\n') {
+                        with.truncate(with.len() - nl.len());
+                    }
+                    splices.push((start, end, with));
+                }
+            } else {
+                let Some(parent_source) = parent.source else {
+                    return Err(self.cannot_write("the row is not where the file wrote it"));
+                };
+                if parent_flow {
+                    let at = parent_source.end - 1;
+                    let with = format!(", groups: {}", emitter.flow(&entry.value));
+                    if let Some(same) = splices.iter_mut().find(|s| s.0 == at && s.1 == at) {
+                        same.2.push_str(&with);
+                    } else {
+                        splices.push((at, at, with));
+                    }
+                } else {
+                    let column = parent_entries
+                        .first()
+                        .map_or(0, |e| e.key_at.column.saturating_sub(1));
+                    let at = line_end(&self.text, parent_source.end);
+                    let mut with = String::new();
+                    if at == self.text.len() && !self.text.ends_with('\n') {
+                        with.push_str(nl);
+                    }
+                    with.push_str(&render(column));
+                    if let Some(same) = splices.iter_mut().find(|s| s.0 == at && s.1 == at) {
+                        same.2.push_str(&with);
+                    } else {
+                        splices.push((at, at, with));
+                    }
+                }
+            }
         }
         Ok(())
     }

@@ -416,6 +416,9 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("attach_xref", "XATTACH"),
             ("detach_xref", "XDETACH"),
             ("bind_xref", "XBIND"),
+            ("add_group", "GROUP"),
+            ("ungroup", "UNGROUP"),
+            ("edit_group", "GROUPEDIT"),
         ]
     );
     let samples = [
@@ -506,6 +509,9 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "XATTACH", "sheet": "S", "name": "SITE", "path": "site.dwg", "kind": "overlay", "position": [0, 0, 0]}),
         json!({"op": "XDETACH", "sheet": "S", "name": "SITE"}),
         json!({"op": "XBIND", "sheet": "S", "name": "SITE", "mode": "bind"}),
+        json!({"op": "GROUP", "sheet": "S", "name": "FT-101", "targets": [{"id": "S/a"}, {"id": "S/b"}], "description": "Flow transmitter", "selectable": true}),
+        json!({"op": "UNGROUP", "sheet": "S", "name": "FT-101"}),
+        json!({"op": "GROUPEDIT", "sheet": "S", "name": "FT-101", "add": [{"id": "S/c"}], "rename": "FT-102", "selectable": false}),
     ];
     for (info, sample) in listed.operations.iter().zip(&samples) {
         assert!(info.does.contains(&info.alias), "{}", info.does);

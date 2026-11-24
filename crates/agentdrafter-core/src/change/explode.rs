@@ -1197,6 +1197,7 @@ mod tests {
             wipeout_frame: crate::model::WipeoutFrame::Off,
             image_frame: crate::model::WipeoutFrame::Off,
             custom_properties: BTreeMap::new(),
+            groups: Vec::new(),
         }
     }
 

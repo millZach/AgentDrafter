@@ -55,6 +55,7 @@ fn reads_one_line() {
             wipeout_frame: Default::default(),
             image_frame: Default::default(),
             custom_properties: Default::default(),
+            groups: Vec::new(),
             layout: None,
             other_layouts: Vec::new(),
         }

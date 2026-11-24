@@ -954,6 +954,47 @@ fn prepare_revision(
                 *mode,
                 settings,
             )?,
+            Body::AddGroup {
+                to,
+                name,
+                targets,
+                description,
+                selectable,
+            } => revise_add_group(
+                &mut session,
+                &mut cached_record,
+                source,
+                &sheet_name,
+                op,
+                to,
+                name,
+                targets,
+                description,
+                *selectable,
+            )?,
+            Body::Ungroup { to, name } => revise_ungroup(&mut session, &sheet_name, op, to, name)?,
+            Body::EditGroup {
+                to,
+                name,
+                add,
+                remove,
+                rename,
+                description,
+                selectable,
+            } => revise_edit_group(
+                &mut session,
+                &mut cached_record,
+                source,
+                &sheet_name,
+                op,
+                to,
+                name,
+                add,
+                remove,
+                rename.as_deref(),
+                description.as_deref(),
+                *selectable,
+            )?,
             _ => apply_revision_op(
                 &mut session,
                 &mut cached_record,
@@ -1432,7 +1473,85 @@ fn resolve_target(
                 }
             }
         }
+        Target::Group { group, .. } => Err(op_error(
+            op.index,
+            op.spec.name,
+            ErrorCode::BadValue,
+            format!(
+                "group `{group}` names a group of objects, which `{}` does not take as a single \
+                 target; target one object by its ID or name",
+                op.spec.name
+            ),
+            &format!("{field}.group"),
+        )),
     }
+}
+
+/// Resolves `target`, expanding `Target::Group` into every member entity of the
+/// named group in `ACAD_GROUP`.
+fn resolve_target_all(
+    session: &RevisionSession,
+    record: &DwgLoaded,
+    target: &Target,
+    sheet_name: &str,
+    op: &Operation,
+    field: &str,
+) -> Result<Vec<ResolvedTarget>, Error> {
+    let Target::Group { group, sheet } = target else {
+        return Ok(vec![resolve_target(
+            session, record, target, sheet_name, op, field,
+        )?]);
+    };
+    if let Some(s) = sheet {
+        if !s.eq_ignore_ascii_case(sheet_name) {
+            return Err(op_error(
+                op.index,
+                op.spec.name,
+                ErrorCode::UnknownName,
+                format!("no sheet `{s}` in this original; the drawing's sheet is `{sheet_name}`"),
+                &format!("{field}.sheet"),
+            ));
+        }
+    }
+    let (canonical, member_handles) = session.group_member_handles(group).map_err(|e| {
+        op_error(
+            op.index,
+            op.spec.name,
+            e.code,
+            e.message,
+            &format!("{field}.group"),
+        )
+    })?;
+    if member_handles.is_empty() {
+        return Err(op_error(
+            op.index,
+            op.spec.name,
+            ErrorCode::BadValue,
+            format!("group `{canonical}` has no objects on `{sheet_name}`"),
+            &format!("{field}.group"),
+        ));
+    }
+    let dwg_origin = record
+        .record
+        .dwg
+        .as_ref()
+        .expect("DWG record has DwgOrigin");
+    let mut out = Vec::with_capacity(member_handles.len());
+    for hex in member_handles {
+        let model_index = dwg_origin
+            .handles
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case(&hex));
+        let id = model_index
+            .map(|i| record.record.objects[i].id.clone())
+            .unwrap_or_else(|| handle_id(sheet_name, &hex));
+        out.push(ResolvedTarget {
+            id,
+            handle: hex,
+            model_index,
+        });
+    }
+    Ok(out)
 }
 
 fn canonical_handle_value(hex: &str) -> Option<u64> {
@@ -1449,30 +1568,36 @@ fn resolve_unique_targets(
     let mut resolved = Vec::with_capacity(targets.len());
     let mut seen_handles: HashSet<u64> = HashSet::with_capacity(targets.len());
     for (target, field) in targets {
-        let found = resolve_target(session, record, target, sheet_name, op, field)?;
-        let Some(handle_num) = canonical_handle_value(&found.handle) else {
-            return Err(op_error(
-                op.index,
-                op.spec.name,
-                ErrorCode::BadValue,
-                format!("invalid handle `{}` on `{}`", found.handle, found.id),
-                field,
-            ));
-        };
-        if !seen_handles.insert(handle_num) {
-            return Err(op_error(
-                op.index,
-                op.spec.name,
-                ErrorCode::BadValue,
-                format!(
-                    "object `{}` (handle `{:X}`) is listed more than once in the target list",
-                    found.id, handle_num
-                ),
-                field,
-            ));
+        let expanded = resolve_target_all(session, record, target, sheet_name, op, field)?;
+        let from_group = matches!(target, Target::Group { .. });
+        for found in expanded {
+            let Some(handle_num) = canonical_handle_value(&found.handle) else {
+                return Err(op_error(
+                    op.index,
+                    op.spec.name,
+                    ErrorCode::BadValue,
+                    format!("invalid handle `{}` on `{}`", found.handle, found.id),
+                    field,
+                ));
+            };
+            if !seen_handles.insert(handle_num) {
+                if from_group {
+                    continue;
+                }
+                return Err(op_error(
+                    op.index,
+                    op.spec.name,
+                    ErrorCode::BadValue,
+                    format!(
+                        "object `{}` (handle `{:X}`) is listed more than once in the target list",
+                        found.id, handle_num
+                    ),
+                    field,
+                ));
+            }
+            check_unlocked_with_children(session, &found.handle, &found.id, op, field)?;
+            resolved.push(found);
         }
-        check_unlocked_with_children(session, &found.handle, &found.id, op, field)?;
-        resolved.push(found);
     }
     Ok(resolved)
 }
@@ -1822,6 +1947,7 @@ fn revise_bind_xref(
         wipeout_frame: crate::model::WipeoutFrame::Off,
         image_frame: crate::model::WipeoutFrame::Off,
         custom_properties: std::collections::BTreeMap::new(),
+        groups: Vec::new(),
     };
     let fonts = SheetFonts::find(&style_sheet, settings);
     let start_of = |t: &crate::text::Text| fonts.start(t);
@@ -2052,10 +2178,9 @@ fn apply_revision_op(
             let record = ensure_record(session, cached, source, sheet_name)?;
             let mut found = Vec::with_capacity(around.len());
             for (target, key) in around {
-                found.push((
-                    resolve_target(session, record, target, sheet_name, op, key)?,
-                    key.as_str(),
-                ));
+                for f in resolve_target_all(session, record, target, sheet_name, op, key)? {
+                    found.push((f, key.as_str()));
+                }
             }
             let fonts = SheetFonts::find(&record.record.sheet, settings);
             let drawn = crate::query::measuring_objects(&record.record.sheet, &fonts);
@@ -2283,30 +2408,35 @@ fn apply_revision_op(
             let mut resolved = Vec::with_capacity(targets.len());
             let mut seen_handles: HashSet<u64> = HashSet::with_capacity(targets.len());
             for (target, field) in targets {
-                let found = resolve_target(session, record, target, sheet_name, op, field)?;
-                let Some(handle_num) = canonical_handle_value(&found.handle) else {
-                    return Err(op_error(
-                        index,
-                        op_name,
-                        ErrorCode::BadValue,
-                        format!("invalid handle `{}` on `{}`", found.handle, found.id),
-                        field,
-                    ));
-                };
-                if !seen_handles.insert(handle_num) {
-                    return Err(op_error(
-                        index,
-                        op_name,
-                        ErrorCode::BadValue,
-                        format!(
-                            "object `{}` (handle `{:X}`) is listed more than once in the target \
-                             list",
-                            found.id, handle_num
-                        ),
-                        field,
-                    ));
+                let from_group = matches!(target, Target::Group { .. });
+                for found in resolve_target_all(session, record, target, sheet_name, op, field)? {
+                    let Some(handle_num) = canonical_handle_value(&found.handle) else {
+                        return Err(op_error(
+                            index,
+                            op_name,
+                            ErrorCode::BadValue,
+                            format!("invalid handle `{}` on `{}`", found.handle, found.id),
+                            field,
+                        ));
+                    };
+                    if !seen_handles.insert(handle_num) {
+                        if from_group {
+                            continue;
+                        }
+                        return Err(op_error(
+                            index,
+                            op_name,
+                            ErrorCode::BadValue,
+                            format!(
+                                "object `{}` (handle `{:X}`) is listed more than once in the \
+                                 target list",
+                                found.id, handle_num
+                            ),
+                            field,
+                        ));
+                    }
+                    resolved.push((found, field.as_str()));
                 }
-                resolved.push((found, field.as_str()));
             }
             let first_space = session.space_of_handle(&resolved[0].0.handle)?;
             for (found, field) in &resolved[1..] {
@@ -3726,38 +3856,43 @@ fn apply_revision_op(
             let mut seen: HashSet<String> = HashSet::new();
             let mut plan: Vec<PendingExplodeOrig> = Vec::with_capacity(targets.len());
             for (target, key) in targets {
-                let found = resolve_target(session, loaded, target, sheet_name, op, key)?;
-                if !seen.insert(found.handle.clone()) {
-                    return Err(op_error(
-                        index,
-                        op_name,
-                        ErrorCode::BadValue,
-                        format!("`{}` is listed more than once to explode", found.id),
-                        key,
-                    ));
-                }
-                check_unlocked_with_children(session, &found.handle, &found.id, op, key)?;
-                let obj_idx = (0..loaded.record.sheet.objects.len())
-                    .find(|&i| loaded.record.handle_of(i) == Some(found.handle.as_str()))
-                    .ok_or_else(|| {
-                        op_error(
+                let from_group = matches!(target, Target::Group { .. });
+                for found in resolve_target_all(session, loaded, target, sheet_name, op, key)? {
+                    if !seen.insert(found.handle.clone()) {
+                        if from_group {
+                            continue;
+                        }
+                        return Err(op_error(
                             index,
                             op_name,
-                            ErrorCode::UnknownName,
-                            format!("could not read `{}` to explode it", found.id),
+                            ErrorCode::BadValue,
+                            format!("`{}` is listed more than once to explode", found.id),
                             key,
-                        )
-                    })?;
-                let obj = &loaded.record.sheet.objects[obj_idx];
-                let pieces = compute_explode(obj, &loaded.record.sheet, &fonts)
-                    .map_err(|e| op_error(index, op_name, e.code, e.message, key))?;
-                let space = session.space_of_handle(&found.handle)?;
-                plan.push(PendingExplodeOrig {
-                    handle: found.handle,
-                    id: found.id,
-                    space,
-                    pieces,
-                });
+                        ));
+                    }
+                    check_unlocked_with_children(session, &found.handle, &found.id, op, key)?;
+                    let obj_idx = (0..loaded.record.sheet.objects.len())
+                        .find(|&i| loaded.record.handle_of(i) == Some(found.handle.as_str()))
+                        .ok_or_else(|| {
+                            op_error(
+                                index,
+                                op_name,
+                                ErrorCode::UnknownName,
+                                format!("could not read `{}` to explode it", found.id),
+                                key,
+                            )
+                        })?;
+                    let obj = &loaded.record.sheet.objects[obj_idx];
+                    let pieces = compute_explode(obj, &loaded.record.sheet, &fonts)
+                        .map_err(|e| op_error(index, op_name, e.code, e.message, key))?;
+                    let space = session.space_of_handle(&found.handle)?;
+                    plan.push(PendingExplodeOrig {
+                        handle: found.handle,
+                        id: found.id,
+                        space,
+                        pieces,
+                    });
+                }
             }
 
             let start_of = |t: &crate::text::Text| fonts.start(t);
@@ -3854,14 +3989,16 @@ fn apply_revision_op(
                 ));
             }
             let record = ensure_record(session, cached, source, sheet_name)?;
-            let found = resolve_target(session, record, target, sheet_name, op, "target")?;
+            let resolved = resolve_target_all(session, record, target, sheet_name, op, "target")?;
             let moves_children = set.contains_key("position")
                 || set.contains_key("rotation")
                 || set.contains_key("scale");
-            if moves_children {
-                check_unlocked_with_children(session, &found.handle, &found.id, op, "target")?;
-            } else {
-                check_unlocked(session, &found.handle, &found.id, op, "target")?;
+            for found in &resolved {
+                if moves_children {
+                    check_unlocked_with_children(session, &found.handle, &found.id, op, "target")?;
+                } else {
+                    check_unlocked(session, &found.handle, &found.id, op, "target")?;
+                }
             }
             let existing_names: HashSet<String> = record
                 .record
@@ -3871,94 +4008,181 @@ fn apply_revision_op(
                 .collect();
             let fonts = SheetFonts::find(&record.record.sheet, settings);
             let start_of = |t: &crate::text::Text| fonts.start(t);
-            let (msg, handles) = session
-                .change_object(
-                    &found.handle,
-                    set,
-                    units,
-                    sheet_name,
-                    &existing_names,
-                    &start_of,
-                )
-                .map_err(|e| {
-                    let field = e.field.as_deref().unwrap_or("set");
-                    op_error(index, op_name, e.code, e.message, field)
-                })?;
+            let mut all_handles = MutationHandles::default();
+            let mut last_msg = String::new();
+            for found in &resolved {
+                let (msg, handles) = session
+                    .change_object(
+                        &found.handle,
+                        set,
+                        units,
+                        sheet_name,
+                        &existing_names,
+                        &start_of,
+                    )
+                    .map_err(|e| {
+                        let field = e.field.as_deref().unwrap_or("set");
+                        op_error(index, op_name, e.code, e.message, field)
+                    })?;
+                last_msg = msg;
+                extend_handles(&mut all_handles, handles);
+            }
+            let (message, id, handle, transformed) =
+                if resolved.len() == 1 && !matches!(target, Target::Group { .. }) {
+                    let only = &resolved[0];
+                    (
+                        format!("{last_msg} on `{}` (handle `{}`)", only.id, only.handle),
+                        Some(only.id.clone()),
+                        Some(only.handle.clone()),
+                        Vec::new(),
+                    )
+                } else {
+                    (
+                        format!(
+                            "{last_msg} on {} ({} object{})",
+                            target.words(),
+                            resolved.len(),
+                            plural(resolved.len())
+                        ),
+                        resolved.first().map(|f| f.id.clone()),
+                        resolved.first().map(|f| f.handle.clone()),
+                        resolved.iter().map(|f| f.id.clone()).collect(),
+                    )
+                };
             Ok(RevisionOperationOutcome {
                 index,
                 op: op_name.to_owned(),
                 ok: true,
-                message: format!("{msg} on `{}` (handle `{}`)", found.id, found.handle),
-                id: Some(found.id),
-                handle: Some(found.handle),
-                handles_touched: handles.touched,
-                handles_added: handles.added,
-                handles_deleted: handles.deleted,
+                message,
+                id,
+                handle,
+                handles_touched: all_handles.touched,
+                handles_added: all_handles.added,
+                handles_deleted: all_handles.deleted,
                 copies: Vec::new(),
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
                 split_id: None,
                 deleted: Vec::new(),
-                transformed: Vec::new(),
+                transformed,
                 created: Vec::new(),
             })
         }
         Body::Move { target, motion } => {
             let record = ensure_record(session, cached, source, sheet_name)?;
-            let found = resolve_target(session, record, target, sheet_name, op, "target")?;
-            check_unlocked_with_children(session, &found.handle, &found.id, op, "target")?;
+            let resolved = resolve_target_all(session, record, target, sheet_name, op, "target")?;
+            for found in &resolved {
+                check_unlocked_with_children(session, &found.handle, &found.id, op, "target")?;
+            }
             let mut snapped = Vec::new();
             let delta = resolve_motion(motion, record, settings, op, &mut snapped)?;
-            let handles = session
-                .move_object(&found.handle, delta)
-                .map_err(|e| op_error(index, op_name, e.code, e.message, "target"))?;
+            let mut all_handles = MutationHandles::default();
+            for found in &resolved {
+                let handles = session
+                    .move_object(&found.handle, delta)
+                    .map_err(|e| op_error(index, op_name, e.code, e.message, "target"))?;
+                extend_handles(&mut all_handles, handles);
+            }
+            let (message, id, handle, transformed) =
+                if resolved.len() == 1 && !matches!(target, Target::Group { .. }) {
+                    let only = &resolved[0];
+                    (
+                        format!(
+                            "moved `{}` (handle `{}`) by [{}, {}, {}]",
+                            only.id, only.handle, delta[0], delta[1], delta[2]
+                        ),
+                        Some(only.id.clone()),
+                        Some(only.handle.clone()),
+                        Vec::new(),
+                    )
+                } else {
+                    (
+                        format!(
+                            "moved {} ({} object{}) by [{}, {}, {}]",
+                            target.words(),
+                            resolved.len(),
+                            plural(resolved.len()),
+                            delta[0],
+                            delta[1],
+                            delta[2]
+                        ),
+                        resolved.first().map(|f| f.id.clone()),
+                        resolved.first().map(|f| f.handle.clone()),
+                        resolved.iter().map(|f| f.id.clone()).collect(),
+                    )
+                };
             Ok(RevisionOperationOutcome {
                 index,
                 op: op_name.to_owned(),
                 ok: true,
-                message: format!(
-                    "moved `{}` (handle `{}`) by [{}, {}, {}]",
-                    found.id, found.handle, delta[0], delta[1], delta[2]
-                ),
-                id: Some(found.id),
-                handle: Some(found.handle),
-                handles_touched: handles.touched,
-                handles_added: handles.added,
-                handles_deleted: handles.deleted,
+                message,
+                id,
+                handle,
+                handles_touched: all_handles.touched,
+                handles_added: all_handles.added,
+                handles_deleted: all_handles.deleted,
                 copies: Vec::new(),
                 snapped,
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
                 split_id: None,
                 deleted: Vec::new(),
-                transformed: Vec::new(),
+                transformed,
                 created: Vec::new(),
             })
         }
         Body::Delete { target } => {
             let record = ensure_record(session, cached, source, sheet_name)?;
-            let found = resolve_target(session, record, target, sheet_name, op, "target")?;
-            check_unlocked_with_children(session, &found.handle, &found.id, op, "target")?;
-            let handles = session
-                .delete_object(&found.handle)
-                .map_err(|e| op_error(index, op_name, e.code, e.message, "target"))?;
+            let resolved = resolve_target_all(session, record, target, sheet_name, op, "target")?;
+            for found in &resolved {
+                check_unlocked_with_children(session, &found.handle, &found.id, op, "target")?;
+            }
+            let mut all_handles = MutationHandles::default();
+            for found in &resolved {
+                let handles = session
+                    .delete_object(&found.handle)
+                    .map_err(|e| op_error(index, op_name, e.code, e.message, "target"))?;
+                extend_handles(&mut all_handles, handles);
+            }
+            let (message, id, handle, deleted) =
+                if resolved.len() == 1 && !matches!(target, Target::Group { .. }) {
+                    let only = &resolved[0];
+                    (
+                        format!("deleted `{}` (handle `{}`)", only.id, only.handle),
+                        Some(only.id.clone()),
+                        Some(only.handle.clone()),
+                        Vec::new(),
+                    )
+                } else {
+                    (
+                        format!(
+                            "deleted {} ({} object{})",
+                            target.words(),
+                            resolved.len(),
+                            plural(resolved.len())
+                        ),
+                        resolved.first().map(|f| f.id.clone()),
+                        resolved.first().map(|f| f.handle.clone()),
+                        resolved.iter().map(|f| f.id.clone()).collect(),
+                    )
+                };
             Ok(RevisionOperationOutcome {
                 index,
                 op: op_name.to_owned(),
                 ok: true,
-                message: format!("deleted `{}` (handle `{}`)", found.id, found.handle),
-                id: Some(found.id),
-                handle: Some(found.handle),
-                handles_touched: handles.touched,
-                handles_added: handles.added,
-                handles_deleted: handles.deleted,
+                message,
+                id,
+                handle,
+                handles_touched: all_handles.touched,
+                handles_added: all_handles.added,
+                handles_deleted: all_handles.deleted,
                 copies: Vec::new(),
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
                 split_id: None,
-                deleted: Vec::new(),
+                deleted,
                 transformed: Vec::new(),
                 created: Vec::new(),
             })
@@ -4259,7 +4483,12 @@ fn apply_revision_op(
                 created: Vec::new(),
             })
         }
-        Body::AttachXref { .. } | Body::DetachXref { .. } | Body::BindXref { .. } => {
+        Body::AttachXref { .. }
+        | Body::DetachXref { .. }
+        | Body::BindXref { .. }
+        | Body::AddGroup { .. }
+        | Body::Ungroup { .. }
+        | Body::EditGroup { .. } => {
             unreachable!("handled before apply_revision_op")
         }
         Body::Table {
@@ -5003,6 +5232,164 @@ fn apply_original_corner(
             })
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn revise_add_group(
+    session: &mut RevisionSession,
+    cached: &mut Option<DwgLoaded>,
+    source: &Path,
+    sheet_name: &str,
+    op: &Operation,
+    to: &AddTo,
+    name: &str,
+    targets: &[(Target, String)],
+    description: &str,
+    selectable: bool,
+) -> Result<RevisionOperationOutcome, Error> {
+    check_add_target_sheet(to, sheet_name, op)?;
+    let record = ensure_record(session, cached, source, sheet_name)?;
+    let mut member_hexes: Vec<String> = Vec::with_capacity(targets.len());
+    for (target, field) in targets {
+        for found in resolve_target_all(session, record, target, sheet_name, op, field)? {
+            if !member_hexes
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(&found.handle))
+            {
+                member_hexes.push(found.handle);
+            }
+        }
+    }
+    let handles = session
+        .create_group(name, description, selectable, &member_hexes)
+        .map_err(|e| op_error(op.index, op.spec.name, e.code, e.message, "name"))?;
+    Ok(RevisionOperationOutcome {
+        index: op.index,
+        op: op.spec.name.to_owned(),
+        ok: true,
+        message: format!(
+            "added group `{name}` with {} object{}",
+            member_hexes.len(),
+            plural(member_hexes.len())
+        ),
+        id: None,
+        handle: handles.added.first().cloned(),
+        handles_touched: handles.touched,
+        handles_added: handles.added,
+        handles_deleted: handles.deleted,
+        copies: Vec::new(),
+        snapped: Vec::new(),
+        replacements: Vec::new(),
+        attributes_set: Vec::new(),
+        split_id: None,
+        deleted: Vec::new(),
+        transformed: Vec::new(),
+        created: Vec::new(),
+    })
+}
+
+fn revise_ungroup(
+    session: &mut RevisionSession,
+    sheet_name: &str,
+    op: &Operation,
+    to: &AddTo,
+    name: &str,
+) -> Result<RevisionOperationOutcome, Error> {
+    check_add_target_sheet(to, sheet_name, op)?;
+    let (canonical, handles) = session
+        .ungroup(name)
+        .map_err(|e| op_error(op.index, op.spec.name, e.code, e.message, "name"))?;
+    Ok(RevisionOperationOutcome {
+        index: op.index,
+        op: op.spec.name.to_owned(),
+        ok: true,
+        message: format!("ungrouped `{canonical}`"),
+        id: None,
+        handle: handles.deleted.first().cloned(),
+        handles_touched: handles.touched,
+        handles_added: handles.added,
+        handles_deleted: handles.deleted,
+        copies: Vec::new(),
+        snapped: Vec::new(),
+        replacements: Vec::new(),
+        attributes_set: Vec::new(),
+        split_id: None,
+        deleted: Vec::new(),
+        transformed: Vec::new(),
+        created: Vec::new(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn revise_edit_group(
+    session: &mut RevisionSession,
+    cached: &mut Option<DwgLoaded>,
+    source: &Path,
+    sheet_name: &str,
+    op: &Operation,
+    to: &AddTo,
+    name: &str,
+    add: &[(Target, String)],
+    remove: &[(Target, String)],
+    rename: Option<&str>,
+    description: Option<&str>,
+    selectable: Option<bool>,
+) -> Result<RevisionOperationOutcome, Error> {
+    check_add_target_sheet(to, sheet_name, op)?;
+    let mut add_hexes: Vec<String> = Vec::new();
+    let mut remove_hexes: Vec<String> = Vec::new();
+    if !add.is_empty() || !remove.is_empty() {
+        let record = ensure_record(session, cached, source, sheet_name)?;
+        for (target, field) in add {
+            for found in resolve_target_all(session, record, target, sheet_name, op, field)? {
+                if !add_hexes
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case(&found.handle))
+                {
+                    add_hexes.push(found.handle);
+                }
+            }
+        }
+        for (target, field) in remove {
+            for found in resolve_target_all(session, record, target, sheet_name, op, field)? {
+                if !remove_hexes
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case(&found.handle))
+                {
+                    remove_hexes.push(found.handle);
+                }
+            }
+        }
+    }
+    let (final_name, handles) = session
+        .edit_group(
+            name,
+            &add_hexes,
+            &remove_hexes,
+            rename,
+            description,
+            selectable,
+        )
+        .map_err(|e| op_error(op.index, op.spec.name, e.code, e.message, "name"))?;
+    Ok(RevisionOperationOutcome {
+        index: op.index,
+        op: op.spec.name.to_owned(),
+        ok: true,
+        message: format!("edited group `{final_name}`"),
+        id: None,
+        handle: handles.touched.first().cloned(),
+        handles_touched: handles.touched,
+        handles_added: handles.added,
+        handles_deleted: handles.deleted,
+        copies: Vec::new(),
+        snapped: Vec::new(),
+        replacements: Vec::new(),
+        attributes_set: Vec::new(),
+        split_id: None,
+        deleted: Vec::new(),
+        transformed: Vec::new(),
+        created: Vec::new(),
+    })
 }
 
 #[cfg(test)]

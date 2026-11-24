@@ -92,6 +92,9 @@ pub enum Query {
     Geometry(Selection),
     /// Each sheet's paper-space layout, its page setup and its viewports.
     Layout,
+    /// The groups of each sheet, with their descriptions, selectability and
+    /// member objects.
+    Groups,
 }
 
 /// A [`Query`] as it is read. A kind that takes nothing is an empty struct
@@ -110,6 +113,7 @@ enum QueryInput {
     Snap(SnapRef),
     Geometry(Selection),
     Layout {},
+    Groups {},
 }
 
 impl From<QueryInput> for Query {
@@ -124,6 +128,7 @@ impl From<QueryInput> for Query {
             QueryInput::Snap(snap) => Self::Snap(snap),
             QueryInput::Geometry(selection) => Self::Geometry(selection),
             QueryInput::Layout {} => Self::Layout,
+            QueryInput::Groups {} => Self::Groups,
         }
     }
 }
@@ -180,6 +185,9 @@ pub struct Selection {
     /// layouts it names the one whose paper it is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space: Option<String>,
+    /// Objects belonging to the named group (`GROUP`), matched in any case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// A box on the sheet, seen from above, by two opposite corners in the
@@ -391,6 +399,52 @@ pub enum Answer {
         /// Each sheet looked at, with its layout, if it is drawn in one.
         layouts: Vec<SheetLayout>,
     },
+    Groups {
+        /// How many groups the sheets hold; 0 when none.
+        count: usize,
+        /// Each sheet looked at, with its groups.
+        groups: Vec<SheetGroups>,
+    },
+}
+
+/// One sheet's groups (`GROUP`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SheetGroups {
+    pub sheet: String,
+    /// Each group on the sheet, in the order defined.
+    pub groups: Vec<GroupFound>,
+}
+
+/// One group on a sheet, as `query groups` reports it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GroupFound {
+    /// The group's name (such as `FT-101`, or `*A1` for an unnamed group).
+    pub name: String,
+    /// Optional human-readable description.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Whether AutoCAD selects the whole group when any member is picked.
+    pub selectable: bool,
+    /// Whether the group is an AutoCAD unnamed (`*A...`) group.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unnamed: bool,
+    /// Number of member objects in the group.
+    pub count: usize,
+    /// Member objects in the group, in order.
+    pub objects: Vec<GroupMember>,
+}
+
+/// One member object listed inside a [`GroupFound`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GroupMember {
+    /// The object's full ID on its sheet.
+    pub id: String,
+    /// Its optional name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Its object type, such as `line` or `insert`.
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 /// One sheet's layers.
@@ -619,6 +673,7 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
             snap::geometry(&looked_at, selection, settings, units, &looked)
         }
         Query::Layout => layout::layout(&looked_at, settings, units, &looked),
+        Query::Groups => groups(&looked_at, &looked),
     };
     if objects_not_read > 0 {
         message.push_str(&format!(
@@ -823,6 +878,16 @@ impl Selection {
                 _ => return None,
             }
         }
+        if let Some(group) = &self.group {
+            let in_group = record
+                .sheet
+                .groups
+                .iter()
+                .any(|g| m.identifier(&g.name, group) && g.objects.contains(&index));
+            if !in_group {
+                return None;
+            }
+        }
         if let Some(block) = &self.block {
             match insert {
                 Some(insert) if m.identifier(&insert.block, block) => {}
@@ -935,6 +1000,12 @@ impl Selection {
             parts.push(say(
                 format!("the text `{text}`"),
                 format!("text containing `{text}`"),
+            ));
+        }
+        if let Some(group) = &self.group {
+            parts.push(say(
+                format!("membership in group `{group}`"),
+                format!("membership in a group whose name contains `{group}`"),
             ));
         }
         if parts.is_empty() {
@@ -1580,6 +1651,67 @@ fn layers(sheets: &[&SheetRecord], looked: &LookedAt) -> (String, Answer) {
         Answer::Layers {
             count,
             layers: listed,
+        },
+    )
+}
+
+fn groups(sheets: &[&SheetRecord], looked: &LookedAt) -> (String, Answer) {
+    let listed: Vec<SheetGroups> = sheets
+        .iter()
+        .map(|record| {
+            let groups = record
+                .sheet
+                .groups
+                .iter()
+                .map(|g| {
+                    let objects: Vec<GroupMember> = g
+                        .objects
+                        .iter()
+                        .filter_map(|&idx| {
+                            let obj = record.sheet.objects.get(idx)?;
+                            Some(GroupMember {
+                                id: record.id(idx),
+                                name: record.objects.get(idx).and_then(|o| o.name.clone()),
+                                kind: obj.type_name().to_owned(),
+                            })
+                        })
+                        .collect();
+                    GroupFound {
+                        name: g.name.clone(),
+                        description: g.description.clone(),
+                        selectable: g.selectable,
+                        unnamed: g.unnamed,
+                        count: objects.len(),
+                        objects,
+                    }
+                })
+                .collect();
+            SheetGroups {
+                sheet: record.name.clone(),
+                groups,
+            }
+        })
+        .collect();
+    let count: usize = listed.iter().map(|s| s.groups.len()).sum();
+    let message = if count == 0 {
+        format!("nothing matches: no groups {}", looked.on())
+    } else {
+        let names: Vec<&str> = listed
+            .iter()
+            .flat_map(|s| s.groups.iter().map(|g| g.name.as_str()))
+            .collect();
+        format!(
+            "{} {}: {}",
+            counted(count, "group"),
+            looked.on(),
+            names.join(", ")
+        )
+    };
+    (
+        message,
+        Answer::Groups {
+            count,
+            groups: listed,
         },
     )
 }

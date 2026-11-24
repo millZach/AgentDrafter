@@ -116,6 +116,14 @@ pub(crate) enum Kind {
     /// Binds an external reference into a local block definition: AutoCAD's
     /// XBIND.
     BindXref,
+    /// Creates a named group of objects: AutoCAD's GROUP (G).
+    AddGroup,
+    /// Removes a named group without deleting its member objects: AutoCAD's
+    /// UNGROUP.
+    Ungroup,
+    /// Edits a named group (add/remove members, rename, description,
+    /// selectable): AutoCAD's GROUPEDIT.
+    EditGroup,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -294,6 +302,7 @@ impl Spec {
             Kind::Stretch => &["S"],
             Kind::Explode => &["X"],
             Kind::AttachXref => &["XREF"],
+            Kind::AddGroup => &["G"],
             Kind::Add("image", None) => &["IMAGE"],
             Kind::Add("pdf_underlay", None) => &["PDFUNDERLAY"],
             _ => &[],
@@ -347,7 +356,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 87] = [
+pub(crate) const SPECS: [Spec; 90] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -598,6 +607,21 @@ pub(crate) const SPECS: [Spec; 87] = [
         name: "bind_xref",
         alias: "XBIND",
         kind: Kind::BindXref,
+    },
+    Spec {
+        name: "add_group",
+        alias: "GROUP",
+        kind: Kind::AddGroup,
+    },
+    Spec {
+        name: "ungroup",
+        alias: "UNGROUP",
+        kind: Kind::Ungroup,
+    },
+    Spec {
+        name: "edit_group",
+        alias: "GROUPEDIT",
+        kind: Kind::EditGroup,
     },
 ];
 
@@ -1209,6 +1233,19 @@ fn does(spec: &Spec) -> String {
                            `bind` for `xref$0$` prefixing or `insert` for direct merging), and \
                            keeps every insert in place. AutoCAD's XBIND."
             .to_owned(),
+        Kind::AddGroup => "Creates a named group `name` holding the objects listed under `targets` \
+                           (with optional `description` and `selectable`, default true), written \
+                           into the sheet's row or template (`groups:`) or into `ACAD_GROUP` on an \
+                           original DWG, so operations can target the group as one by name and \
+                           AutoCAD selects it as one. AutoCAD's GROUP (G)."
+            .to_owned(),
+        Kind::Ungroup => "Removes the named group `name` without deleting any of its member \
+                          objects. AutoCAD's UNGROUP."
+            .to_owned(),
+        Kind::EditGroup => "Edits the named group `name`: adds objects (`add`), removes objects \
+                            (`remove`), renames it (`rename`), or updates its `description` or \
+                            `selectable` flag. AutoCAD's GROUPEDIT."
+            .to_owned(),
     }
 }
 
@@ -1355,8 +1392,9 @@ fn definitions() -> Map<String, Value> {
     defs.insert(
         "target".into(),
         json!({
-            "description": "The object an operation edits: by its ID, or by its name and, when \
-                            the name is on more than one sheet, its sheet. Never by coordinates.",
+            "description": "The object (or group of objects) an operation edits: by its ID, by \
+                            its name, or by a group's name (with optional sheet). Never by \
+                            coordinates.",
             "oneOf": [
                 {
                     "type": "object",
@@ -1380,6 +1418,20 @@ fn definitions() -> Map<String, Value> {
                     "properties": {
                         "name": {
                             "description": "The object's name, matched in any case.",
+                            "type": "string",
+                            "minLength": 1,
+                        },
+                        "sheet": { "$ref": "#/$defs/sheet_name" },
+                    },
+                },
+                {
+                    "type": "object",
+                    "required": ["group"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "group": {
+                            "description": "The name of a group (`GROUP`), matched in any case, \
+                                            targeting all of its member objects as one.",
                             "type": "string",
                             "minLength": 1,
                         },
@@ -3017,6 +3069,132 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
             }
             schema
         }
+        Kind::AddGroup => {
+            let mut schema = json!({
+                "type": "object",
+                "required": ["name", "targets"],
+                "additionalProperties": false,
+                "properties": {
+                    "sheet": {
+                        "description": "The sheet whose row holds the group (optional on an \
+                                        original DWG).",
+                        "$ref": "#/$defs/sheet_name",
+                    },
+                    "template": {
+                        "description": "The template to define the group in (shared by every \
+                                        sheet built from it). Give sheet or template.",
+                        "$ref": "#/$defs/template_path",
+                    },
+                    "name": {
+                        "description": "The group's name, unique on the sheet (case-insensitive).",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "targets": {
+                        "description": "The member objects to include in the group, at least one.",
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "$ref": "#/$defs/target" },
+                    },
+                    "description": {
+                        "description": "Optional human-readable description of the group.",
+                        "type": "string",
+                    },
+                    "selectable": {
+                        "description": "Whether AutoCAD selects the group as one unit (default \
+                                        true).",
+                        "type": "boolean",
+                    },
+                },
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
+        Kind::Ungroup => {
+            let mut schema = json!({
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": {
+                    "sheet": {
+                        "description": "The sheet holding the group (optional on an original DWG).",
+                        "$ref": "#/$defs/sheet_name",
+                    },
+                    "template": {
+                        "description": "The template holding the group. Give sheet or template.",
+                        "$ref": "#/$defs/template_path",
+                    },
+                    "name": {
+                        "description": "The name of the group to remove (case-insensitive).",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                },
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
+        Kind::EditGroup => {
+            let mut schema = json!({
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": {
+                    "sheet": {
+                        "description": "The sheet holding the group (optional on an original DWG).",
+                        "$ref": "#/$defs/sheet_name",
+                    },
+                    "template": {
+                        "description": "The template holding the group. Give sheet or template.",
+                        "$ref": "#/$defs/template_path",
+                    },
+                    "name": {
+                        "description": "The name of the group to edit (case-insensitive).",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "add": {
+                        "description": "Objects to add to the group.",
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "$ref": "#/$defs/target" },
+                    },
+                    "remove": {
+                        "description": "Objects to remove from the group.",
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "$ref": "#/$defs/target" },
+                    },
+                    "rename": {
+                        "description": "New name for the group (unique, case-insensitive).",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "description": {
+                        "description": "Updated human-readable description.",
+                        "type": "string",
+                    },
+                    "selectable": {
+                        "description": "Whether AutoCAD selects the group as one unit.",
+                        "type": "boolean",
+                    },
+                },
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
@@ -3648,6 +3826,257 @@ fn read_bind_xref_body(
         }
     };
     Ok(Body::BindXref { to, name, mode })
+}
+
+#[inline(never)]
+fn read_target_array(
+    value: &Value,
+    field: &str,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Vec<(Target, String)>, Error> {
+    let Value::Array(items) = value else {
+        return Err(fail(
+            ErrorCode::WrongType,
+            format!("expected `{field}`, a list of targets"),
+            field,
+        ));
+    };
+    if items.is_empty() {
+        return Err(fail(
+            ErrorCode::BadValue,
+            format!("`{field}` must list at least one object"),
+            field,
+        ));
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let key = format!("{field}[{i}]");
+        let mut t = read_target(item).map_err(|(code, msg, sub)| {
+            let sub = sub.strip_prefix("target").unwrap_or(&sub);
+            fail(code, msg, &format!("{key}{sub}"))
+        })?;
+        if let Some(ds) = default_sheet {
+            match &mut t {
+                Target::Name { sheet, .. } | Target::Group { sheet, .. } if sheet.is_none() => {
+                    *sheet = Some(ds.to_owned());
+                }
+                _ => {}
+            }
+        }
+        out.push((t, key));
+    }
+    Ok(out)
+}
+
+#[inline(never)]
+fn read_add_group_body(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let to = parse_template_or_sheet_target(map, default_sheet, fail)?;
+    let name = match map.get("name") {
+        Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
+        Some(Value::String(_)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                "`name` cannot be empty".to_owned(),
+                "name",
+            ))
+        }
+        None => {
+            return Err(fail(
+                ErrorCode::MissingKey,
+                "missing key `name`: the group's name".to_owned(),
+                "name",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `name`, the group's name".to_owned(),
+                "name",
+            ))
+        }
+    };
+    let targets = match map.get("targets") {
+        Some(v) => read_target_array(v, "targets", default_sheet, fail)?,
+        None => {
+            return Err(fail(
+                ErrorCode::MissingKey,
+                "missing key `targets`: the member objects to put in the group".to_owned(),
+                "targets",
+            ))
+        }
+    };
+    let description = match map.get("description") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected text under `description`".to_owned(),
+                "description",
+            ))
+        }
+    };
+    let selectable = match map.get("selectable") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected true or false under `selectable`".to_owned(),
+                "selectable",
+            ))
+        }
+    };
+    Ok(Body::AddGroup {
+        to,
+        name,
+        targets,
+        description,
+        selectable,
+    })
+}
+
+#[inline(never)]
+fn read_ungroup_body(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let to = parse_template_or_sheet_target(map, default_sheet, fail)?;
+    let name = match map.get("name") {
+        Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
+        Some(Value::String(_)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                "`name` cannot be empty".to_owned(),
+                "name",
+            ))
+        }
+        None => {
+            return Err(fail(
+                ErrorCode::MissingKey,
+                "missing key `name`: the group to remove".to_owned(),
+                "name",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `name`, the group to remove".to_owned(),
+                "name",
+            ))
+        }
+    };
+    Ok(Body::Ungroup { to, name })
+}
+
+#[inline(never)]
+fn read_edit_group_body(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let to = parse_template_or_sheet_target(map, default_sheet, fail)?;
+    let name = match map.get("name") {
+        Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
+        Some(Value::String(_)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                "`name` cannot be empty".to_owned(),
+                "name",
+            ))
+        }
+        None => {
+            return Err(fail(
+                ErrorCode::MissingKey,
+                "missing key `name`: the group to edit".to_owned(),
+                "name",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `name`, the group to edit".to_owned(),
+                "name",
+            ))
+        }
+    };
+    let add = match map.get("add") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => read_target_array(v, "add", default_sheet, fail)?,
+    };
+    let remove = match map.get("remove") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => read_target_array(v, "remove", default_sheet, fail)?,
+    };
+    let rename = match map.get("rename") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
+        Some(Value::String(_)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                "`rename` cannot be empty".to_owned(),
+                "rename",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected text under `rename`".to_owned(),
+                "rename",
+            ))
+        }
+    };
+    let description = match map.get("description") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected text under `description`".to_owned(),
+                "description",
+            ))
+        }
+    };
+    let selectable = match map.get("selectable") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected true or false under `selectable`".to_owned(),
+                "selectable",
+            ))
+        }
+    };
+    if add.is_empty()
+        && remove.is_empty()
+        && rename.is_none()
+        && description.is_none()
+        && selectable.is_none()
+    {
+        return Err(fail(
+            ErrorCode::MissingKey,
+            "edit_group needs at least one of `add`, `remove`, `rename`, `description`, or \
+             `selectable`"
+                .to_owned(),
+            "",
+        ));
+    }
+    Ok(Body::EditGroup {
+        to,
+        name,
+        add,
+        remove,
+        rename,
+        description,
+        selectable,
+    })
 }
 
 /// Parses `boundary` (one target) or `boundaries` (a non-empty list of targets)
@@ -4766,6 +5195,29 @@ pub(crate) enum Body {
         /// What an import_blocks imports.
         import: Option<Import>,
     },
+    /// Creates a named group (`GROUP` / `G`).
+    AddGroup {
+        to: AddTo,
+        name: String,
+        targets: Vec<(Target, String)>,
+        description: String,
+        selectable: bool,
+    },
+    /// Removes a named group without deleting its members (`UNGROUP`).
+    Ungroup {
+        to: AddTo,
+        name: String,
+    },
+    /// Edits a named group (`GROUPEDIT`).
+    EditGroup {
+        to: AddTo,
+        name: String,
+        add: Vec<(Target, String)>,
+        remove: Vec<(Target, String)>,
+        rename: Option<String>,
+        description: Option<String>,
+        selectable: Option<bool>,
+    },
 }
 
 /// How a `break` operation specifies its cut points, as parsed (may hold
@@ -4984,13 +5436,18 @@ impl TextToFrontWhich {
     }
 }
 
-/// How an operation names the object it edits.
+/// How an operation names the object (or group of objects) it edits.
 #[derive(Clone, Debug)]
 pub(crate) enum Target {
     /// By its ID: the sheet's name and the ID in its file.
     Id { sheet: String, id: String },
     /// By its name, on the sheet given or on the one sheet it is on.
     Name { name: String, sheet: Option<String> },
+    /// By a group's name (`GROUP`), targeting all of its member objects.
+    Group {
+        group: String,
+        sheet: Option<String>,
+    },
 }
 
 impl Target {
@@ -5002,6 +5459,11 @@ impl Target {
                 sheet: Some(sheet),
             } => format!("the object named `{name}` on sheet `{sheet}`"),
             Target::Name { name, sheet: None } => format!("the object named `{name}`"),
+            Target::Group {
+                group,
+                sheet: Some(sheet),
+            } => format!("group `{group}` on sheet `{sheet}`"),
+            Target::Group { group, sheet: None } => format!("group `{group}`"),
         }
     }
 }
@@ -6281,6 +6743,34 @@ fn operation(
         Kind::BindXref => {
             keys(&["sheet", "template", "name", "mode"])?;
             read_bind_xref_body(map, default_sheet, &fail)?
+        }
+        Kind::AddGroup => {
+            keys(&[
+                "sheet",
+                "template",
+                "name",
+                "targets",
+                "description",
+                "selectable",
+            ])?;
+            read_add_group_body(map, default_sheet, &fail)?
+        }
+        Kind::Ungroup => {
+            keys(&["sheet", "template", "name"])?;
+            read_ungroup_body(map, default_sheet, &fail)?
+        }
+        Kind::EditGroup => {
+            keys(&[
+                "sheet",
+                "template",
+                "name",
+                "add",
+                "remove",
+                "rename",
+                "description",
+                "selectable",
+            ])?;
+            read_edit_group_body(map, default_sheet, &fail)?
         }
         Kind::SetAttributes => {
             keys(&[
@@ -8352,24 +8842,25 @@ fn read_draw_order_place(value: &Value, field: &str) -> Result<DrawOrderPlace, K
     }
 }
 
-/// Reads a target: `{"id": "SHEET/ID"}` or `{"name": ..., "sheet": ...}`.
+/// Reads a target: `{"id": "SHEET/ID"}`, `{"name": ..., "sheet": ...}`, or
+/// `{"group": ..., "sheet": ...}`.
 fn read_target(value: &Value) -> Result<Target, (ErrorCode, String, String)> {
     let Value::Object(map) = value else {
         return Err((
             ErrorCode::WrongType,
-            "expected a target, {\"id\": \"DEMO-001/border\"} or {\"name\": \"title-block\", \
-             \"sheet\": \"DEMO-001\"}"
+            "expected a target, {\"id\": \"DEMO-001/border\"}, {\"name\": \"title-block\", \
+             \"sheet\": \"DEMO-001\"}, or {\"group\": \"FT-101\"}"
                 .to_owned(),
             "target".to_owned(),
         ));
     };
     if let Some(key) = map
         .keys()
-        .find(|k| !matches!(k.as_str(), "id" | "name" | "sheet"))
+        .find(|k| !matches!(k.as_str(), "id" | "name" | "group" | "sheet"))
     {
         return Err((
             ErrorCode::UnknownKey,
-            format!("unknown key `{key}`; a target takes id, or name and sheet"),
+            format!("unknown key `{key}`; a target takes id, name and sheet, or group and sheet"),
             format!("target.{key}"),
         ));
     }
@@ -8382,8 +8873,8 @@ fn read_target(value: &Value) -> Result<Target, (ErrorCode, String, String)> {
             format!("target.{key}"),
         )),
     };
-    match (text("id")?, text("name")?, text("sheet")?) {
-        (Some(id), None, None) => match id.split_once('/') {
+    match (text("id")?, text("name")?, text("group")?, text("sheet")?) {
+        (Some(id), None, None, None) => match id.split_once('/') {
             Some((sheet, rest)) if !sheet.is_empty() && !rest.is_empty() => Ok(Target::Id {
                 sheet: sheet.to_owned(),
                 id: rest.to_owned(),
@@ -8397,20 +8888,34 @@ fn read_target(value: &Value) -> Result<Target, (ErrorCode, String, String)> {
                 "target.id".to_owned(),
             )),
         },
-        (Some(_), None, Some(_)) => Err((
+        (Some(_), None, None, Some(_)) => Err((
             ErrorCode::Usage,
-            "an ID names its sheet already; give id alone, or name and sheet".to_owned(),
+            "an ID names its sheet already; give id alone, or name/group and sheet".to_owned(),
             "target".to_owned(),
         )),
-        (None, Some(name), sheet) => Ok(Target::Name { name, sheet }),
-        (Some(_), Some(_), _) => Err((
-            ErrorCode::Usage,
-            "a target names its object by its ID or by its name, not both".to_owned(),
-            "target".to_owned(),
-        )),
-        (None, None, _) => Err((
+        (None, Some(name), None, sheet) => Ok(Target::Name { name, sheet }),
+        (None, None, Some(group), sheet) => {
+            let trimmed = group.trim();
+            if trimmed.is_empty() {
+                return Err((
+                    ErrorCode::BadValue,
+                    "`group` cannot be empty".to_owned(),
+                    "target.group".to_owned(),
+                ));
+            }
+            Ok(Target::Group {
+                group: trimmed.to_owned(),
+                sheet,
+            })
+        }
+        (None, None, None, _) => Err((
             ErrorCode::MissingKey,
-            "a target names its object by its ID, id, or by its name, name".to_owned(),
+            "a target names its object by `id`, `name`, or `group`".to_owned(),
+            "target".to_owned(),
+        )),
+        _ => Err((
+            ErrorCode::Usage,
+            "a target takes one of `id`, `name`, or `group`, not more than one".to_owned(),
             "target".to_owned(),
         )),
     }

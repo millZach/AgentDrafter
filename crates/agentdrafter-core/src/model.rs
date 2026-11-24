@@ -20,6 +20,7 @@ pub(crate) mod block;
 pub(crate) mod dimension;
 pub(crate) mod dynamic_block;
 pub(crate) mod field;
+pub(crate) mod group;
 pub(crate) mod hatch;
 pub(crate) mod layout;
 pub(crate) mod leader;
@@ -44,6 +45,7 @@ pub use dynamic_block::{
     LookupRow, VisibilityState,
 };
 pub use field::{FieldItem, FieldKind, TextField, DEFAULT_FIELD_TEMPLATE, UNEVALUATED_FIELD};
+pub use group::Group;
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use layout::{Clip, Layout, Viewport};
 pub use leader::{
@@ -960,6 +962,10 @@ pub struct Sheet {
     /// value, referenced by `custom_property` fields (`\AcVar CustomDP.<name>`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub custom_properties: BTreeMap<String, String>,
+    /// Named (or unnamed, when read from an existing DWG) object groups
+    /// (`GROUP` / `ACAD_GROUP`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Group>,
 }
 
 impl Sheet {
@@ -1309,6 +1315,9 @@ pub struct DrawingContents {
     /// excluding AgentDrafter's own build mark.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub custom_properties: BTreeMap<String, String>,
+    /// Object groups read from `ACAD_GROUP`, referencing indices in `objects`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Group>,
     /// The drawing's first layout the core reads, in the order of their
     /// tabs, whatever tab the drawing was saved on: `objects` then holds
     /// its paper space's objects and viewports beside model space's, and

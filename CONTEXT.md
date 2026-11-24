@@ -108,6 +108,10 @@ _Avoid_: entity count, geometry
 A named group of objects in a drawing, as in AutoCAD. An object sits on one layer and draws with the layer's colour, linetype and lineweight, unless it gives its own. A layer may be off or frozen, so that its objects draw nothing, locked, or set not to plot, so that they are left out of a PDF.
 _Avoid_: level, class
 
+**Group**:
+A named set of objects on a sheet (`groups:` in sheet descriptions, templates and rows; AutoCAD's `GROUP` / `ACAD_GROUP`, including unnamed `*A...` groups read from DWGs) that operations can target as one by name (`{"group": "..."}`) and that AutoCAD selects as one when `selectable` is true, managed with `add_group` (`GROUP` / `G`), `ungroup` (`UNGROUP`) and `edit_group` (`GROUPEDIT`) and listed by `query groups`. Unlike a block, its objects remain ordinary top-level objects on the sheet, and an object may belong to more than one group.
+_Avoid_: selection set (a selection set is transient; a group is saved in the drawing), collection
+
 **ByLayer**:
 An object's colour, linetype or lineweight taken from its layer, as AutoCAD's ByLayer is. Each of an object's is ByLayer unless it gives its own.
 _Avoid_: default, inherit

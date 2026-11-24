@@ -107,7 +107,7 @@ fn rows_property() -> Value {
 /// The schema of a drawing set's rows file.
 pub(crate) fn rows_schema() -> Value {
     let [rows_key] = ROWS_FILE_KEYS;
-    let [sheet_key, template_key, values_key, objects_key] = ROW_KEYS;
+    let [sheet_key, template_key, values_key, objects_key, groups_key] = ROW_KEYS;
     let mut schema = json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "AgentDrafter drawing set rows",
@@ -173,6 +173,7 @@ pub(crate) fn rows_schema() -> Value {
                         "type": "array",
                         "items": { "oneOf": object_choices(&OBJECT_TYPES) },
                     },
+                    groups_key: super::group::groups_property(),
                 },
             },
             "sheet_name": sheet_name_def(),

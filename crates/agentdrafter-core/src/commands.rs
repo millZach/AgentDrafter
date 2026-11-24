@@ -904,7 +904,8 @@ fn query_does() -> String {
      intersection and apparent_intersection `with` another object, and perpendicular, tangent \
      and nearest `from` a snap of another object, each named by `which` to ask for it again; \
      geometry gives each matching object's length, area, extents and angles; layout lists each \
-     sheet's paper-space layouts and viewports. Lengths are in the declared unit (null for a \
+     sheet's paper-space layouts and viewports; groups lists each sheet's groups (`GROUP`) and \
+     their member objects. Lengths are in the declared unit (null for a \
      unitless DWG). On a DWG, each object takes its carried AgentDrafter ID or its drawing name \
      joined to its handle (such as P-101/handle:2F), matching `read` and `display-list`, and \
      objects the core has no model for are counted under `objects_not_read` and named under \
@@ -953,6 +954,7 @@ fn query_schema() -> Value {
                     "type": "string",
                     "minLength": 1,
                 },
+                "group": text("The name of a group (`GROUP`) the object belongs to."),
                 "crossing": selection_box("Objects within this box or crossing it, as AutoCAD's crossing selection takes them: something they draw inside it or across its edge, a line, the outline of a filled area, a hatch's boundary or pattern, each wide segment's band, seams included; a box wholly inside an area crosses nothing, but inside a wide arc's band."),
                 "touching": {
                     "description": "Objects whose geometry meets this object's, on each sheet it is on: crossing it, or an end of one lying on the other; each found with where it meets it, `part` its own and `with_part` the object's.",
@@ -988,7 +990,7 @@ fn query_schema() -> Value {
         })
     };
     json!({
-        "description": "What to ask, by its `kind`: find, blocks, attributes, measure, extents, layers, snap, geometry or layout.",
+        "description": "What to ask, by its `kind`: find, blocks, attributes, measure, extents, layers, snap, geometry, layout or groups.",
         "oneOf": [
             selection("find", "The objects that match every part given; with none given, every object."),
             bare("blocks", "The blocks each sheet inserts."),
@@ -1024,6 +1026,11 @@ fn query_schema() -> Value {
                  extents, and its viewports, each with its window on the paper, its view centre, \
                  its scale, whether it is locked, the boundary it is clipped to, the layers \
                  frozen in it, and the part of model space it shows.",
+            ),
+            bare(
+                "groups",
+                "The groups (`GROUP`) of each sheet, with their descriptions, selectability and \
+                 member objects.",
             ),
         ],
     })

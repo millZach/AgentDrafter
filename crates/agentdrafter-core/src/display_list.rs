@@ -249,6 +249,24 @@ pub struct SheetObject {
     /// other object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub values: Option<ObjectValues>,
+    /// Names of the groups (`GROUP`) this object belongs to, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+}
+
+/// One group on the sheet, as the display list exposes it for inspection and
+/// group selection.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SheetGroup {
+    pub name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    pub selectable: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unnamed: bool,
+    /// Full IDs (or object indices when unnamed on a raw sheet) of member
+    /// objects in order.
+    pub objects: Vec<String>,
 }
 
 /// What quick properties edit of an object: a text's or an mtext's
@@ -427,6 +445,10 @@ pub struct DisplayListReport {
     /// Each of the sheet's objects, by its place, which each item of the
     /// display list names as its `object`.
     pub objects: Vec<SheetObject>,
+    /// The groups (`GROUP`) defined on the sheet. Left out when the sheet has
+    /// none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<SheetGroup>,
     /// With `snaps`, every point the object snaps find on the objects the
     /// page draws itself, each with its object by its place, the snap,
     /// `which` of the object's points, and for an intersection the other
@@ -627,6 +649,7 @@ pub fn display_list_with(
         unresolved_media: drawn.unresolved_media,
         entry: request.entry,
         objects: drawn.objects.clone(),
+        groups: drawn.groups.clone(),
         snaps,
         edges,
         template: drawn.template,
@@ -903,8 +926,29 @@ struct Drawn {
     unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
     unresolved_media: Vec<crate::model::UnresolvedMedia>,
     objects: Vec<SheetObject>,
+    groups: Vec<SheetGroup>,
     /// A drawing set's sheet's template and the sheets built from it.
     template: Option<TemplateReach>,
+}
+
+/// Builds the [`SheetGroup`] summary for `sheet`'s groups using the same ID
+/// table as [`objects_of`].
+fn groups_of(sheet: &Sheet, ids: &[(String, Option<String>)]) -> Vec<SheetGroup> {
+    sheet
+        .groups
+        .iter()
+        .map(|g| SheetGroup {
+            name: g.name.clone(),
+            description: g.description.clone(),
+            selectable: g.selectable,
+            unnamed: g.unnamed,
+            objects: g
+                .objects
+                .iter()
+                .filter_map(|&idx| ids.get(idx).map(|(id, _)| id.clone()))
+                .collect(),
+        })
+        .collect()
 }
 
 /// What each of `sheet`'s objects is, with its ID and name when `ids`
@@ -933,6 +977,12 @@ fn objects_of(
                     values_of(object, &attributes, written)
                 })
                 .flatten();
+            let groups = sheet
+                .groups
+                .iter()
+                .filter(|g| g.objects.contains(&i))
+                .map(|g| g.name.clone())
+                .collect();
             SheetObject {
                 id: ids.get(i).map(|(id, _)| id.clone()),
                 name: ids.get(i).and_then(|(_, name)| name.clone()),
@@ -942,6 +992,7 @@ fn objects_of(
                 attributes,
                 from: from.get(i).copied(),
                 values,
+                groups,
             }
         })
         .collect()
@@ -1123,6 +1174,7 @@ fn read(
             names,
             units: Some(record.sheet.units),
             objects: objects_of(&record.sheet, &ids, &from, request.values, sources.as_ref()),
+            groups: groups_of(&record.sheet, &ids),
             sheet: record.sheet,
             objects_not_drawn: 0,
             not_drawn: Vec::new(),
@@ -1164,6 +1216,7 @@ fn read(
         names: vec![name.clone()],
         name,
         objects: objects_of(&record.sheet, &ids, &[], request.values, None),
+        groups: groups_of(&record.sheet, &ids),
         sheet: record.sheet,
         units: record.units,
         objects_not_drawn: record.objects_not_drawn,

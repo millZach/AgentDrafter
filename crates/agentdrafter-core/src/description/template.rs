@@ -289,6 +289,7 @@ pub(super) fn fill_with_records(
         items: &row.objects,
         path: row.objects_path(),
         file: rows_file,
+        groups: &row.groups,
     };
     // The library read first is the one the sheet reads.
     let mut load_once = |written: &str| match early.take() {

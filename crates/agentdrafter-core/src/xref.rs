@@ -112,6 +112,7 @@ pub(crate) fn check_drawing_xrefs(
         wipeout_frame: drawing.wipeout_frame,
         image_frame: drawing.image_frame,
         custom_properties: drawing.custom_properties.clone(),
+        groups: drawing.groups.clone(),
     };
     resolve_sheet_xrefs(&mut sheet, host_path).unresolved
 }
