@@ -190,6 +190,10 @@ pub struct PlotReport {
     /// The hatches not drawn in full. Empty when every hatch was drawn
     /// whole.
     pub hatches_cut_short: Vec<HatchCutShort>,
+    /// External references that could not be found or loaded. Left out when
+    /// every reference resolved cleanly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
     /// The stamp written into the PDF.
     pub stamp: Stamp,
     /// On a sheet drawn in several layouts, each layout's page, in the
@@ -371,7 +375,7 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
             let mut notices = Vec::new();
             let plotted = read_text(&template, "the template").and_then(|(bytes, text)| {
                 let (read, library) = template_at(&text, &template, row, set.units, &mut notices)?;
-                let sheet = read.sheet;
+                let mut sheet = read.sheet;
                 let sheet_style = match &set_style {
                     Some(style) => std::borrow::Cow::Borrowed(style),
                     None => std::borrow::Cow::Owned(plot_style_for_sheet(&sheet, settings)?),
@@ -388,6 +392,8 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
                 if let Some(library) = library {
                     files.push((SourceKind::BlockLibrary, library.path, library.bytes));
                 }
+                let resolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, &template);
+                files.extend(resolved_xrefs.files);
                 let record = Record {
                     units: Some(sheet.units),
                     sheet,
@@ -395,6 +401,7 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
                     not_drawn: Vec::new(),
                     ids: Vec::new(),
                     files,
+                    unresolved_xrefs: resolved_xrefs.unresolved,
                 };
                 plot_record(
                     &record,
@@ -586,7 +593,7 @@ pub(crate) fn plot_dwg_bytes(
     settings: &Settings,
 ) -> Result<(Vec<u8>, PlotReport), Error> {
     let drawing = crate::dwg::read_bytes(bytes, source)?;
-    let sheet = Sheet {
+    let mut sheet = Sheet {
         units: drawing.units.unwrap_or(Unit::Mm),
         block_library: None,
         linetypes: drawing.linetypes,
@@ -596,6 +603,8 @@ pub(crate) fn plot_dwg_bytes(
         mleader_styles: drawing.mleader_styles,
         dimension_styles: drawing.dimension_styles,
         blocks: drawing.blocks,
+        xrefs: drawing.xrefs,
+        resolved_xrefs: Vec::new(),
         objects: drawing.objects,
         paper: drawing.paper,
         page_setup: drawing.page_setup,
@@ -605,13 +614,17 @@ pub(crate) fn plot_dwg_bytes(
         wipeout_frame: drawing.wipeout_frame,
         custom_properties: drawing.custom_properties,
     };
+    let resolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source);
+    let mut files = vec![(SourceKind::of(source), source.to_path_buf(), bytes.to_vec())];
+    files.extend(resolved_xrefs.files);
     let record = Record {
         sheet,
         units: drawing.units,
         objects_not_drawn: drawing.objects_not_read,
         not_drawn: drawing.not_read,
         ids: Vec::new(),
-        files: vec![(SourceKind::of(source), source.to_path_buf(), bytes.to_vec())],
+        files,
+        unresolved_xrefs: resolved_xrefs.unresolved,
     };
     let title = source
         .file_stem()
@@ -720,6 +733,7 @@ fn render_pdf_record(
                 all
             },
         ),
+        unresolved_xrefs: record.unresolved_xrefs.clone(),
         stamp,
         layouts,
     };

@@ -208,6 +208,10 @@ pub struct RenderReport {
     /// The hatches not drawn in full, their pattern needing more lines or
     /// dashes than one hatch draws. Empty when every hatch was drawn whole.
     pub hatches_cut_short: Vec<HatchCutShort>,
+    /// External references that could not be found or loaded. Left out when
+    /// every reference resolved cleanly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
     /// The stamp written into the PNG.
     pub stamp: Stamp,
     /// On a sheet drawn in several layouts, what the render wrote for each
@@ -470,6 +474,7 @@ fn render_page(
         bytes: png.len(),
         font_substitutions: fonts.substitutions(),
         hatches_cut_short: list.hatches_cut_short.clone(),
+        unresolved_xrefs: record.unresolved_xrefs.clone(),
         stamp,
         other_layouts: Vec::new(),
     })

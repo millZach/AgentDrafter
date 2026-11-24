@@ -40,6 +40,8 @@ fn reads_one_line() {
             mleader_styles: Vec::new(),
             dimension_styles: Vec::new(),
             blocks: Vec::new(),
+            xrefs: Vec::new(),
+            resolved_xrefs: Vec::new(),
             objects: vec![Object::Line(Line {
                 from: Point3::new(0.0, 0.0, 0.0),
                 to: Point3::new(100.0, 50.0, 0.0),

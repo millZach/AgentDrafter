@@ -1277,12 +1277,36 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::SetPageSetup {
                 to: AddTo::Sheet(sheet),
                 ..
+            }
+            | Body::AttachXref {
+                to: AddTo::Sheet(sheet),
+                ..
+            }
+            | Body::DetachXref {
+                to: AddTo::Sheet(sheet),
+                ..
+            }
+            | Body::BindXref {
+                to: AddTo::Sheet(sheet),
+                ..
             } => (sheet, "sheet"),
             Body::Table {
                 to: AddTo::Template(written),
                 ..
             }
             | Body::SetPageSetup {
+                to: AddTo::Template(written),
+                ..
+            }
+            | Body::AttachXref {
+                to: AddTo::Template(written),
+                ..
+            }
+            | Body::DetachXref {
+                to: AddTo::Template(written),
+                ..
+            }
+            | Body::BindXref {
                 to: AddTo::Template(written),
                 ..
             } => {
@@ -1830,6 +1854,43 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         return apply_page_setup(at, op, to, layout.as_deref(), set);
     }
 
+    if let Body::AttachXref {
+        to,
+        xref,
+        place,
+        position,
+        scale,
+        rotation,
+        layer,
+        space,
+        id,
+        insert_name,
+    } = &op.body
+    {
+        return apply_attach_xref(
+            at,
+            op,
+            to,
+            xref,
+            *place,
+            position,
+            *scale,
+            *rotation,
+            layer,
+            space.as_deref(),
+            id.as_deref(),
+            insert_name.as_deref(),
+        );
+    }
+
+    if let Body::DetachXref { to, name } = &op.body {
+        return apply_detach_xref(at, op, to, name);
+    }
+
+    if let Body::BindXref { to, name, mode } = &op.body {
+        return apply_bind_xref(at, op, to, name, *mode);
+    }
+
     if let Body::Block {
         library,
         import: Some(import),
@@ -1902,6 +1963,9 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Stretch { .. }
         | Body::Explode { .. }
         | Body::SetPageSetup { .. }
+        | Body::AttachXref { .. }
+        | Body::DetachXref { .. }
+        | Body::BindXref { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2388,6 +2452,9 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Stretch { .. }
         | Body::Explode { .. }
         | Body::SetPageSetup { .. }
+        | Body::AttachXref { .. }
+        | Body::DetachXref { .. }
+        | Body::BindXref { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2983,6 +3050,541 @@ fn apply_page_setup(
             snapped: Vec::new(),
             message: format!(
                 "updates {target_label} in template `{written}`, so on {}",
+                every_sheet(&files.names(&sheets))
+            ),
+        }),
+        sheets,
+        refuse: false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_attach_xref(
+    at: &mut Attempt,
+    op: &Operation,
+    to: &AddTo,
+    xref: &crate::model::Xref,
+    place: bool,
+    position: &Value,
+    scale: f64,
+    rotation: f64,
+    layer: &str,
+    space: Option<&str>,
+    id: Option<&str>,
+    insert_name: Option<&str>,
+) -> Applied {
+    let files = at.files;
+    let t = match to {
+        AddTo::Template(written) => files.template(written).expect("checked before"),
+        AddTo::Sheet(sheet) => files.template_of[files.sheet(sheet).expect("checked before")],
+    };
+    let sheets = files.templates[t].sheets.clone();
+    let fail = |code: ErrorCode, message: String, field: &str| Applied {
+        sheets: sheets.clone(),
+        outcome: Err(op_error(op.index, op.spec.name, code, message, field)),
+        refuse: false,
+    };
+    if let Some(refusal) = many_paths(files, FileRef::Template(t), op, "template") {
+        return refusal;
+    }
+    let written = files.templates[t].written.clone();
+    let record = match at.template(t) {
+        Ok(record) => record,
+        Err(e) => return fail(e.code, e.message, ""),
+    };
+    let path = record.path.clone();
+    let existing = record
+        .table_names(crate::description::xref::XREFS_KEY)
+        .into_iter()
+        .find(|n| one_name(n, &xref.name));
+    if let Some(existing_name) = existing {
+        let existing_path = record
+            .table_value(crate::description::xref::XREFS_KEY, &existing_name, "path")
+            .unwrap_or_default();
+        if existing_path != xref.path {
+            return fail(
+                ErrorCode::DuplicateName,
+                format!(
+                    "template `{written}` already declares external reference `{existing_name}` \
+                     pointing to `{existing_path}`"
+                ),
+                "name",
+            );
+        }
+    } else {
+        let mut entry_keys = serde_json::Map::new();
+        entry_keys.insert("path".to_owned(), Value::String(xref.path.clone()));
+        if !xref.kind.is_attach() {
+            entry_keys.insert(
+                "kind".to_owned(),
+                Value::String(xref.kind.name().to_owned()),
+            );
+        }
+        if xref.unloaded {
+            entry_keys.insert("unloaded".to_owned(), Value::Bool(true));
+        }
+        if let Err(e) = record.table_add(
+            crate::description::xref::XREFS_KEY,
+            &crate::description::xref::XREF_KEYS,
+            &xref.name,
+            &entry_keys,
+        ) {
+            return fail(e.code, e.message, "name");
+        }
+    }
+    let mut placed_id = None;
+    let mut after_text = None;
+    if place {
+        let mut ins_keys = serde_json::Map::new();
+        ins_keys.insert("block".to_owned(), Value::String(xref.name.clone()));
+        ins_keys.insert("position".to_owned(), position.clone());
+        if (scale - 1.0).abs() > 1e-12 {
+            ins_keys.insert("scale".to_owned(), serde_json::json!(scale));
+        }
+        if rotation.abs() > 1e-12 {
+            ins_keys.insert("rotation".to_owned(), serde_json::json!(rotation));
+        }
+        if layer != crate::model::LAYER_ZERO {
+            ins_keys.insert("layer".to_owned(), Value::String(layer.to_owned()));
+        }
+        if let Some(space) = space {
+            ins_keys.insert("space".to_owned(), Value::String(space.to_owned()));
+        }
+        if let Some(id) = id {
+            ins_keys.insert("id".to_owned(), Value::String(id.to_owned()));
+        }
+        if let Some(insert_name) = insert_name {
+            ins_keys.insert("name".to_owned(), Value::String(insert_name.to_owned()));
+        }
+        match record.add(ObjectList::Template, "insert", &ins_keys, op.index) {
+            Ok(idx) => {
+                after_text = Some(record.object_text(ObjectList::Template, idx));
+                placed_id = Some(
+                    id.map(str::to_owned)
+                        .unwrap_or_else(|| ObjectList::Template.place(idx)),
+                );
+            }
+            Err(e) => return fail(e.code, e.message, ""),
+        }
+    }
+    let msg = if place {
+        format!(
+            "attaches {} external reference `{}` (`{}`) and places an insert in template `{written}`, \
+             so on {}",
+            xref.kind.name(),
+            xref.name,
+            xref.path,
+            every_sheet(&files.names(&sheets))
+        )
+    } else {
+        format!(
+            "attaches {} external reference `{}` (`{}`) in template `{written}`, so on {}",
+            xref.kind.name(),
+            xref.name,
+            xref.path,
+            every_sheet(&files.names(&sheets))
+        )
+    };
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: placed_id,
+            before: None,
+            after: after_text,
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
+            split_id: None,
+            deleted: Vec::new(),
+            created: Vec::new(),
+            snapped: Vec::new(),
+            message: msg,
+        }),
+        sheets,
+        refuse: false,
+    }
+}
+
+fn apply_detach_xref(at: &mut Attempt, op: &Operation, to: &AddTo, name: &str) -> Applied {
+    let files = at.files;
+    let t = match to {
+        AddTo::Template(written) => files.template(written).expect("checked before"),
+        AddTo::Sheet(sheet) => files.template_of[files.sheet(sheet).expect("checked before")],
+    };
+    let sheets = files.templates[t].sheets.clone();
+    let fail = |code: ErrorCode, message: String, field: &str| Applied {
+        sheets: sheets.clone(),
+        outcome: Err(op_error(op.index, op.spec.name, code, message, field)),
+        refuse: false,
+    };
+    if let Some(refusal) = many_paths(files, FileRef::Template(t), op, "template") {
+        return refusal;
+    }
+    let written = files.templates[t].written.clone();
+    let record = match at.template(t) {
+        Ok(record) => record,
+        Err(e) => return fail(e.code, e.message, ""),
+    };
+    let path = record.path.clone();
+    let Some(canonical_name) = record
+        .table_names(crate::description::xref::XREFS_KEY)
+        .into_iter()
+        .find(|n| one_name(n, name))
+    else {
+        return fail(
+            ErrorCode::UnknownName,
+            format!("template `{written}` has no external reference named `{name}`"),
+            "name",
+        );
+    };
+    let mut removed_count = 0usize;
+    let mut ids_written = Vec::new();
+    let template_indices: Vec<usize> = record
+        .inserts(ObjectList::Template)
+        .into_iter()
+        .filter(|ins| one_name(&ins.block, &canonical_name))
+        .map(|ins| ins.index)
+        .collect();
+    for idx in template_indices.into_iter().rev() {
+        ids_written.extend(record.delete(ObjectList::Template, idx, op.index));
+        removed_count += 1;
+    }
+    if let Err(e) = record.table_delete(crate::description::xref::XREFS_KEY, &canonical_name) {
+        return fail(e.code, e.message, "name");
+    }
+    // Also remove any row-level inserts of this xref on sheets built from template `t`.
+    for &k in &sheets {
+        let row = &files.rows[k];
+        let row_list = ObjectList::Row(row.index);
+        let row_record = &mut at.rows[row.file_index];
+        let row_indices: Vec<usize> = row_record
+            .inserts(row_list)
+            .into_iter()
+            .filter(|ins| one_name(&ins.block, &canonical_name))
+            .map(|ins| ins.index)
+            .collect();
+        for idx in row_indices.into_iter().rev() {
+            ids_written.extend(row_record.delete(row_list, idx, op.index));
+            removed_count += 1;
+        }
+    }
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: None,
+            before: None,
+            after: None,
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written,
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
+            split_id: None,
+            deleted: Vec::new(),
+            created: Vec::new(),
+            snapped: Vec::new(),
+            message: format!(
+                "detaches external reference `{canonical_name}` (removing {removed_count} \
+                 insert{}) from template `{written}`, so on {}",
+                if removed_count == 1 { "" } else { "s" },
+                every_sheet(&files.names(&sheets))
+            ),
+        }),
+        sheets,
+        refuse: false,
+    }
+}
+
+fn apply_bind_xref(
+    at: &mut Attempt,
+    op: &Operation,
+    to: &AddTo,
+    name: &str,
+    mode: crate::model::XrefBindMode,
+) -> Applied {
+    let files = at.files;
+    let t = match to {
+        AddTo::Template(written) => files.template(written).expect("checked before"),
+        AddTo::Sheet(sheet) => files.template_of[files.sheet(sheet).expect("checked before")],
+    };
+    let mut sheets = files.templates[t].sheets.clone();
+    if let Some(l) = files.library_of[t] {
+        for &s in &files.libraries[l].sheets {
+            if !sheets.contains(&s) {
+                sheets.push(s);
+            }
+        }
+        sheets.sort_unstable();
+    }
+    let fail = |code: ErrorCode, message: String, field: &str| Applied {
+        sheets: sheets.clone(),
+        outcome: Err(op_error(op.index, op.spec.name, code, message, field)),
+        refuse: false,
+    };
+    if let Some(refusal) = many_paths(files, FileRef::Template(t), op, "template") {
+        return refusal;
+    }
+    let written = files.templates[t].written.clone();
+    let Some(l) = files.library_of[t] else {
+        return fail(
+            ErrorCode::BadValue,
+            format!(
+                "template `{written}` names no `block_library` to bind external reference \
+                 `{name}` into; declare a `block_library:` on the template first"
+            ),
+            "name",
+        );
+    };
+    if let Some(refusal) = library_many_paths(files, l, op) {
+        return refusal;
+    }
+    let (template_path, canonical_name, xref_path) = {
+        let record = match at.template(t) {
+            Ok(record) => record,
+            Err(e) => return fail(e.code, e.message, ""),
+        };
+        let Some(canonical_name) = record
+            .table_names(crate::description::xref::XREFS_KEY)
+            .into_iter()
+            .find(|n| one_name(n, name))
+        else {
+            return fail(
+                ErrorCode::UnknownName,
+                format!("template `{written}` has no external reference named `{name}`"),
+                "name",
+            );
+        };
+        let xref_path = record
+            .table_value(crate::description::xref::XREFS_KEY, &canonical_name, "path")
+            .unwrap_or_default();
+        (record.path.clone(), canonical_name, xref_path)
+    };
+    let Some(resolved_path) = crate::xref::find_xref_file(&template_path, &xref_path) else {
+        return fail(
+            ErrorCode::ReadFailed,
+            format!(
+                "could not bind external reference `{canonical_name}`: referenced file \
+                 `{xref_path}` was not found"
+            ),
+            "name",
+        );
+    };
+    let referenced = match crate::dwg::read(&resolved_path) {
+        Ok(d) => d,
+        Err(e) => return fail(e.code, e.message, "name"),
+    };
+    if referenced.objects_not_read > 0 {
+        return fail(
+            ErrorCode::BadValue,
+            format!(
+                "could not bind external reference `{canonical_name}`: `{xref_path}` holds {} \
+                 object(s) the core has no model for yet",
+                referenced.objects_not_read
+            ),
+            "name",
+        );
+    }
+    let xref_units = referenced.units.unwrap_or(files.units);
+    let unit_scale = xref_units.convert(1.0, files.units);
+    let prefix = match mode {
+        crate::model::XrefBindMode::Bind => format!("{canonical_name}$0$"),
+        crate::model::XrefBindMode::Insert => String::new(),
+    };
+    let linetypes: Vec<crate::model::Linetype> = referenced
+        .linetypes
+        .iter()
+        .filter(|lt| !crate::xref::is_built_in_linetype(&lt.name))
+        .map(|lt| crate::model::Linetype {
+            name: format!("{prefix}{}", lt.name),
+            description: lt.description.clone(),
+            pattern: lt.pattern.iter().map(|d| d * unit_scale).collect(),
+        })
+        .collect();
+    let layers: Vec<crate::model::Layer> = referenced
+        .layers
+        .iter()
+        .filter(|layer| layer.name != crate::model::LAYER_ZERO)
+        .map(|layer| crate::model::Layer {
+            name: format!("{prefix}{}", layer.name),
+            linetype: crate::xref::prefix_linetype_name(&layer.linetype, &prefix),
+            ..layer.clone()
+        })
+        .collect();
+    let text_styles: Vec<crate::text::TextStyle> = referenced
+        .text_styles
+        .iter()
+        .filter(|s| !s.name.eq_ignore_ascii_case(crate::text::STANDARD))
+        .map(|s| crate::text::TextStyle {
+            name: format!("{prefix}{}", s.name),
+            font: s.font.clone(),
+            width_factor: s.width_factor,
+        })
+        .collect();
+    let block_renames: Vec<(String, String)> = referenced
+        .blocks
+        .iter()
+        .map(|b| (b.name.clone(), format!("{prefix}{}", b.name)))
+        .collect();
+    let mut read_blocks: Vec<crate::import::ReadBlock> = Vec::new();
+    for mut nested in referenced.blocks.clone() {
+        nested.name = format!("{prefix}{}", nested.name);
+        for obj in &mut nested.objects {
+            crate::xref::prefix_object(obj, &prefix, &block_renames);
+        }
+        read_blocks.push(crate::import::ReadBlock {
+            block: nested,
+            not_carried: Vec::new(),
+        });
+    }
+    let mut model_objects: Vec<Object> = crate::xref::model_space_objects_of(&referenced)
+        .into_iter()
+        .filter(|o| !matches!(o, Object::Viewport(_)))
+        .collect();
+    for obj in &mut model_objects {
+        crate::xref::prefix_object(obj, &prefix, &block_renames);
+    }
+    if let Some(unsupported) = model_objects
+        .iter()
+        .find(|o| !crate::import::carries(o, &linetypes, &layers, &text_styles))
+    {
+        return fail(
+            ErrorCode::BadValue,
+            format!(
+                "could not bind external reference `{canonical_name}` into block library: \
+                 object of type `{}` cannot be placed inside a block library definition",
+                unsupported.type_name()
+            ),
+            "name",
+        );
+    }
+    let top_objects =
+        if (unit_scale - 1.0).abs() > 1e-12 && unit_scale.is_finite() && unit_scale > 0.0 {
+            let inner_name = format!("{canonical_name}$0$__model");
+            read_blocks.push(crate::import::ReadBlock {
+                block: crate::model::Block {
+                    name: inner_name.clone(),
+                    base_point: crate::model::Point3::new(0.0, 0.0, 0.0),
+                    objects: model_objects,
+                    cells: Vec::new(),
+                    parameters: Vec::new(),
+                },
+                not_carried: Vec::new(),
+            });
+            vec![Object::Insert(crate::model::Insert {
+                block: inner_name,
+                position: crate::model::Point3::new(0.0, 0.0, 0.0),
+                scale: unit_scale,
+                rotation: 0.0,
+                mirrored: false,
+                readable_attributes: false,
+                attributes: Vec::new(),
+                state: BTreeMap::new(),
+                evaluated_block: None,
+                name: None,
+                layer: crate::model::LAYER_ZERO.to_owned(),
+                properties: Default::default(),
+            })]
+        } else {
+            model_objects
+        };
+    read_blocks.push(crate::import::ReadBlock {
+        block: crate::model::Block {
+            name: canonical_name.clone(),
+            base_point: crate::model::Point3::new(0.0, 0.0, 0.0),
+            objects: top_objects,
+            cells: Vec::new(),
+            parameters: Vec::new(),
+        },
+        not_carried: Vec::new(),
+    });
+    let drawing_blocks = crate::import::DrawingBlocks {
+        units_code: 0,
+        units: Some(files.units),
+        linetypes,
+        layers,
+        text_styles,
+        blocks: read_blocks,
+        skipped: Vec::new(),
+    };
+    let lib_record = match at.library(l) {
+        Ok(record) => record,
+        Err(e) => return fail(e.code, e.message, ""),
+    };
+    let existing = match lib_record
+        .current_text()
+        .and_then(|text| Existing::read(&text))
+    {
+        Ok(existing) => existing,
+        Err(e) => return fail(e.code, e.message, ""),
+    };
+    let planned = match plan(
+        &drawing_blocks,
+        &existing,
+        std::slice::from_ref(&canonical_name),
+        false,
+        "bind",
+    ) {
+        Ok(planned) => planned,
+        Err(e) => return fail(e.code, e.message, "name"),
+    };
+    if let Err(e) = write_plan(lib_record, &planned) {
+        return fail(e.code, e.message, "");
+    }
+    for block in &planned.blocks {
+        at.blocks.push((l, block.name.clone(), op.index));
+    }
+    let template_record = match at.template(t) {
+        Ok(record) => record,
+        Err(e) => return fail(e.code, e.message, ""),
+    };
+    if let Err(e) =
+        template_record.table_delete(crate::description::xref::XREFS_KEY, &canonical_name)
+    {
+        return fail(e.code, e.message, "name");
+    }
+    let lib_written = files.libraries[l].written.clone();
+    Applied {
+        outcome: Ok(Done {
+            record: template_path,
+            id: None,
+            before: None,
+            after: None,
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
+            split_id: None,
+            deleted: Vec::new(),
+            created: Vec::new(),
+            snapped: Vec::new(),
+            message: format!(
+                "binds external reference `{canonical_name}` into block library `{lib_written}` \
+                 (mode: {}) and removes it from template `{written}`, so on {}",
+                mode.name(),
                 every_sheet(&files.names(&sheets))
             ),
         }),
@@ -10225,7 +10827,23 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::SetPageSetup {
             to: AddTo::Template(written),
             ..
+        }
+        | Body::AttachXref {
+            to: AddTo::Template(written),
+            ..
+        }
+        | Body::DetachXref {
+            to: AddTo::Template(written),
+            ..
         } => files.template(written) == Some(files.template_of[k]),
+        Body::BindXref {
+            to: AddTo::Template(written),
+            ..
+        } => files.template(written).is_some_and(|t| {
+            t == files.template_of[k]
+                || (files.library_of[t].is_some()
+                    && files.library_of[t] == files.library_of[files.template_of[k]])
+        }),
         Body::AddRevisionCloud {
             to: None, around, ..
         } => around.iter().any(|(t, _)| reaches(t)),
@@ -10236,9 +10854,26 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::SetPageSetup {
             to: AddTo::Sheet(sheet),
             ..
+        }
+        | Body::AttachXref {
+            to: AddTo::Sheet(sheet),
+            ..
+        }
+        | Body::DetachXref {
+            to: AddTo::Sheet(sheet),
+            ..
         } => files
             .sheet(sheet)
             .is_some_and(|s| files.template_of[s] == files.template_of[k]),
+        Body::BindXref {
+            to: AddTo::Sheet(sheet),
+            ..
+        } => files.sheet(sheet).is_some_and(|s| {
+            let t = files.template_of[s];
+            t == files.template_of[k]
+                || (files.library_of[t].is_some()
+                    && files.library_of[t] == files.library_of[files.template_of[k]])
+        }),
         Body::Change { target, .. }
         | Body::Move { target, .. }
         | Body::Delete { target }
@@ -10356,7 +10991,10 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
             op: TableOp::Rename,
             ..
         } => "to".to_owned(),
-        Body::Table { .. } => {
+        Body::Table { .. }
+        | Body::AttachXref { .. }
+        | Body::DetachXref { .. }
+        | Body::BindXref { .. } => {
             let key = rest.rsplit('.').next().unwrap_or("");
             if key.is_empty() {
                 "name".to_owned()
@@ -10717,6 +11355,10 @@ fn target_words(op: &Operation) -> String {
             to: AddTo::Sheet(s),
             ..
         } => format!("the page setup of sheet `{s}`'s template"),
+        Body::AttachXref { xref, .. } => format!("external reference `{}`", xref.name),
+        Body::DetachXref { name, .. } | Body::BindXref { name, .. } => {
+            format!("external reference `{name}`")
+        }
         Body::Block {
             import: Some(import),
             ..

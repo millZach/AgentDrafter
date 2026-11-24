@@ -909,23 +909,61 @@ fn prepare_revision(
     // Apply every operation in order to the in-memory CadDocument.
     // All-or-nothing (ADR-0005): any error returns before writing a single file.
     let mut outcomes = Vec::with_capacity(parsed.operations.len());
-    let mut cached_record: Option<DwgLoaded> = Some(dwg_loaded_from_drawing(
-        source,
-        sheet_name.clone(),
-        session.initial_contents().clone(),
-        None,
-    ));
+    let mut cached_record: Option<DwgLoaded> = None;
 
     for op in &parsed.operations {
-        let outcome = apply_revision_op(
-            &mut session,
-            &mut cached_record,
-            source,
-            &sheet_name,
-            effective_units,
-            op,
-            settings,
-        )?;
+        let outcome = match &op.body {
+            Body::AttachXref {
+                to,
+                xref,
+                place,
+                position,
+                scale,
+                rotation,
+                layer,
+                space,
+                id,
+                insert_name,
+            } => revise_attach_xref(
+                &mut session,
+                &sheet_name,
+                effective_units,
+                op,
+                to,
+                xref,
+                *place,
+                position,
+                *scale,
+                *rotation,
+                layer,
+                space.as_deref(),
+                id.as_deref(),
+                insert_name.as_deref(),
+            )?,
+            Body::DetachXref { to, name } => {
+                revise_detach_xref(&mut session, &sheet_name, op, to, name)?
+            }
+            Body::BindXref { to, name, mode } => revise_bind_xref(
+                &mut session,
+                source,
+                &sheet_name,
+                effective_units,
+                op,
+                to,
+                name,
+                *mode,
+                settings,
+            )?,
+            _ => apply_revision_op(
+                &mut session,
+                &mut cached_record,
+                source,
+                &sheet_name,
+                effective_units,
+                op,
+                settings,
+            )?,
+        };
         outcomes.push(outcome);
         // Invalidate cached SheetRecord so subsequent ops see updated geometry/IDs.
         cached_record = None;
@@ -1548,6 +1586,268 @@ fn check_add_target_sheet(to: &AddTo, sheet_name: &str, op: &Operation) -> Resul
             "sheet",
         )),
     }
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn revise_attach_xref(
+    session: &mut RevisionSession,
+    sheet_name: &str,
+    units: Unit,
+    op: &Operation,
+    to: &AddTo,
+    xref: &crate::model::Xref,
+    place: bool,
+    position: &Value,
+    scale: f64,
+    rotation: f64,
+    layer: &str,
+    space: Option<&str>,
+    id: Option<&str>,
+    insert_name: Option<&str>,
+) -> Result<RevisionOperationOutcome, Error> {
+    let index = op.index;
+    let op_name = op.spec.name;
+    check_add_target_sheet(to, sheet_name, op)?;
+    let tables = session.tables_for_parsing();
+    if !layer.eq_ignore_ascii_case(crate::model::LAYER_ZERO)
+        && !tables
+            .layers
+            .iter()
+            .any(|l| l.name.eq_ignore_ascii_case(layer))
+    {
+        return Err(op_error(
+            index,
+            op_name,
+            ErrorCode::UnknownName,
+            format!("unknown layer `{layer}` in the drawing"),
+            "layer",
+        ));
+    }
+    let target_space = match space {
+        None => TargetSpace::Model,
+        Some(s) if s.eq_ignore_ascii_case("model") => TargetSpace::Model,
+        Some(s) if s.eq_ignore_ascii_case("paper") => {
+            let first = tables.layouts.first().ok_or_else(|| {
+                op_error(
+                    index,
+                    op_name,
+                    ErrorCode::BadValue,
+                    "the drawing has no paper-space layout",
+                    "space",
+                )
+            })?;
+            TargetSpace::Layout(first.clone())
+        }
+        Some(s) => {
+            let found = tables
+                .layouts
+                .iter()
+                .find(|l| l.eq_ignore_ascii_case(s))
+                .ok_or_else(|| {
+                    op_error(
+                        index,
+                        op_name,
+                        ErrorCode::UnknownName,
+                        format!("no layout named `{s}` in the drawing"),
+                        "space",
+                    )
+                })?;
+            TargetSpace::Layout(found.clone())
+        }
+    };
+    let coords = match position {
+        Value::Array(items) if items.len() == 3 => {
+            let mut pts = [0.0; 3];
+            for (i, item) in items.iter().enumerate() {
+                pts[i] = parse_length_json(item, units, &format!("position[{i}]"))
+                    .map_err(|e| op_error(index, op_name, e.code, e.message, "position"))?;
+            }
+            crate::model::Point3::new(pts[0], pts[1], pts[2])
+        }
+        _ => {
+            return Err(op_error(
+                index,
+                op_name,
+                ErrorCode::WrongType,
+                "expected `position`, a 3D point `[x, y, z]`",
+                "position",
+            ));
+        }
+    };
+    let insert = crate::model::Insert {
+        block: xref.name.clone(),
+        position: coords,
+        scale,
+        rotation: crate::description::normalize_degrees(rotation),
+        mirrored: false,
+        readable_attributes: false,
+        attributes: Vec::new(),
+        state: std::collections::BTreeMap::new(),
+        evaluated_block: None,
+        name: insert_name.map(str::to_owned),
+        layer: layer.to_owned(),
+        properties: Default::default(),
+    };
+    let (hex, handles) = if place {
+        session
+            .attach_xref(xref, &insert, &target_space, sheet_name, id, insert_name)
+            .map_err(|e| op_error(index, op_name, e.code, e.message, "name"))?
+    } else {
+        let h = session
+            .attach_xref_record_only(xref)
+            .map_err(|e| op_error(index, op_name, e.code, e.message, "name"))?;
+        (String::new(), h)
+    };
+    let obj_id = if place {
+        Some(match id {
+            Some(local) => format!("{sheet_name}/{local}"),
+            None => handle_id(sheet_name, &hex),
+        })
+    } else {
+        None
+    };
+    let msg = if place {
+        format!(
+            "attached {} external reference `{}` (`{}`) and placed insert `{}`",
+            xref.kind.name(),
+            xref.name,
+            xref.path,
+            obj_id.as_deref().unwrap_or(&hex)
+        )
+    } else {
+        format!(
+            "attached {} external reference `{}` (`{}`)",
+            xref.kind.name(),
+            xref.name,
+            xref.path
+        )
+    };
+    Ok(RevisionOperationOutcome {
+        index,
+        op: op_name.to_owned(),
+        ok: true,
+        message: msg,
+        id: obj_id,
+        handle: (!hex.is_empty()).then_some(hex),
+        handles_touched: handles.touched,
+        handles_added: handles.added,
+        handles_deleted: handles.deleted,
+        copies: Vec::new(),
+        snapped: Vec::new(),
+        replacements: Vec::new(),
+        attributes_set: Vec::new(),
+        split_id: None,
+        deleted: Vec::new(),
+        transformed: Vec::new(),
+        created: Vec::new(),
+    })
+}
+
+#[inline(never)]
+fn revise_detach_xref(
+    session: &mut RevisionSession,
+    sheet_name: &str,
+    op: &Operation,
+    to: &AddTo,
+    name: &str,
+) -> Result<RevisionOperationOutcome, Error> {
+    let index = op.index;
+    let op_name = op.spec.name;
+    check_add_target_sheet(to, sheet_name, op)?;
+    let handles = session
+        .detach_xref(name)
+        .map_err(|e| op_error(index, op_name, e.code, e.message, "name"))?;
+    Ok(RevisionOperationOutcome {
+        index,
+        op: op_name.to_owned(),
+        ok: true,
+        message: format!(
+            "detached external reference `{name}` (removed {} insert{})",
+            handles.deleted.len(),
+            plural(handles.deleted.len())
+        ),
+        id: None,
+        handle: None,
+        handles_touched: handles.touched,
+        handles_added: handles.added,
+        handles_deleted: handles.deleted,
+        copies: Vec::new(),
+        snapped: Vec::new(),
+        replacements: Vec::new(),
+        attributes_set: Vec::new(),
+        split_id: None,
+        deleted: Vec::new(),
+        transformed: Vec::new(),
+        created: Vec::new(),
+    })
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn revise_bind_xref(
+    session: &mut RevisionSession,
+    source: &Path,
+    sheet_name: &str,
+    units: Unit,
+    op: &Operation,
+    to: &AddTo,
+    name: &str,
+    mode: crate::model::XrefBindMode,
+    settings: &Settings,
+) -> Result<RevisionOperationOutcome, Error> {
+    let index = op.index;
+    let op_name = op.spec.name;
+    check_add_target_sheet(to, sheet_name, op)?;
+    let tables = session.tables_for_parsing();
+    let style_sheet = crate::model::Sheet {
+        units,
+        block_library: None,
+        linetypes: Vec::new(),
+        layers: Vec::new(),
+        text_styles: tables.styles,
+        table_styles: Vec::new(),
+        mleader_styles: Vec::new(),
+        dimension_styles: Vec::new(),
+        blocks: Vec::new(),
+        xrefs: Vec::new(),
+        resolved_xrefs: Vec::new(),
+        objects: Vec::new(),
+        paper: None,
+        page_setup: None,
+        ltscale: 1.0,
+        layout: None,
+        other_layouts: Vec::new(),
+        wipeout_frame: crate::model::WipeoutFrame::Off,
+        custom_properties: std::collections::BTreeMap::new(),
+    };
+    let fonts = SheetFonts::find(&style_sheet, settings);
+    let start_of = |t: &crate::text::Text| fonts.start(t);
+    let handles = session
+        .bind_xref(name, source, mode, &start_of)
+        .map_err(|e| op_error(index, op_name, e.code, e.message, "name"))?;
+    Ok(RevisionOperationOutcome {
+        index,
+        op: op_name.to_owned(),
+        ok: true,
+        message: format!(
+            "bound external reference `{name}` into a local block (mode: {})",
+            mode.name()
+        ),
+        id: None,
+        handle: handles.touched.first().cloned(),
+        handles_touched: handles.touched,
+        handles_added: handles.added,
+        handles_deleted: handles.deleted,
+        copies: Vec::new(),
+        snapped: Vec::new(),
+        replacements: Vec::new(),
+        attributes_set: Vec::new(),
+        split_id: None,
+        deleted: Vec::new(),
+        transformed: Vec::new(),
+        created: Vec::new(),
+    })
 }
 
 fn apply_revision_op(
@@ -3954,6 +4254,9 @@ fn apply_revision_op(
                 transformed: Vec::new(),
                 created: Vec::new(),
             })
+        }
+        Body::AttachXref { .. } | Body::DetachXref { .. } | Body::BindXref { .. } => {
+            unreachable!("handled before apply_revision_op")
         }
         Body::Table {
             op: TableOp::Add,

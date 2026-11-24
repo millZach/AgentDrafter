@@ -81,6 +81,8 @@ pub enum SourceKind {
     /// A drawing set's rows file, which holds the row a sheet of the set is
     /// drawn with.
     Rows,
+    /// An external reference (DWG or DXF) attached or overlaid onto the drawing.
+    Xref,
 }
 
 impl SourceKind {
@@ -111,6 +113,7 @@ impl SourceKind {
             SourceKind::BlockLibrary => "block library",
             SourceKind::Template => "template",
             SourceKind::Rows => "rows file",
+            SourceKind::Xref => "external reference",
         }
     }
 }

@@ -25,7 +25,7 @@ use super::{
 use crate::error::{Error, ErrorCode};
 use crate::model::{
     Attribute, AttributeDefinition, Block, BlockLibrary, Cell, HatchPattern, Insert, Layer,
-    Linetype, Object, ObjectLinetype, Point3, Sheet, CONTINUOUS,
+    Linetype, Object, ObjectLinetype, Point3, Sheet, Xref, CONTINUOUS,
 };
 use crate::set::NoticeCode;
 use crate::text::TextStyle;
@@ -621,16 +621,17 @@ pub(super) fn attribute_definition(
     })
 }
 
-/// An insert of a block from `library`. Its name, which every object on a
-/// sheet may carry, is read with its ID ([`super::ids`]).
+/// An insert of a block from `library` or an external reference from `xrefs`.
+/// Its name, which every object on a sheet may carry, is read with its ID
+/// ([`super::ids`]).
 pub(super) fn insert(
     fields: &Fields,
     units: Unit,
     layer: String,
     library: Option<&BlockLibrary>,
+    xrefs: &[Xref],
     noticed: &mut Vec<Noticed>,
 ) -> Result<Insert, Error> {
-    let block = block_named(fields, library)?;
     let (scale, rotation) = scale_and_rotation(fields)?;
     let mirrored = match fields.get("mirrored") {
         Some(node) => boolean(node, &fields.path_of("mirrored"))?,
@@ -640,15 +641,46 @@ pub(super) fn insert(
         Some(node) => boolean(node, &fields.path_of("readable_attributes"))?,
         None => false,
     };
+    let position = point(
+        fields.require("position")?,
+        &fields.path_of("position"),
+        units,
+    )?;
+    if let Some(xref) = xref_named(fields, library, xrefs)? {
+        for forbidden in ["attributes", "attribute_fields", "state"] {
+            if let Some(node) = fields.get(forbidden) {
+                return Err(bad_value(
+                    node,
+                    &fields.path_of(forbidden),
+                    format!(
+                        "external reference `{}` does not carry `{forbidden}`; bind the external \
+                         reference into a local block first if you need block attributes or state",
+                        xref.name
+                    ),
+                ));
+            }
+        }
+        return Ok(Insert {
+            block: xref.name.clone(),
+            position,
+            scale,
+            rotation,
+            mirrored,
+            readable_attributes,
+            attributes: Vec::new(),
+            state: std::collections::BTreeMap::new(),
+            evaluated_block: None,
+            name: None,
+            layer,
+            properties: Default::default(),
+        });
+    }
+    let block = block_named_with_xrefs(fields, library, xrefs)?;
     let attributes = attributes(fields, block, library, noticed)?;
     let state = super::dynamic_block::insert_state(fields, block, units)?;
     Ok(Insert {
         block: block.name.clone(),
-        position: point(
-            fields.require("position")?,
-            &fields.path_of("position"),
-            units,
-        )?,
+        position,
         scale,
         rotation,
         mirrored,
@@ -660,6 +692,85 @@ pub(super) fn insert(
         layer,
         properties: Default::default(),
     })
+}
+
+/// Checks if the insert's `block` field names one of `xrefs` (and not a block
+/// in `library`).
+fn xref_named<'a>(
+    fields: &Fields,
+    library: Option<&BlockLibrary>,
+    xrefs: &'a [Xref],
+) -> Result<Option<&'a Xref>, Error> {
+    if xrefs.is_empty() {
+        return Ok(None);
+    }
+    let node = fields.require_text("block")?;
+    let path = fields.path_of("block");
+    let listed = available_blocks_and_xrefs(library, xrefs);
+    let name = choice(
+        node,
+        &path,
+        "the name of a block or external reference",
+        &listed,
+    )?;
+    if library.is_some_and(|lib| lib.blocks.iter().any(|b| b.name == name)) {
+        return Ok(None);
+    }
+    Ok(xrefs.iter().find(|x| x.name == name))
+}
+
+fn available_blocks_and_xrefs(library: Option<&BlockLibrary>, xrefs: &[Xref]) -> String {
+    let mut parts = Vec::new();
+    match library {
+        Some(library) if !library.blocks.is_empty() => parts.push(format!(
+            "the block library's blocks: {}",
+            library
+                .blocks
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        Some(_) => parts.push("the block library defines no blocks".to_owned()),
+        None if xrefs.is_empty() => parts.push(
+            "the sheet names no block library to insert blocks from; name one with `block_library:`"
+                .to_owned(),
+        ),
+        None => {}
+    }
+    if !xrefs.is_empty() {
+        parts.push(format!(
+            "the sheet's external references: {}",
+            xrefs
+                .iter()
+                .map(|x| x.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    parts.join("; ")
+}
+
+fn block_named_with_xrefs<'a>(
+    fields: &Fields,
+    library: Option<&'a BlockLibrary>,
+    xrefs: &[Xref],
+) -> Result<&'a Block, Error> {
+    let node = fields.require_text("block")?;
+    let path = fields.path_of("block");
+    let listed = available_blocks_and_xrefs(library, xrefs);
+    let name = choice(node, &path, "the name of a block", &listed)?;
+    match library.and_then(|library| library.blocks.iter().find(|b| b.name == name)) {
+        Some(block) => Ok(block),
+        None => Err(at(
+            Error::new(
+                ErrorCode::UnknownName,
+                format!("unknown block `{name}`; {listed}"),
+            ),
+            &path,
+            node.at,
+        )),
+    }
 }
 
 /// The `scale` and `rotation` an insert, or a multileader's block content,

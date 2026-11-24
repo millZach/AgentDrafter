@@ -3000,6 +3000,8 @@ fn check_preserves_sheet_units_for_viewport_dimensions_and_uses_inch_units_on_ex
         mleader_styles: read_ref.mleader_styles,
         dimension_styles: read_ref.dimension_styles,
         blocks: read_ref.blocks,
+        xrefs: read_ref.xrefs,
+        resolved_xrefs: Vec::new(),
         objects: read_ref.objects,
         paper: read_ref.paper,
         page_setup: read_ref.page_setup,

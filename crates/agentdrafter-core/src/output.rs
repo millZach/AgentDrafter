@@ -18,8 +18,7 @@ use crate::build::FileId;
 use crate::description::sheet_description_at;
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
-use crate::model::Sheet;
-use crate::model::{Paper, RecordsOfKind};
+use crate::model::{Paper, RecordsOfKind, Sheet, UnresolvedXref};
 use crate::stamp::{self, SourceKind};
 use crate::units::Unit;
 
@@ -82,6 +81,8 @@ pub(crate) struct Record {
     /// Every file read, the record first, each with its kind and the bytes
     /// read.
     pub files: Vec<(SourceKind, PathBuf, Vec<u8>)>,
+    /// External references that could not be found or loaded.
+    pub unresolved_xrefs: Vec<UnresolvedXref>,
 }
 
 impl Record {
@@ -153,7 +154,7 @@ pub(crate) fn read_record_with_recovery(
                 ..paper
             })
         });
-        let sheet = Sheet {
+        let mut sheet = Sheet {
             units: drawing.units.unwrap_or(Unit::Mm),
             block_library: None,
             linetypes: drawing.linetypes,
@@ -163,6 +164,8 @@ pub(crate) fn read_record_with_recovery(
             mleader_styles: drawing.mleader_styles,
             dimension_styles: drawing.dimension_styles,
             blocks: drawing.blocks,
+            xrefs: drawing.xrefs,
+            resolved_xrefs: Vec::new(),
             objects: drawing.objects,
             // A DWG that opens on its layout plots on its layout's paper.
             paper: drawing.paper.or(paper),
@@ -173,6 +176,8 @@ pub(crate) fn read_record_with_recovery(
             wipeout_frame: drawing.wipeout_frame,
             custom_properties: drawing.custom_properties,
         };
+        let resolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source);
+        files.extend(resolved_xrefs.files);
         return Ok(Record {
             sheet,
             units: drawing.units,
@@ -180,6 +185,7 @@ pub(crate) fn read_record_with_recovery(
             not_drawn: drawing.not_read,
             ids,
             files,
+            unresolved_xrefs: resolved_xrefs.unresolved,
         });
     }
     let text = String::from_utf8(bytes.clone()).map_err(|_| {
@@ -189,11 +195,13 @@ pub(crate) fn read_record_with_recovery(
         )
         .in_file(source)
     })?;
-    let (sheet, library) = sheet_description_at(&text, source)?;
+    let (mut sheet, library) = sheet_description_at(&text, source)?;
     let mut files = vec![(kind, source.to_path_buf(), bytes)];
     if let Some(library) = library {
         files.push((SourceKind::BlockLibrary, library.path, library.bytes));
     }
+    let resolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source);
+    files.extend(resolved_xrefs.files);
     Ok(Record {
         units: Some(sheet.units),
         sheet,
@@ -201,6 +209,7 @@ pub(crate) fn read_record_with_recovery(
         not_drawn: Vec::new(),
         ids: Vec::new(),
         files,
+        unresolved_xrefs: resolved_xrefs.unresolved,
     })
 }
 

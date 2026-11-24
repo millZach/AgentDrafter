@@ -17,7 +17,10 @@ use crate::build::BuildReport;
 use crate::change::{AcceptReport, ChangeReport};
 use crate::check::CheckReport;
 use crate::display_list::DisplayListReport;
+use crate::model::UnresolvedXref;
+use crate::original::ReadReport;
 use crate::plot::{PlotReport, PlotSetReport};
+use crate::query::QueryReport;
 use crate::render::RenderReport;
 use crate::set::SetReport;
 use crate::text::fonts::FontSubstitution;
@@ -30,17 +33,31 @@ pub enum WarningCode {
     /// A font was in no font folder, or could not be read, and a look-alike
     /// was measured and drawn in its place.
     FontLookAlike,
+    /// An external reference (xref) could not be found or loaded from disk.
+    UnresolvedXref,
 }
 
-/// One warning at the top of a reply: a font a look-alike stood in for.
+/// One warning at the top of a reply: a font a look-alike stood in for, or an
+/// external reference that could not be found or loaded.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Warning {
-    /// `font_look_alike`.
+    /// `font_look_alike` or `unresolved_xref`.
     pub code: WarningCode,
     /// The font that was asked for, as the text style names it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub font: String,
     /// The look-alike used in its place.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub look_alike: String,
+    /// The external reference block name, for `unresolved_xref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xref: Option<String>,
+    /// The external reference path that was looked for, for `unresolved_xref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Why the external reference could not be loaded, for `unresolved_xref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// Every sheet it was used on, in the order the reply gives them;
     /// empty for `measure-text`, which measures no sheet.
     pub sheets: Vec<String>,
@@ -56,7 +73,9 @@ impl Warnings {
     /// was measured.
     pub(crate) fn look_alike(&mut self, font: &str, look_alike: &str, sheet: Option<&str>) {
         let at = match self.0.iter().position(|w| {
-            w.font.eq_ignore_ascii_case(font) && w.look_alike.eq_ignore_ascii_case(look_alike)
+            w.code == WarningCode::FontLookAlike
+                && w.font.eq_ignore_ascii_case(font)
+                && w.look_alike.eq_ignore_ascii_case(look_alike)
         }) {
             Some(at) => at,
             None => {
@@ -64,6 +83,9 @@ impl Warnings {
                     code: WarningCode::FontLookAlike,
                     font: font.to_owned(),
                     look_alike: look_alike.to_owned(),
+                    xref: None,
+                    path: None,
+                    reason: None,
                     sheets: Vec::new(),
                 });
                 self.0.len() - 1
@@ -77,6 +99,44 @@ impl Warnings {
         }
     }
 
+    /// Notes an unresolved external reference on `sheet`.
+    pub(crate) fn unresolved_xref(&mut self, xref: &UnresolvedXref, sheet: Option<&str>) {
+        let at = match self.0.iter().position(|w| {
+            w.code == WarningCode::UnresolvedXref
+                && w.xref
+                    .as_deref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(&xref.name))
+                && w.path.as_deref() == Some(xref.path.as_str())
+        }) {
+            Some(at) => at,
+            None => {
+                self.0.push(Warning {
+                    code: WarningCode::UnresolvedXref,
+                    font: String::new(),
+                    look_alike: String::new(),
+                    xref: Some(xref.name.clone()),
+                    path: Some(xref.path.clone()),
+                    reason: Some(xref.reason.clone()),
+                    sheets: Vec::new(),
+                });
+                self.0.len() - 1
+            }
+        };
+        if let Some(sheet) = sheet {
+            let sheets = &mut self.0[at].sheets;
+            if !sheets.iter().any(|s| s == sheet) {
+                sheets.push(sheet.to_owned());
+            }
+        }
+    }
+
+    /// Notes every unresolved external reference on `sheet`.
+    pub(crate) fn unresolved_xrefs(&mut self, sheet: &str, unresolved: &[UnresolvedXref]) {
+        for xref in unresolved {
+            self.unresolved_xref(xref, Some(sheet));
+        }
+    }
+
     /// Notes each of a sheet's font substitutions.
     pub(crate) fn sheet(&mut self, sheet: &str, substitutions: &[FontSubstitution]) {
         for substitution in substitutions {
@@ -87,11 +147,29 @@ impl Warnings {
     /// Notes another reply's warnings, in their order.
     pub(crate) fn extend(&mut self, other: &Warnings) {
         for warning in &other.0 {
-            if warning.sheets.is_empty() {
-                self.look_alike(&warning.font, &warning.look_alike, None);
-            }
-            for sheet in &warning.sheets {
-                self.look_alike(&warning.font, &warning.look_alike, Some(sheet));
+            match warning.code {
+                WarningCode::FontLookAlike => {
+                    if warning.sheets.is_empty() {
+                        self.look_alike(&warning.font, &warning.look_alike, None);
+                    }
+                    for sheet in &warning.sheets {
+                        self.look_alike(&warning.font, &warning.look_alike, Some(sheet));
+                    }
+                }
+                WarningCode::UnresolvedXref => {
+                    let xref = UnresolvedXref {
+                        name: warning.xref.clone().unwrap_or_default(),
+                        path: warning.path.clone().unwrap_or_default(),
+                        kind: crate::model::XrefKind::Attach,
+                        reason: warning.reason.clone().unwrap_or_default(),
+                    };
+                    if warning.sheets.is_empty() {
+                        self.unresolved_xref(&xref, None);
+                    }
+                    for sheet in &warning.sheets {
+                        self.unresolved_xref(&xref, Some(sheet));
+                    }
+                }
             }
         }
     }
@@ -142,13 +220,17 @@ impl Warns for SetReport {
 
 impl Warns for RenderReport {
     fn warn(&self, warnings: &mut Warnings) {
-        warnings.sheet(&own_sheet(&self.source), &self.font_substitutions);
+        let sheet = own_sheet(&self.source);
+        warnings.sheet(&sheet, &self.font_substitutions);
+        warnings.unresolved_xrefs(&sheet, &self.unresolved_xrefs);
     }
 }
 
 impl Warns for PlotReport {
     fn warn(&self, warnings: &mut Warnings) {
-        warnings.sheet(&own_sheet(&self.source), &self.font_substitutions);
+        let sheet = own_sheet(&self.source);
+        warnings.sheet(&sheet, &self.font_substitutions);
+        warnings.unresolved_xrefs(&sheet, &self.unresolved_xrefs);
     }
 }
 
@@ -157,6 +239,7 @@ impl Warns for PlotSetReport {
         for sheet in &self.sheets {
             if let Some(result) = &sheet.result {
                 warnings.sheet(&sheet.sheet, &result.font_substitutions);
+                warnings.unresolved_xrefs(&sheet.sheet, &result.unresolved_xrefs);
             }
         }
     }
@@ -165,6 +248,21 @@ impl Warns for PlotSetReport {
 impl Warns for DisplayListReport {
     fn warn(&self, warnings: &mut Warnings) {
         warnings.sheet(&self.sheet, &self.font_substitutions);
+        warnings.unresolved_xrefs(&self.sheet, &self.unresolved_xrefs);
+    }
+}
+
+impl Warns for ReadReport {
+    fn warn(&self, warnings: &mut Warnings) {
+        warnings.unresolved_xrefs(&self.sheet, &self.unresolved_xrefs);
+    }
+}
+
+impl Warns for QueryReport {
+    fn warn(&self, warnings: &mut Warnings) {
+        for sheet in &self.sheets {
+            warnings.unresolved_xrefs(sheet, &self.unresolved_xrefs);
+        }
     }
 }
 

@@ -102,6 +102,7 @@ mod stamp;
 mod text;
 mod units;
 mod warning;
+mod xref;
 
 use std::path::Path;
 
@@ -196,6 +197,7 @@ pub use model::{
     REVCLOUD_APPLICATION, REVCLOUD_BULGE, REVCLOUD_CALLIGRAPHY_WIDTH_FACTOR,
 };
 pub use model::{RowKind, RowStyle, Table, TableCell, TableStyle, STANDARD_TABLE_STYLE};
+pub use model::{UnresolvedXref, Xref, XrefBindMode, XrefKind};
 pub use model::{Wipeout, WipeoutFrame};
 pub use original::{
     read_original, ReadReport, ReadRequest, HANDLE_ID, MIRROR_EXTENSION, MIRROR_MARK,

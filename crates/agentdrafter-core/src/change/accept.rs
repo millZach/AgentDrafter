@@ -504,11 +504,16 @@ impl StampRevision {
 /// other record, the set is the nearest folder above it that holds a set's
 /// settings.
 pub(crate) fn stamp_revision(files: &[(SourceKind, &Path, &[u8])]) -> StampRevision {
-    match files {
+    let own: Vec<(SourceKind, &Path, &[u8])> = files
+        .iter()
+        .copied()
+        .filter(|(kind, ..)| *kind != SourceKind::Xref)
+        .collect();
+    match own.as_slice() {
         [(SourceKind::Dwg | SourceKind::Dxf, dwg, bytes), rest @ ..] => {
             dwg_revision(dwg, bytes, rest)
         }
-        _ => files_revision(files),
+        _ => files_revision(&own),
     }
 }
 

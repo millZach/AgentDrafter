@@ -96,7 +96,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, custom_properties_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, objects_key, paper_key, page_setup_key, layout_key, layouts_key] =
+    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, custom_properties_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, xrefs_key, objects_key, paper_key, page_setup_key, layout_key, layouts_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -132,6 +132,7 @@ pub fn sheet_description_schema() -> Value {
             table_styles_key: table_schema::table_styles_property(),
             mleader_styles_key: leader_schema::mleader_styles_property(),
             dimension_styles_key: dimension_schema::dimension_styles_property(),
+            xrefs_key: super::xref::xrefs_property(),
             objects_key: {
                 "description": "The objects on the sheet, in drawing order. Each is a mapping \
                                 with one key, its type.",
@@ -203,6 +204,7 @@ fn sheet_defs() -> Map<String, Value> {
         .collect::<Vec<_>>()
         .join(", ");
     defs.insert("object_space".into(), super::layout::space_property());
+    defs.insert("xref".into(), super::xref::xref_def());
     defs.insert(
         "object_copy_of".into(),
         optional_text(json!({
@@ -1238,6 +1240,10 @@ mod tests {
         assert_eq!(
             keys(&defs["page_setup"]["properties"]),
             sorted(&crate::description::page_setup::PAGE_SETUP_KEYS)
+        );
+        assert_eq!(
+            keys(&defs["xref"]["properties"]),
+            sorted(&crate::description::xref::XREF_KEYS)
         );
         assert_eq!(
             keys(&defs["text_style"]["properties"]),

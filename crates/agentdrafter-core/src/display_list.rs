@@ -412,6 +412,10 @@ pub struct DisplayListReport {
     /// The hatches not drawn in full. Empty when every hatch was drawn
     /// whole.
     pub hatches_cut_short: Vec<HatchCutShort>,
+    /// External references that could not be found or loaded. Left out when
+    /// every reference resolved cleanly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
     /// The journal's entry the set is drawn as it was just after, when it
     /// was asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -615,6 +619,7 @@ pub fn display_list_with(
         not_drawn: drawn.not_drawn,
         font_substitutions: fonts.substitutions(),
         hatches_cut_short: list.hatches_cut_short.clone(),
+        unresolved_xrefs: drawn.unresolved_xrefs,
         entry: request.entry,
         objects: drawn.objects.clone(),
         snaps,
@@ -890,6 +895,7 @@ struct Drawn {
     units: Option<Unit>,
     objects_not_drawn: usize,
     not_drawn: Vec<crate::model::RecordsOfKind>,
+    unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
     objects: Vec<SheetObject>,
     /// A drawing set's sheet's template and the sheets built from it.
     template: Option<TemplateReach>,
@@ -1059,12 +1065,15 @@ fn read(
         };
         // With values, the sheet and where each of its values is written,
         // from one read of its template.
-        let (record, sources) = if request.values {
+        let (mut record, sources) = if request.values {
             let (record, sources) = set.sheet_with_sources(row)?;
             (record, Some(sources))
         } else {
             (set.sheet(row)?, None)
         };
+        let host = record.file.clone();
+        let unresolved_xrefs =
+            crate::xref::resolve_sheet_xrefs(&mut record.sheet, &host).unresolved;
         let ids: Vec<(String, Option<String>)> = (0..record.objects.len())
             .map(|i| (record.id(i), record.objects[i].name.clone()))
             .collect();
@@ -1109,6 +1118,7 @@ fn read(
             sheet: record.sheet,
             objects_not_drawn: 0,
             not_drawn: Vec::new(),
+            unresolved_xrefs,
             template,
         });
     }
@@ -1149,6 +1159,7 @@ fn read(
         units: record.units,
         objects_not_drawn: record.objects_not_drawn,
         not_drawn: record.not_drawn,
+        unresolved_xrefs: record.unresolved_xrefs,
         template: None,
     })
 }
