@@ -57,7 +57,7 @@
 mod clip;
 pub(crate) mod color;
 pub(crate) mod curves;
-mod hatch;
+pub(crate) mod hatch;
 mod layout;
 mod linetype;
 mod pick;

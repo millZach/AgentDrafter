@@ -1500,6 +1500,22 @@ impl RevisionSession {
                     record.deleted.push(handle_text(v.handle));
                 }
             }
+        } else if let EntityType::Leader(leader) = &removed {
+            if let Some(ann_handle) = super::leader::annotation_of(&self.drawing, leader) {
+                if let Some(ann_removed) = self.drawing.remove_entity(ann_handle) {
+                    let ann_owner = ann_removed.common().owner_handle;
+                    if !ann_owner.is_null() {
+                        self.expected_spaces_mutated.insert(ann_owner.value());
+                    }
+                    for br in self.drawing.block_records.iter_mut() {
+                        if ann_owner.is_null() || br.handle == ann_owner {
+                            br.entity_handles.retain(|h| *h != ann_handle);
+                        }
+                    }
+                    self.expected_deleted.insert(ann_handle.value());
+                    record.deleted.push(handle_text(ann_handle));
+                }
+            }
         }
         Ok(record)
     }

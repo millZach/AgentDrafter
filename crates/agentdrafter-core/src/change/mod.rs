@@ -35,6 +35,7 @@ mod apply;
 pub(crate) mod array;
 pub(crate) mod break_join;
 mod commit;
+pub(crate) mod explode;
 pub(crate) mod fillet_chamfer;
 mod from_dimension;
 mod guides;
@@ -263,9 +264,13 @@ pub struct OperationOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split_id: Option<String>,
     /// The IDs of objects removed by the operation, such as the pieces
-    /// absorbed into `targets[0]` by `join`.
+    /// absorbed into `targets[0]` by `join`, or the compound object(s)
+    /// replaced by `explode`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub deleted: Vec<String>,
+    /// The IDs of newly created objects produced by `explode`, in drawing order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub created: Vec<String>,
     /// Why it did not land.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,

@@ -25,6 +25,7 @@ use serde_json::Value;
 use super::array;
 use super::break_join::{compute_break, compute_join, BreakSpec};
 use super::commit::Replacement;
+use super::explode::compute_explode;
 use super::fillet_chamfer::{
     compute_chamfer_polyline, compute_chamfer_two, compute_fillet_polyline, compute_fillet_two,
     ChamferSpec,
@@ -505,8 +506,10 @@ struct Done {
     /// The ID of the second object created when `trim` or `break` splits an
     /// object in two.
     split_id: Option<String>,
-    /// Objects deleted by `join`, each with the sheets it sits on.
+    /// Objects deleted by `join` or `explode`, each with the sheets it sits on.
     deleted: Vec<(String, Vec<usize>)>,
+    /// Objects created by `explode`, each with the sheets it sits on.
+    created: Vec<(String, Vec<usize>)>,
     message: String,
 }
 
@@ -537,7 +540,7 @@ fn objects_changed(
             continue;
         };
         let how = match (op.spec.kind, &op.body) {
-            (Kind::Delete, _) => HowChanged::Deleted,
+            (Kind::Delete | Kind::Explode, _) => HowChanged::Deleted,
             (Kind::Add(..) | Kind::Offset, _) => HowChanged::Added,
             (
                 Kind::Fillet,
@@ -612,6 +615,17 @@ fn objects_changed(
                 add(
                     format!("{}{ID_SEPARATOR}{local}", files.name(k)),
                     HowChanged::Deleted,
+                );
+            }
+        }
+        for (new_id, on) in &d.created {
+            let local = new_id
+                .split_once(ID_SEPARATOR)
+                .map_or(new_id.as_str(), |(_, l)| l);
+            for &k in on {
+                add(
+                    format!("{}{ID_SEPARATOR}{local}", files.name(k)),
+                    HowChanged::Added,
                 );
             }
         }
@@ -1002,6 +1016,11 @@ pub(super) fn apply(
                     .filter(|_| included[i])
                     .map(|d| d.deleted.iter().map(|(id, _)| id.clone()).collect())
                     .unwrap_or_default(),
+                created: d
+                    .as_ref()
+                    .filter(|_| included[i])
+                    .map(|d| d.created.iter().map(|(id, _)| id.clone()).collect())
+                    .unwrap_or_default(),
                 attributes_removed: d.map(|d| d.attributes_removed).unwrap_or_default(),
                 error: if included[i] {
                     None
@@ -1376,7 +1395,7 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 }
                 continue;
             }
-            Body::Join { targets, .. } => {
+            Body::Join { targets, .. } | Body::Explode { targets, .. } => {
                 for (t, key) in targets {
                     let (sheet, field) = match t {
                         Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
@@ -1596,6 +1615,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 attributes_set: Vec::new(),
                 split_id: None,
                 deleted: Vec::new(),
+                created: Vec::new(),
                 message: format!(
                     "adds {} {object}, `{id}`, {place}{}",
                     article(object),
@@ -1766,6 +1786,10 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         );
     }
 
+    if let Body::Explode { targets, id_prefix } = &op.body {
+        return apply_explode(at, op, targets, id_prefix.as_deref(), settings);
+    }
+
     if let Body::Table {
         op: table_op,
         table,
@@ -1856,6 +1880,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Break { .. }
         | Body::Join { .. }
         | Body::Stretch { .. }
+        | Body::Explode { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2076,6 +2101,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         attributes_set: Vec::new(),
         split_id: None,
         deleted: Vec::new(),
+        created: Vec::new(),
         snapped: Vec::new(),
         message: String::new(),
     };
@@ -2281,6 +2307,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Break { .. }
         | Body::Join { .. }
         | Body::Stretch { .. }
+        | Body::Explode { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -3113,6 +3140,7 @@ fn apply_table(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             snapped: Vec::new(),
             message: format!("{message}, so on {}", every_sheet(&files.names(&sheets))),
         }),
@@ -3311,6 +3339,7 @@ fn apply_block(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             snapped: Vec::new(),
             message: format!("{what}{removed}{on}"),
         }),
@@ -3488,6 +3517,7 @@ fn apply_import(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             snapped: Vec::new(),
             message: format!(
                 "imports from `{}` into the block library `{written}`: {}{left_out}{on}",
@@ -4208,6 +4238,7 @@ fn apply_dimension_from(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             message: format!(
                 "adds {what}, `{added}`, from `{}`, {place}{}",
                 found.id,
@@ -4574,6 +4605,7 @@ fn apply_transform(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             message,
         }),
         sheets: reach,
@@ -5127,6 +5159,7 @@ fn apply_copy(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             message,
         }),
         sheets: reach,
@@ -5421,6 +5454,7 @@ fn apply_draw_order(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             snapped: Vec::new(),
             message: format!(
                 "moves {} {} in draw order",
@@ -5528,6 +5562,7 @@ fn apply_text_to_front(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             snapped: Vec::new(),
             message: format!(
                 "brings {moved_count} {} object{} to the front {place}",
@@ -6233,6 +6268,7 @@ fn apply_replace_text(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             snapped: Vec::new(),
             message,
         }),
@@ -6544,6 +6580,7 @@ fn apply_set_attributes(
             attributes_set,
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             snapped: Vec::new(),
             message,
         }),
@@ -6753,6 +6790,7 @@ fn apply_offset(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             snapped,
             message: format!(
                 "offsets `{}` by {dist_str} ({}) to {kind} `{full_id}`{erase_note}{template_note}",
@@ -7028,6 +7066,7 @@ fn apply_trim(
             attributes_set: Vec::new(),
             split_id: split_full_id,
             deleted: Vec::new(),
+            created: Vec::new(),
             snapped: Vec::new(),
             message,
         }),
@@ -7154,6 +7193,7 @@ fn apply_extend(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             snapped: Vec::new(),
             message: format!("extends `{}` ({} end)", found.id, end.name()),
         }),
@@ -7311,6 +7351,7 @@ fn apply_corner(at: &mut Attempt, op: &Operation, mode: &CornerMode, kind: Corne
                     attributes_set: Vec::new(),
                     split_id: None,
                     deleted: Vec::new(),
+                    created: Vec::new(),
                     snapped: Vec::new(),
                     message: format!(
                         "{} {} corner{} of `{}`{skipped_note}",
@@ -7625,6 +7666,7 @@ fn apply_corner(at: &mut Attempt, op: &Operation, mode: &CornerMode, kind: Corne
                     attributes_set: Vec::new(),
                     split_id: None,
                     deleted: Vec::new(),
+                    created: Vec::new(),
                     snapped: Vec::new(),
                     message,
                 }),
@@ -7836,6 +7878,7 @@ fn apply_break(
             attributes_set: Vec::new(),
             split_id: split_full_id,
             deleted: Vec::new(),
+            created: Vec::new(),
             snapped,
             message,
         }),
@@ -8086,6 +8129,7 @@ fn apply_join(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: deleted_in_order,
+            created: Vec::new(),
             snapped: Vec::new(),
             message,
         }),
@@ -8427,10 +8471,429 @@ fn apply_stretch(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             snapped,
             message,
         }),
         sheets: all_reach.into_iter().collect(),
+        refuse: false,
+    }
+}
+
+/// Ensures any layer, linetype, or text style brought into `sheet` from the
+/// block library and referenced by `pieces` is defined in the template so
+/// exploding the last insert of a block never leaves an undefined table entry.
+fn ensure_template_tables_for_exploded(
+    at: &mut Attempt,
+    template_idx: usize,
+    sheet: &crate::model::Sheet,
+    pieces: &[Object],
+) -> Result<(), Error> {
+    let mut needed_layers: Vec<String> = Vec::new();
+    let mut needed_linetypes: Vec<String> = Vec::new();
+    let mut needed_styles: Vec<String> = Vec::new();
+
+    for obj in pieces {
+        let layer = obj.layer();
+        if layer != crate::model::LAYER_ZERO && !needed_layers.iter().any(|l| l == layer) {
+            needed_layers.push(layer.to_owned());
+        }
+        if let crate::model::ObjectLinetype::Named(lt) = &obj.properties().linetype {
+            if lt != crate::model::CONTINUOUS && !needed_linetypes.iter().any(|t| t == lt) {
+                needed_linetypes.push(lt.clone());
+            }
+        }
+        match obj {
+            Object::Text(t)
+                if t.style != crate::text::STANDARD
+                    && !needed_styles.iter().any(|s| s == &t.style) =>
+            {
+                needed_styles.push(t.style.clone());
+            }
+            Object::MText(t)
+                if t.style != crate::text::STANDARD
+                    && !needed_styles.iter().any(|s| s == &t.style) =>
+            {
+                needed_styles.push(t.style.clone());
+            }
+            _ => {}
+        }
+    }
+    for lname in &needed_layers {
+        if let Some(layer) = sheet.layers.iter().find(|l| l.name == *lname) {
+            if layer.linetype != crate::model::CONTINUOUS
+                && !needed_linetypes.iter().any(|t| t == &layer.linetype)
+            {
+                needed_linetypes.push(layer.linetype.clone());
+            }
+        }
+    }
+
+    let tmpl = at.template(template_idx)?;
+    let existing_lt: BTreeSet<String> = tmpl
+        .table_names(Table::Linetype.key())
+        .into_iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    for lt_name in &needed_linetypes {
+        if existing_lt.contains(&lt_name.to_lowercase()) {
+            continue;
+        }
+        if let Some(lt) = sheet.linetypes.iter().find(|t| t.name == *lt_name) {
+            let mut keys = serde_json::Map::new();
+            if !lt.description.is_empty() {
+                keys.insert(
+                    "description".to_owned(),
+                    Value::String(lt.description.clone()),
+                );
+            }
+            keys.insert("pattern".to_owned(), serde_json::json!(lt.pattern));
+            tmpl.table_add(
+                Table::Linetype.key(),
+                Table::Linetype.entry_keys(),
+                &lt.name,
+                &keys,
+            )?;
+        }
+    }
+    let existing_layers: BTreeSet<String> = tmpl
+        .table_names(Table::Layer.key())
+        .into_iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    for l_name in &needed_layers {
+        if existing_layers.contains(&l_name.to_lowercase()) {
+            continue;
+        }
+        if let Some(layer) = sheet.layers.iter().find(|l| l.name == *l_name) {
+            let mut keys = serde_json::Map::new();
+            keys.insert("color".to_owned(), serde_json::json!(layer.color));
+            if layer.linetype != crate::model::CONTINUOUS {
+                keys.insert("linetype".to_owned(), Value::String(layer.linetype.clone()));
+            }
+            if let Some(lw) = layer.lineweight {
+                keys.insert("lineweight".to_owned(), serde_json::json!(lw));
+            }
+            if !layer.on {
+                keys.insert("on".to_owned(), Value::Bool(false));
+            }
+            if layer.frozen {
+                keys.insert("frozen".to_owned(), Value::Bool(true));
+            }
+            if layer.locked {
+                keys.insert("locked".to_owned(), Value::Bool(true));
+            }
+            if !layer.plot {
+                keys.insert("plot".to_owned(), Value::Bool(false));
+            }
+            if !layer.description.is_empty() {
+                keys.insert(
+                    "description".to_owned(),
+                    Value::String(layer.description.clone()),
+                );
+            }
+            tmpl.table_add(
+                Table::Layer.key(),
+                Table::Layer.entry_keys(),
+                &layer.name,
+                &keys,
+            )?;
+        }
+    }
+    let existing_styles: BTreeSet<String> = tmpl
+        .table_names(Table::TextStyle.key())
+        .into_iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    for s_name in &needed_styles {
+        if existing_styles.contains(&s_name.to_lowercase()) {
+            continue;
+        }
+        if let Some(style) = sheet.text_styles.iter().find(|s| s.name == *s_name) {
+            let mut keys = serde_json::Map::new();
+            keys.insert("font".to_owned(), Value::String(style.font.clone()));
+            if (style.width_factor - 1.0).abs() > 1e-12 {
+                keys.insert(
+                    "width_factor".to_owned(),
+                    serde_json::json!(style.width_factor),
+                );
+            }
+            tmpl.table_add(
+                Table::TextStyle.key(),
+                Table::TextStyle.entry_keys(),
+                &style.name,
+                &keys,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Explodes one or more compound objects into the simpler objects that draw
+/// them: AutoCAD's `EXPLODE` (`X`).
+fn apply_explode(
+    at: &mut Attempt,
+    op: &Operation,
+    targets: &[(Target, String)],
+    id_prefix: Option<&str>,
+    settings: &Settings,
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+
+    let mut found: Vec<(Found, &str)> = Vec::with_capacity(targets.len());
+    let mut all_reach: BTreeSet<usize> = BTreeSet::new();
+    for (t, key) in targets {
+        let f = match resolve(at, t, op) {
+            Ok(f) => f,
+            Err(applied) => return keyed(*applied, op, key),
+        };
+        let reach_f = at.reach(f.file, f.row);
+        all_reach.extend(reach_f.iter().copied());
+        if let Some(refusal) = many_paths(files, f.file, op, key) {
+            return refusal;
+        }
+        if let Some(first) = found.first() {
+            if f.row != first.0.row {
+                return fail(
+                    all_reach.into_iter().collect(),
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{}` is on sheet `{}`, not `{}` — explode objects on one sheet at a \
+                             time",
+                            f.id,
+                            files.name(f.row),
+                            files.name(first.0.row)
+                        ),
+                        key,
+                    ),
+                );
+            }
+        }
+        if found
+            .iter()
+            .any(|(prev, _)| prev.file == f.file && prev.list == f.list && prev.index == f.index)
+        {
+            return fail(
+                all_reach.into_iter().collect(),
+                op_err(
+                    ErrorCode::BadValue,
+                    format!("`{}` is listed more than once to explode", f.id),
+                    key,
+                ),
+            );
+        }
+        if let Some(layer) = batch_object_locked_layer(at, files, f.row, f.file, f.list, f.index) {
+            return fail(
+                all_reach.into_iter().collect(),
+                op_err(
+                    ErrorCode::Locked,
+                    format!(
+                        "`{}` is on layer `{layer}`, which is locked; unlock it first with \
+                         change_layer, set: {{\"locked\": false}}",
+                        f.id
+                    ),
+                    key,
+                ),
+            );
+        }
+        found.push((f, key.as_str()));
+    }
+
+    let reach: Vec<usize> = all_reach.into_iter().collect();
+    let row_k = found[0].0.row;
+    let sheet_name = files.name(row_k).to_owned();
+    let rows = match at.rows_now() {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+    let record = match sheet_record(at, &rows, row_k, &mut Vec::new()) {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+    let fonts = crate::text::placement::SheetFonts::find(&record.sheet, settings);
+
+    struct ExplodedTarget {
+        file: FileRef,
+        list: ObjectList,
+        list_idx: usize,
+        full_id: String,
+        local_id: String,
+        space: Option<String>,
+        reach: Vec<usize>,
+        pieces: Vec<Object>,
+    }
+
+    let mut plan: Vec<ExplodedTarget> = Vec::with_capacity(found.len());
+    for (f, key) in &found {
+        let local =
+            f.id.split_once(ID_SEPARATOR)
+                .map_or(f.id.as_str(), |(_, l)| l)
+                .to_owned();
+        let in_row = matches!(f.file, FileRef::Rows(_));
+        let Some(obj_idx) = record
+            .objects
+            .iter()
+            .position(|o| o.in_row == in_row && o.id.eq_ignore_ascii_case(&local))
+        else {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::UnknownName,
+                    format!("could not read `{}` to explode it", f.id),
+                    key,
+                ),
+            );
+        };
+        let obj = &record.sheet.objects[obj_idx];
+        let pieces = match compute_explode(obj, &record.sheet, &fonts) {
+            Ok(p) => p,
+            Err(e) => return fail(reach, op_err(e.code, e.message, key)),
+        };
+        let space = crate::query::space_of(&record.sheet, obj_idx);
+        let target_reach = at.reach(f.file, f.row);
+        plan.push(ExplodedTarget {
+            file: f.file,
+            list: f.list,
+            list_idx: f.index,
+            full_id: f.id.clone(),
+            local_id: local,
+            space,
+            reach: target_reach,
+            pieces,
+        });
+    }
+
+    // Collect every existing local ID on any reached sheet so newly created IDs never collide.
+    let mut taken: BTreeSet<String> = BTreeSet::new();
+    for &k in &reach {
+        match at.objects(k) {
+            Ok(objects) => {
+                taken.extend(objects.into_iter().map(|o| o.3.id.to_lowercase()));
+            }
+            Err(e) => return fail(reach, e),
+        }
+    }
+
+    // Ensure any block-library layers, linetypes, or text styles referenced by exploded
+    // objects exist in the template before we remove the source insert.
+    let template_idx = files.template_of[row_k];
+    let all_pieces: Vec<Object> = plan.iter().flat_map(|p| p.pieces.iter().cloned()).collect();
+    if let Err(e) =
+        ensure_template_tables_for_exploded(at, template_idx, &record.sheet, &all_pieces)
+    {
+        return fail(reach, op_err(e.code, e.message, "target"));
+    }
+
+    let first_record = match plan[0].file {
+        FileRef::Rows(f) => files.rows_files[f].path.clone(),
+        FileRef::Template(t) => files.templates[t].path.clone(),
+    };
+
+    let mut created: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut global_seq = 1usize;
+
+    // Add all exploded objects first so indices of targets to delete remain stable.
+    for item in &plan {
+        let rec = match at.file(item.file) {
+            Ok(r) => r,
+            Err(e) => return fail(reach, e),
+        };
+        let mut local_seq = 1usize;
+        for piece in &item.pieces {
+            let new_local = match id_prefix {
+                Some(prefix) => loop {
+                    let cand = format!("{prefix}-{global_seq}");
+                    global_seq += 1;
+                    if taken.insert(cand.to_lowercase()) {
+                        break cand;
+                    }
+                },
+                None => loop {
+                    let cand = format!("{}-{local_seq}", item.local_id);
+                    local_seq += 1;
+                    if taken.insert(cand.to_lowercase()) {
+                        break cand;
+                    }
+                },
+            };
+            let (kind, keys) =
+                object_to_record_keys(piece, &new_local, None, item.space.as_deref());
+            if let Err(e) = rec.add(item.list, kind, &keys, op.index) {
+                return fail(reach, op_err(e.code, e.message, "target"));
+            }
+            let full_new = format!("{sheet_name}{ID_SEPARATOR}{new_local}");
+            created.push((full_new, item.reach.clone()));
+        }
+    }
+
+    // Delete the exploded source objects in descending list-index order.
+    let deleted_in_order: Vec<(String, Vec<usize>)> = plan
+        .iter()
+        .map(|p| (p.full_id.clone(), p.reach.clone()))
+        .collect();
+    let mut to_delete: Vec<(FileRef, ObjectList, usize, Vec<usize>)> = plan
+        .iter()
+        .map(|p| (p.file, p.list, p.list_idx, p.reach.clone()))
+        .collect();
+    to_delete.sort_by_key(|a| std::cmp::Reverse(a.2));
+
+    let mut ids_written: Vec<String> = Vec::new();
+    for (file, list, idx, on) in to_delete {
+        let rec = match at.file(file) {
+            Ok(r) => r,
+            Err(e) => return fail(reach, e),
+        };
+        let kept = rec.delete(list, idx, op.index);
+        for place in kept {
+            for &s in &on {
+                ids_written.push(format!("{}/{place}", files.name(s)));
+            }
+        }
+    }
+
+    let first_deleted_id = (plan.len() == 1).then(|| plan[0].full_id.clone());
+    let src_list: Vec<&str> = plan.iter().map(|p| p.full_id.as_str()).collect();
+    let message = format!(
+        "explodes {} into {} object{}",
+        quoted_list(&src_list),
+        created.len(),
+        if created.len() == 1 { "" } else { "s" }
+    );
+
+    Applied {
+        outcome: Ok(Done {
+            record: first_record,
+            id: first_deleted_id,
+            before: None,
+            after: None,
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written,
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
+            split_id: None,
+            deleted: deleted_in_order,
+            created,
+            snapped: Vec::new(),
+            message,
+        }),
+        sheets: reach,
         refuse: false,
     }
 }
@@ -8737,6 +9200,7 @@ fn apply_revision_cloud_around(
             attributes_set: Vec::new(),
             split_id: None,
             deleted: Vec::new(),
+            created: Vec::new(),
             message: format!(
                 "adds a revision_cloud, `{id}`, around {}, {place}",
                 quoted_list(&around_ids)
@@ -9649,7 +10113,8 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         Body::Copy { targets, .. }
         | Body::Transform { targets, .. }
         | Body::DrawOrder { targets, .. }
-        | Body::Join { targets, .. } => targets.iter().any(|(t, _)| reaches(t)),
+        | Body::Join { targets, .. }
+        | Body::Explode { targets, .. } => targets.iter().any(|(t, _)| reaches(t)),
         Body::Block { library, .. } => {
             files.library(library.as_deref()).ok() == files.library_of[files.template_of[k]]
         }
@@ -9804,6 +10269,7 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
         Body::Break { .. } => "at".to_owned(),
         Body::Join { .. } => "targets".to_owned(),
         Body::Stretch { .. } => "box".to_owned(),
+        Body::Explode { .. } => "target".to_owned(),
     }
 }
 
@@ -10000,7 +10466,8 @@ fn target_words(op: &Operation) -> String {
         Body::Copy { targets, .. }
         | Body::Transform { targets, .. }
         | Body::DrawOrder { targets, .. }
-        | Body::Join { targets, .. } => match targets.as_slice() {
+        | Body::Join { targets, .. }
+        | Body::Explode { targets, .. } => match targets.as_slice() {
             [(one, _)] => one.words(),
             [(first, _), rest @ ..] => format!("{} and {} more", first.words(), rest.len()),
             [] => String::new(),

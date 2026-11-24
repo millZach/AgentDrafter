@@ -388,6 +388,10 @@ _Avoid_: merge (alone), weld, group (a group is AutoCAD's GROUP object)
 Moving the endpoints, vertices and rigid objects lying inside a selection box by a displacement while leaving vertices outside the box fixed, as AutoCAD's STRETCH (`S`) does, so connected wires and enclosures follow; the one operation that selects by area, listing every object it touched under `transformed`.
 _Avoid_: resize (alone), pull, drag
 
+**Explode**:
+Turning a compound object — an insert (into its evaluated block's objects and its visible attributes as single-line text), a polyline, donut or revision cloud (into lines and arcs), or a hatch, dimension, multileader, leader or table — into the simpler objects that draw it, as AutoCAD's EXPLODE (`X`) does; the source object is deleted (`deleted`) and each new object gets its own ID, listed under `created`.
+_Avoid_: ungroup, unpack, flatten (alone)
+
 **Change set**:
 Operations sent together as one request. Each sheet takes its part of a change set fully or not at all.
 _Avoid_: batch, transaction, commit

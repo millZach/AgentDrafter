@@ -97,6 +97,10 @@ pub(crate) enum Kind {
     /// Moves vertices and ends of objects lying inside a box while leaving the
     /// rest where they are: AutoCAD's STRETCH.
     Stretch,
+    /// Turns a compound object (insert, polyline, donut, revision cloud,
+    /// hatch, dimension, multileader, leader or table) into the simpler objects
+    /// that draw it: AutoCAD's EXPLODE.
+    Explode,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -273,6 +277,7 @@ impl Spec {
             Kind::Break => &["BR", "BREAKATPOINT"],
             Kind::Join => &["J"],
             Kind::Stretch => &["S"],
+            Kind::Explode => &["X"],
             _ => &[],
         }
     }
@@ -324,7 +329,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 79] = [
+pub(crate) const SPECS: [Spec; 80] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -488,6 +493,11 @@ pub(crate) const SPECS: [Spec; 79] = [
         name: "stretch",
         alias: "STRETCH",
         kind: Kind::Stretch,
+    },
+    Spec {
+        name: "explode",
+        alias: "EXPLODE",
+        kind: Kind::Explode,
     },
     grid("set_cell", "TABLEDIT", GridOp::SetCell),
     grid("add_row", "", GridOp::Add(Axis::Row)),
@@ -1114,6 +1124,13 @@ fn does(spec: &Spec) -> String {
                           `box` fixed so connected wires and enclosures follow. Skips objects on \
                           locked layers (unless named under optional `targets`) and lists every \
                           touched object ID under `transformed`. AutoCAD's STRETCH (S)."
+            .to_owned(),
+        Kind::Explode => "Explodes one or more compound objects (`target` or `targets`) — an \
+                          insert into its evaluated block's objects and visible attributes as \
+                          text, a polyline, donut or revision cloud into lines and arcs, and a \
+                          hatch, dimension, multileader, leader or table into the objects that \
+                          draw it. Removes the source object(s) (`deleted`), assigns each new \
+                          object its own ID, and lists them under `created`. AutoCAD's EXPLODE (X)."
             .to_owned(),
     }
 }
@@ -2671,6 +2688,26 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                 },
             })
         }
+        Kind::Explode => {
+            let mut schema = json!({
+                "type": "object",
+                "required": [],
+                "additionalProperties": false,
+                "allOf": [copied_objects_rule()],
+                "properties": {
+                    "id_prefix": {
+                        "description": "Optional prefix for the newly created objects' local IDs \
+                                        (`<prefix>-1`, `<prefix>-2`, ...). When omitted, drawing \
+                                        sets derive IDs from the exploded object's ID and original \
+                                        DWGs use fresh handle IDs.",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                },
+            });
+            copied_objects_properties(&mut schema);
+            schema
+        }
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
@@ -3983,6 +4020,12 @@ pub(crate) enum Body {
         targets: Option<Vec<(Target, String)>>,
         corners: [Box<OpPoint>; 2],
         motion: Motion,
+    },
+    /// Explodes compound objects into the simpler objects that draw them:
+    /// AutoCAD's EXPLODE.
+    Explode {
+        targets: Vec<(Target, String)>,
+        id_prefix: Option<String>,
     },
     /// A table operation: on the entry `name` of the template `to` names,
     /// with the keys it adds or sets, and the new name a rename gives.
@@ -6302,6 +6345,101 @@ fn operation(
                 corners,
                 motion,
             }
+        }
+        Kind::Explode => {
+            keys(&["target", "targets", "id_prefix"])?;
+            let targets = match (map.get("target"), map.get("targets")) {
+                (Some(_), Some(_)) => {
+                    return Err(fail(
+                        ErrorCode::Usage,
+                        "give `target` or `targets`, not both".to_owned(),
+                        "targets",
+                    ));
+                }
+                (None, None) => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `target` (or `targets`), the object(s) to explode".to_owned(),
+                        "target",
+                    ));
+                }
+                (Some(one), None) => {
+                    let mut t = read_target(one).map_err(|(code, msg, sub)| {
+                        let f = if sub.is_empty() {
+                            "target".to_owned()
+                        } else {
+                            format!("target.{sub}")
+                        };
+                        fail(code, msg, &f)
+                    })?;
+                    if let Some(sheet) = default_sheet {
+                        if let Target::Name {
+                            sheet: slot @ None, ..
+                        } = &mut t
+                        {
+                            *slot = Some(sheet.to_owned());
+                        }
+                    }
+                    vec![(t, "target".to_owned())]
+                }
+                (None, Some(Value::Array(items))) if !items.is_empty() => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for (i, item) in items.iter().enumerate() {
+                        let field = format!("targets[{i}]");
+                        let mut t = read_target(item).map_err(|(code, msg, sub)| {
+                            let f = if sub.is_empty() {
+                                field.clone()
+                            } else {
+                                format!("{field}.{sub}")
+                            };
+                            fail(code, msg, &f)
+                        })?;
+                        if let Some(sheet) = default_sheet {
+                            if let Target::Name {
+                                sheet: slot @ None, ..
+                            } = &mut t
+                            {
+                                *slot = Some(sheet.to_owned());
+                            }
+                        }
+                        out.push((t, field));
+                    }
+                    out
+                }
+                (None, Some(Value::Array(_))) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`targets` must name at least one object to explode".to_owned(),
+                        "targets",
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `targets`, a list of object targets".to_owned(),
+                        "targets",
+                    ));
+                }
+            };
+            let id_prefix = match map.get("id_prefix") {
+                None => None,
+                Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`id_prefix` cannot be empty".to_owned(),
+                        "id_prefix",
+                    ));
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `id_prefix`, a non-empty string".to_owned(),
+                        "id_prefix",
+                    ));
+                }
+            };
+            Body::Explode { targets, id_prefix }
         }
         Kind::Grid(grid_op) => {
             let allowed: Vec<&str> = match grid_op {

@@ -25,7 +25,7 @@ pub(crate) const MOST_LINES: usize = 1_000_000;
 pub(crate) const MOST_DASHES: usize = 2_000_000;
 
 /// What a hatch draws.
-pub(super) struct Drawn {
+pub(crate) struct Drawn {
     /// A fill, or one stroke of all its pattern lines.
     pub shapes: Vec<Shape>,
     /// The points of its boundary, curves as chords.
@@ -38,7 +38,7 @@ pub(super) struct Drawn {
 }
 
 /// What a hatch draws, with at most `most_dashes` dashes.
-pub(super) fn draw(hatch: &Hatch, lineweight: f64, tolerance: f64, most_dashes: usize) -> Drawn {
+pub(crate) fn draw(hatch: &Hatch, lineweight: f64, tolerance: f64, most_dashes: usize) -> Drawn {
     let loops: Vec<Vec<Point2>> = hatch
         .boundary
         .iter()
