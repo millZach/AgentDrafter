@@ -37,6 +37,9 @@ const DYN_BLOCK_KEY: &str = "dyn_block";
 const DYN_PARAM_KEY: &str = "dyn_p";
 const DYN_VAL_KEY: &str = "dyn_v";
 
+/// The key of a viewport's explicit annotation scale name in its extended data.
+const VP_ANNOSCALE_KEY: &str = "annoscale";
+
 /// Writes an object's ID, the name of its `sheet` and the `id` it carries
 /// in its file, and its `name`, if it has one, as AgentDrafter's record in
 /// the object's extended data, in place of any record of AgentDrafter's it
@@ -171,6 +174,27 @@ pub(super) fn read_dynamic_block(
 /// The object's name, from AgentDrafter's extended data on it.
 pub(super) fn read_name(common: &EntityCommon) -> Option<String> {
     value_of(&common.extended_data, NAME_KEY)
+}
+
+/// Appends a viewport's explicit annotation scale name (`annoscale`) to
+/// AgentDrafter's extended-data record.
+pub(super) fn write_viewport_annoscale(common: &mut EntityCommon, scale_name: &str) {
+    let mut record = common
+        .extended_data
+        .records()
+        .iter()
+        .find(|r| r.application_name.eq_ignore_ascii_case(APPLICATION))
+        .cloned()
+        .unwrap_or_else(|| ExtendedDataRecord::new(APPLICATION));
+    record.add_value(XDataValue::String(VP_ANNOSCALE_KEY.to_owned()));
+    record.add_value(XDataValue::String(scale_name.to_owned()));
+    common.extended_data.upsert_record(record);
+}
+
+/// Reads a viewport's explicit annotation scale name (`annoscale`) from
+/// AgentDrafter's extended data, if present.
+pub(super) fn read_viewport_annoscale(common: &EntityCommon) -> Option<String> {
+    value_of(&common.extended_data, VP_ANNOSCALE_KEY).filter(|s| !s.is_empty())
 }
 
 /// The value under `key` in AgentDrafter's record of `data`, which holds

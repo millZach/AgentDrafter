@@ -145,6 +145,7 @@ pub(crate) fn read_blocks(path: &Path, dxf: bool) -> Result<DrawingBlocks, Error
                 objects,
                 cells: Vec::new(),
                 parameters: Vec::new(),
+                annotative: super::annotation_scale::block_is_annotative(&drawing, record.handle),
             },
             not_carried,
         }

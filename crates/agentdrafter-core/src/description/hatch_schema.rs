@@ -176,6 +176,8 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                 "items": { "$ref": "#/$defs/hatch_loop" },
                 "minItems": 1,
             },
+            "annotative": { "$ref": "#/$defs/annotative" },
+            "annotation_scales": { "$ref": "#/$defs/object_annotation_scales" },
         }),
     );
     hatch["if"] =

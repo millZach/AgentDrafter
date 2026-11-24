@@ -43,6 +43,7 @@ use crate::model::{
 use crate::text::{MText as MTextObject, Text as TextObject};
 use crate::units::Unit;
 
+mod annotation_scale;
 mod block;
 mod dimension;
 mod dynamic_block;
@@ -250,10 +251,19 @@ pub(crate) fn write_new_sheet_as(
     if has_layer_transparency {
         block::register_named_application(&mut drawing, page_setup::LAYER_TRANSPARENCY_APP)?;
     }
+    let uses_annotation_scales = annotation_scale::sheet_uses_annotation_scales(sheet);
+    if uses_annotation_scales {
+        block::register_named_application(&mut drawing, annotation_scale::ACAD_ANNOTATIVE)?;
+    }
     dimension::prepare(&mut drawing, sheet)?;
     // Layers, linetypes, text styles and applications take their handles
     // before the blocks and objects take theirs.
     drawing.assign_table_entry_handles();
+    let scale_handles = if uses_annotation_scales {
+        annotation_scale::write_scales_and_variables(&mut drawing, sheet)
+    } else {
+        std::collections::HashMap::new()
+    };
     let named_plot_styles = sheet.uses_named_plot_styles();
     if named_plot_styles {
         drawing.header.plotstyle_mode = false;
@@ -377,6 +387,19 @@ pub(crate) fn write_new_sheet_as(
             Some(_) if sheet.in_paper_space(i) => Space::Paper,
             Some(other) => Space::Layout(&other.name),
         };
+        let is_model_annotative =
+            matches!(paper, Space::Model) && sheet.object_is_annotative(object);
+        let obj_scales = if is_model_annotative {
+            sheet.object_annotation_scales(object)
+        } else {
+            Vec::new()
+        };
+        let default_scale = if is_model_annotative {
+            Some(annotation_scale::default_scale_for(sheet, &obj_scales))
+        } else {
+            None
+        };
+        let anno_inv = default_scale.as_ref().map_or(1.0, |s| s.inverse_factor());
         if let (Object::Viewport(v), Some(on)) = (object, sheet.layout_of(i)) {
             let handle = add_viewport(
                 &mut drawing,
@@ -480,10 +503,15 @@ pub(crate) fn write_new_sheet_as(
                     ),
                 )
             })?;
+            let scaled_ml = (anno_inv != 1.0).then(|| m.scaled_for_annotation(&style, anno_inv));
+            let (eff_m, eff_s) = match &scaled_ml {
+                Some((sm, ss)) => (sm, ss),
+                None => (m, &style),
+            };
             let mut dwg_mleader = EntityType::MultiLeader(Box::new(leader::dwg_mleader(
                 &drawing,
-                m,
-                &style,
+                eff_m,
+                eff_s,
                 measure,
                 &sheet.blocks,
             )?));
@@ -504,11 +532,21 @@ pub(crate) fn write_new_sheet_as(
                     format!("could not add a multileader to the drawing: {e}"),
                 )
             })?;
+            if let Some(def_sc) = &default_scale {
+                annotation_scale::attach_entity_annotation_scales(
+                    &mut drawing,
+                    handle,
+                    &obj_scales,
+                    def_sc,
+                    &scale_handles,
+                    !format.is_dwg(),
+                );
+            }
             id_to_handle.insert(written.id.to_lowercase(), handle);
             continue;
         }
         if let Object::Dimension(d) = object {
-            let style = sheet.dimension_style(&d.dimension_style).ok_or_else(|| {
+            let mut style = sheet.dimension_style(&d.dimension_style).ok_or_else(|| {
                 Error::new(
                     ErrorCode::DwgWrite,
                     format!(
@@ -517,6 +555,9 @@ pub(crate) fn write_new_sheet_as(
                     ),
                 )
             })?;
+            if anno_inv != 1.0 {
+                style.scale *= anno_inv;
+            }
             dimensions += 1;
             let mut dwg_dimension = dimension::dwg_dimension(
                 &mut drawing,
@@ -543,6 +584,16 @@ pub(crate) fn write_new_sheet_as(
                     format!("could not add a dimension to the drawing: {e}"),
                 )
             })?;
+            if let Some(def_sc) = &default_scale {
+                annotation_scale::attach_entity_annotation_scales(
+                    &mut drawing,
+                    handle,
+                    &obj_scales,
+                    def_sc,
+                    &scale_handles,
+                    !format.is_dwg(),
+                );
+            }
             id_to_handle.insert(written.id.to_lowercase(), handle);
             continue;
         }
@@ -627,9 +678,15 @@ pub(crate) fn write_new_sheet_as(
                     ),
                 ));
             };
+            let scaled_ins = (anno_inv != 1.0).then(|| {
+                let mut s = insert.clone();
+                s.scale *= anno_inv;
+                s
+            });
+            let eff_insert = scaled_ins.as_ref().unwrap_or(insert);
             let mut dwg_ins = dynamic_writer.dwg_insert(
                 &mut drawing,
-                insert,
+                eff_insert,
                 definition,
                 &sheet.blocks,
                 units,
@@ -662,6 +719,16 @@ pub(crate) fn write_new_sheet_as(
                     format!("could not add an insert to the drawing: {e}"),
                 )
             })?;
+            if let Some(def_sc) = &default_scale {
+                annotation_scale::attach_entity_annotation_scales(
+                    &mut drawing,
+                    handle,
+                    &obj_scales,
+                    def_sc,
+                    &scale_handles,
+                    !format.is_dwg(),
+                );
+            }
             id_to_handle.insert(written.id.to_lowercase(), handle);
             if has_attr_fields {
                 // Allocate handles for attributes and seqend so `set_text_field`
@@ -697,7 +764,29 @@ pub(crate) fn write_new_sheet_as(
             }
             continue;
         }
-        let mut dwg_object = dwg_object(object, start_of, &sheet.blocks)?;
+        let scaled_generic = (anno_inv != 1.0)
+            .then(|| match object {
+                Object::Text(t) => {
+                    let mut s = t.clone();
+                    s.height *= anno_inv;
+                    Some(Object::Text(s))
+                }
+                Object::MText(m) => {
+                    let mut s = m.clone();
+                    s.height *= anno_inv;
+                    s.width *= anno_inv;
+                    Some(Object::MText(s))
+                }
+                Object::Hatch(h) if !h.is_solid() => {
+                    let mut s = h.clone();
+                    s.scale *= anno_inv;
+                    Some(Object::Hatch(s))
+                }
+                _ => None,
+            })
+            .flatten();
+        let eff_object = scaled_generic.as_ref().unwrap_or(object);
+        let mut dwg_object = dwg_object(eff_object, start_of, &sheet.blocks)?;
         ids::write_id_and_name(
             dwg_object.common_mut(),
             &record.name,
@@ -717,6 +806,16 @@ pub(crate) fn write_new_sheet_as(
                 format!("could not add a {} to the drawing: {e}", object.type_name()),
             )
         })?;
+        if let Some(def_sc) = &default_scale {
+            annotation_scale::attach_entity_annotation_scales(
+                &mut drawing,
+                handle,
+                &obj_scales,
+                def_sc,
+                &scale_handles,
+                !format.is_dwg(),
+            );
+        }
         id_to_handle.insert(written.id.to_lowercase(), handle);
         match object {
             Object::Text(t) => {
@@ -901,6 +1000,9 @@ fn add_viewport(
     viewport.layer.clone_into(&mut common.layer);
     set_properties(common, &viewport.properties);
     ids::write_id_and_name(common, sheet_name, id, name);
+    if let Some(sc) = &viewport.annotation_scale {
+        ids::write_viewport_annoscale(common, sc);
+    }
     if named_plot_styles {
         page_setup::set_entity_plot_style(
             drawing,
@@ -1640,6 +1742,139 @@ fn contents(
     } else {
         crate::model::PlotStyleMode::ColorDependent
     };
+    let (annotation_scales, annotation_scale, anno_all_visible, scale_handle_map) =
+        annotation_scale::read_scales_and_variables(drawing);
+    let active_scale_factor = annotation_scale
+        .as_deref()
+        .and_then(|name| {
+            annotation_scales
+                .iter()
+                .find(|s| s.name.eq_ignore_ascii_case(name))
+                .cloned()
+                .or_else(|| crate::model::AnnotationScale::from_name(name))
+        })
+        .map_or(1.0, |s| s.factor());
+    for ((obj, h_hex), space) in objects.iter_mut().zip(&handles).zip(&spaces) {
+        if !obj.supports_annotation_scale() {
+            continue;
+        }
+        let Ok(h_val) = u64::from_str_radix(h_hex, 16) else {
+            continue;
+        };
+        let Some(dwg_ent) = drawing.get_entity(acadrust::types::Handle::new(h_val)) else {
+            continue;
+        };
+        let (is_anno, scale_names, default_factor) =
+            annotation_scale::read_entity_annotation(drawing, dwg_ent, &scale_handle_map);
+        let style_or_block_anno = match obj {
+            Object::Text(t) => text_styles
+                .iter()
+                .any(|s| s.name.eq_ignore_ascii_case(&t.style) && s.annotative),
+            Object::MText(m) => text_styles
+                .iter()
+                .any(|s| s.name.eq_ignore_ascii_case(&m.style) && s.annotative),
+            Object::Dimension(d) => dimension_styles
+                .iter()
+                .any(|s| s.name.eq_ignore_ascii_case(&d.dimension_style) && s.annotative),
+            Object::MLeader(m) => mleader_styles
+                .iter()
+                .any(|s| s.name.eq_ignore_ascii_case(&m.mleader_style) && s.annotative),
+            Object::Insert(i) => blocks
+                .iter()
+                .any(|b| b.name.eq_ignore_ascii_case(&i.block) && b.annotative),
+            _ => false,
+        };
+        if !is_anno && scale_names.is_empty() && !style_or_block_anno {
+            continue;
+        }
+        let eff_factor = default_factor.unwrap_or(active_scale_factor);
+        let unscale = space.is_none() && (eff_factor - 1.0).abs() > 1e-12 && eff_factor > 0.0;
+        match obj {
+            Object::Text(t) => {
+                t.annotative = is_anno || !scale_names.is_empty();
+                t.annotation_scales = scale_names;
+                if unscale {
+                    t.height *= eff_factor;
+                }
+            }
+            Object::MText(m) => {
+                m.annotative = is_anno || !scale_names.is_empty();
+                m.annotation_scales = scale_names;
+                if unscale {
+                    m.height *= eff_factor;
+                    m.width *= eff_factor;
+                }
+            }
+            Object::Dimension(d) => {
+                d.annotative = is_anno || !scale_names.is_empty();
+                d.annotation_scales = scale_names;
+            }
+            Object::MLeader(m) => {
+                m.annotative = is_anno || !scale_names.is_empty();
+                m.annotation_scales = scale_names;
+                if unscale {
+                    let style = mleader_styles
+                        .iter()
+                        .find(|s| s.name.eq_ignore_ascii_case(&m.mleader_style));
+                    let near_style = |v: f64, sv: f64| (v - sv).abs() <= 1e-9 * sv.abs().max(1.0);
+                    m.landing = m.landing.and_then(|v| {
+                        let u = v * eff_factor;
+                        if style.is_some_and(|s| near_style(u, s.landing)) {
+                            None
+                        } else {
+                            Some(u)
+                        }
+                    });
+                    m.gap = m.gap.and_then(|v| {
+                        let u = v * eff_factor;
+                        if style.is_some_and(|s| near_style(u, s.landing_gap)) {
+                            None
+                        } else {
+                            Some(u)
+                        }
+                    });
+                    m.arrow_size = m.arrow_size.and_then(|v| {
+                        let u = v * eff_factor;
+                        if style.is_some_and(|s| near_style(u, s.arrow_size)) {
+                            None
+                        } else {
+                            Some(u)
+                        }
+                    });
+                    match &mut m.content {
+                        crate::model::MLeaderContent::Text(tc) => {
+                            tc.height = tc.height.and_then(|v| {
+                                let u = v * eff_factor;
+                                if style.is_some_and(|s| near_style(u, s.text_height)) {
+                                    None
+                                } else {
+                                    Some(u)
+                                }
+                            });
+                        }
+                        crate::model::MLeaderContent::Block(bc) => {
+                            bc.scale *= eff_factor;
+                        }
+                    }
+                }
+            }
+            Object::Hatch(h) => {
+                h.annotative = is_anno || !scale_names.is_empty();
+                h.annotation_scales = scale_names;
+                if unscale && !h.is_solid() {
+                    h.scale *= eff_factor;
+                }
+            }
+            Object::Insert(ins) => {
+                ins.annotative = is_anno || !scale_names.is_empty();
+                ins.annotation_scales = scale_names;
+                if unscale {
+                    ins.scale *= eff_factor;
+                }
+            }
+            _ => {}
+        }
+    }
     let groups = group::read_groups(drawing, &handles);
     Ok(DrawingContents {
         dwg_version: raw_version.unwrap_or_else(|| drawing.version.to_string()),
@@ -1669,6 +1904,9 @@ fn contents(
         image_frame: media::read_image_frame(drawing),
         custom_properties: field::read_custom_properties(drawing),
         groups,
+        annotation_scales,
+        annotation_scale,
+        anno_all_visible,
         layout,
         other_layouts,
         opens_on: layout::opened_on(drawing).map(|(name, _)| name),
@@ -2377,6 +2615,7 @@ fn read_block(
         });
     }
     let parameters = dynamic_block::read_block_parameters(drawing, record);
+    let annotative = annotation_scale::block_is_annotative(drawing, record.handle);
     Some(ReadBlock {
         block: Block {
             name: record.name.clone(),
@@ -2384,6 +2623,7 @@ fn read_block(
             objects,
             cells: Vec::new(),
             parameters,
+            annotative,
         },
         handles,
         ids_and_names,
@@ -3694,6 +3934,9 @@ mod tests {
             image_frame: crate::model::WipeoutFrame::Off,
             custom_properties: std::collections::BTreeMap::new(),
             groups: Vec::new(),
+            annotation_scales: Vec::new(),
+            annotation_scale: None,
+            anno_all_visible: None,
         }
     }
 

@@ -31,7 +31,7 @@ use crate::text::TextStyle;
 use crate::units::Unit;
 
 /// The keys a dimension style takes.
-pub(crate) const DIMENSION_STYLE_KEYS: [&str; 26] = [
+pub(crate) const DIMENSION_STYLE_KEYS: [&str; 27] = [
     "arrowhead",
     "arrow_size",
     "text_style",
@@ -58,10 +58,11 @@ pub(crate) const DIMENSION_STYLE_KEYS: [&str; 26] = [
     "prefix",
     "suffix",
     "scale",
+    super::annotation_scale::ANNOTATIVE_KEY,
 ];
 
 /// The keys a dimension takes.
-pub(crate) const DIMENSION_KEYS: [&str; 19] = [
+pub(crate) const DIMENSION_KEYS: [&str; 21] = [
     "kind",
     "points",
     "angle",
@@ -74,6 +75,8 @@ pub(crate) const DIMENSION_KEYS: [&str; 19] = [
     "dimension_style",
     "text",
     "continued",
+    super::annotation_scale::ANNOTATIVE_KEY,
+    super::annotation_scale::ANNOTATION_SCALES_KEY,
     "layer",
     "color",
     "linetype",
@@ -409,6 +412,7 @@ pub(super) fn dimension_styles(
         }
         style.prefix = affix(&fields, "prefix")?;
         style.suffix = affix(&fields, "suffix")?;
+        style.annotative = super::annotation_scale::optional_annotative(&fields)?;
         styles.push(style);
     }
     Ok(styles)
@@ -452,6 +456,7 @@ pub(super) fn dimension(
     units: Unit,
     layer: String,
     dimension_styles: &[DimensionStyle],
+    declared_scales: &[crate::model::AnnotationScale],
 ) -> Result<Dimension, Error> {
     let kind_node = fields.require("kind")?;
     let kind_path = fields.path_of("kind");
@@ -563,7 +568,15 @@ pub(super) fn dimension(
             } else {
                 Measured::Aligned { points: [*p1, *p2] }
             };
-            return finish(fields, measured, kept, layer, units, dimension_styles);
+            return finish(
+                fields,
+                measured,
+                kept,
+                layer,
+                units,
+                dimension_styles,
+                declared_scales,
+            );
         }
         DimensionKind::Radius | DimensionKind::Diameter => {
             let center_node = fields.require("center")?;
@@ -658,6 +671,8 @@ pub(super) fn dimension(
                 continued: false,
                 layer: String::new(),
                 properties: Default::default(),
+                annotative: false,
+                annotation_scales: Vec::new(),
             };
             let mut flat_points = probe.points();
             flat_points.push(location);
@@ -684,6 +699,7 @@ pub(super) fn dimension(
                 layer,
                 units,
                 dimension_styles,
+                declared_scales,
             );
         }
         DimensionKind::Ordinate => {
@@ -715,7 +731,15 @@ pub(super) fn dimension(
             Measured::Ordinate { feature, axis }
         }
     };
-    finish(fields, measured, location, layer, units, dimension_styles)
+    finish(
+        fields,
+        measured,
+        location,
+        layer,
+        units,
+        dimension_styles,
+        declared_scales,
+    )
 }
 
 /// An angular dimension's two lines, each through two points apart.
@@ -764,7 +788,10 @@ fn finish(
     layer: String,
     units: Unit,
     dimension_styles: &[DimensionStyle],
+    declared_scales: &[crate::model::AnnotationScale],
 ) -> Result<Dimension, Error> {
+    let (annotative, annotation_scales) =
+        super::annotation_scale::object_annotation(fields, declared_scales)?;
     Ok(Dimension {
         measured,
         location,
@@ -774,6 +801,8 @@ fn finish(
             Some(node) => boolean(node, &fields.path_of("continued"))?,
             None => false,
         },
+        annotative,
+        annotation_scales,
         layer,
         properties: Default::default(),
     })

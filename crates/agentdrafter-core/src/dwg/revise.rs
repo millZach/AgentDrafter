@@ -7,7 +7,7 @@
 //! objects actually edited, and the revision is always written back in the
 //! exact DWG version the original arrived in.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::f64::consts::TAU;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
@@ -210,6 +210,7 @@ pub(crate) struct RevisionSession {
     app_registered: bool,
     revcloud_app_registered: bool,
     transparency_app_registered: bool,
+    annotative_app_registered: bool,
 }
 
 impl RevisionSession {
@@ -278,6 +279,7 @@ impl RevisionSession {
             app_registered: false,
             revcloud_app_registered: false,
             transparency_app_registered: false,
+            annotative_app_registered: false,
         })
     }
 
@@ -388,6 +390,7 @@ impl RevisionSession {
                 } else {
                     1.0
                 },
+                annotative: s.annotative,
             })
             .collect();
         let blocks = self.all_insertable_blocks();
@@ -434,6 +437,10 @@ impl RevisionSession {
                     objects,
                     cells: Vec::new(),
                     parameters: Vec::new(),
+                    annotative: super::annotation_scale::block_is_annotative(
+                        &self.drawing,
+                        record.handle,
+                    ),
                 }
             })
             .collect()
@@ -922,6 +929,21 @@ impl RevisionSession {
             )?;
             self.drawing.assign_table_entry_handles();
             self.transparency_app_registered = true;
+        }
+        Ok(())
+    }
+
+    fn ensure_annotative_application_registered(&mut self) -> Result<(), Error> {
+        if !self.drawing.app_ids.iter().any(|a| {
+            a.name
+                .eq_ignore_ascii_case(super::annotation_scale::ANNOTATIVE_APP)
+        }) {
+            block::register_named_application(
+                &mut self.drawing,
+                super::annotation_scale::ANNOTATIVE_APP,
+            )?;
+            self.drawing.assign_table_entry_handles();
+            self.annotative_app_registered = true;
         }
         Ok(())
     }
@@ -2706,6 +2728,7 @@ impl RevisionSession {
                     objects: model_objects,
                     cells: Vec::new(),
                     parameters: Vec::new(),
+                    annotative: false,
                 };
                 let inner_owner =
                     block::add_block_record(&mut self.drawing, &inner_block, units_code)?;
@@ -2739,6 +2762,8 @@ impl RevisionSession {
                     name: None,
                     layer: LAYER_ZERO.to_owned(),
                     properties: Properties::default(),
+                    annotative: false,
+                    annotation_scales: Vec::new(),
                 })]
             } else {
                 model_objects
@@ -3009,6 +3034,445 @@ impl RevisionSession {
                 ..Default::default()
             },
         ))
+    }
+
+    /// Updates the drawing's `ACAD_SCALELIST`, `CANNOSCALE`, and/or
+    /// `ANNOALLVISIBLE` (`set_annotation_scale` / `CANNOSCALE` / `SCALELISTEDIT`).
+    pub(crate) fn set_annotation_scale(
+        &mut self,
+        scale: Option<&str>,
+        anno_all_visible: Option<bool>,
+        add_scales: &BTreeMap<String, [f64; 2]>,
+        remove_scales: &[String],
+    ) -> Result<(String, MutationHandles), Error> {
+        use super::annotation_scale::{
+            ensure_scale_in_drawing, read_scales_and_variables, root_dict_handle, set_drawing_var,
+        };
+        use crate::model::AnnotationScale;
+
+        let before_handles: HashSet<u64> = self.drawing.objects.keys().map(|h| h.value()).collect();
+        let root_h = root_dict_handle(&self.drawing);
+
+        // Snapshot existing ACAD_SCALELIST / AcDbVariableDictionary handles.
+        let find_root_sub = |drawing: &CadDocument, name: &str| -> Option<Handle> {
+            let root = root_dict_handle(drawing)?;
+            match drawing.objects.get(&root) {
+                Some(ObjectType::Dictionary(d)) => d
+                    .entries
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map(|(_, h)| *h),
+                _ => None,
+            }
+        };
+        let mut modified_existing: HashSet<u64> = HashSet::new();
+        if let Some(rh) = root_h {
+            modified_existing.insert(rh.value());
+        }
+        if let Some(sl) = find_root_sub(&self.drawing, "ACAD_SCALELIST") {
+            modified_existing.insert(sl.value());
+        }
+        if let Some(vd) = find_root_sub(&self.drawing, "AcDbVariableDictionary") {
+            modified_existing.insert(vd.value());
+            if let Some(ObjectType::Dictionary(d)) = self.drawing.objects.get(&vd) {
+                for (k, h) in &d.entries {
+                    if k.eq_ignore_ascii_case("CANNOSCALE")
+                        || k.eq_ignore_ascii_case("ANNOALLVISIBLE")
+                    {
+                        modified_existing.insert(h.value());
+                    }
+                }
+            }
+        }
+
+        // Validate remove_scales before mutating.
+        if !remove_scales.is_empty() {
+            let (existing_scales, _, _, _) = read_scales_and_variables(&self.drawing);
+            for rem in remove_scales {
+                if !existing_scales
+                    .iter()
+                    .any(|s| s.name.eq_ignore_ascii_case(rem))
+                {
+                    return Err(Error::new(
+                        ErrorCode::UnknownName,
+                        format!("unknown annotation scale `{rem}` in drawing scale list"),
+                    )
+                    .at_field("remove_scales"));
+                }
+            }
+        }
+
+        let mut parts: Vec<String> = Vec::new();
+        // 1. Add / update scales in ACAD_SCALELIST.
+        for (name, [paper, drawing_u]) in add_scales {
+            let sc = AnnotationScale::new(name, *paper, *drawing_u);
+            if let Some(h) = ensure_scale_in_drawing(&mut self.drawing, &sc) {
+                if before_handles.contains(&h.value()) {
+                    modified_existing.insert(h.value());
+                }
+            }
+        }
+        if !add_scales.is_empty() {
+            let names: Vec<&str> = add_scales.keys().map(String::as_str).collect();
+            parts.push(format!("scales added/updated: {}", names.join(", ")));
+        }
+        // 2. Remove scales from ACAD_SCALELIST.
+        if !remove_scales.is_empty() {
+            if let Some(sl_h) = find_root_sub(&self.drawing, "ACAD_SCALELIST") {
+                modified_existing.insert(sl_h.value());
+                let to_remove: Vec<Handle> = match self.drawing.objects.get(&sl_h) {
+                    Some(ObjectType::Dictionary(d)) => d
+                        .entries
+                        .iter()
+                        .filter_map(|(_, h)| match self.drawing.objects.get(h) {
+                            Some(ObjectType::Scale(sc))
+                                if remove_scales
+                                    .iter()
+                                    .any(|r| r.eq_ignore_ascii_case(&sc.name)) =>
+                            {
+                                Some(*h)
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                if let Some(ObjectType::Dictionary(d)) = self.drawing.objects.get_mut(&sl_h) {
+                    d.entries.retain(|(_, h)| !to_remove.contains(h));
+                }
+                for h in to_remove {
+                    self.drawing.objects.remove(&h);
+                }
+            }
+            parts.push(format!("scales removed: {}", remove_scales.join(", ")));
+        }
+        // 3. Set active CANNOSCALE.
+        if let Some(scale_name) = scale {
+            let (existing_scales, _, _, _) = read_scales_and_variables(&self.drawing);
+            let resolved = existing_scales
+                .iter()
+                .find(|s| s.name.eq_ignore_ascii_case(scale_name))
+                .cloned()
+                .or_else(|| AnnotationScale::from_name(scale_name))
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::UnknownName,
+                        format!(
+                            "unknown annotation scale `{scale_name}`; provide a ratio such as \
+                             `1:50` or add it via `add_scales`"
+                        ),
+                    )
+                    .at_field("scale")
+                })?;
+            if let Some(h) = ensure_scale_in_drawing(&mut self.drawing, &resolved) {
+                if before_handles.contains(&h.value()) {
+                    modified_existing.insert(h.value());
+                }
+            }
+            self.drawing.header.current_annotation_scale = resolved.name.clone();
+            self.drawing.header.annotation_scale_value = resolved.factor();
+            set_drawing_var(&mut self.drawing, "CANNOSCALE", &resolved.name);
+            parts.push(format!("CANNOSCALE = `{}`", resolved.name));
+        }
+        // 4. Set ANNOALLVISIBLE.
+        if let Some(visible) = anno_all_visible {
+            set_drawing_var(
+                &mut self.drawing,
+                "ANNOALLVISIBLE",
+                if visible { "1" } else { "0" },
+            );
+            parts.push(format!("ANNOALLVISIBLE = {}", if visible { 1 } else { 0 }));
+        }
+
+        let after_handles: HashSet<u64> = self.drawing.objects.keys().map(|h| h.value()).collect();
+        let mut record = MutationHandles::default();
+        for &h in &after_handles {
+            if !before_handles.contains(&h) {
+                self.expected_non_graphical_added.insert(h);
+                record.added.push(format!("{h:X}"));
+            }
+        }
+        for &h in &before_handles {
+            if !after_handles.contains(&h) {
+                self.expected_non_graphical_removed.insert(h);
+                record.deleted.push(format!("{h:X}"));
+            }
+        }
+        for &h in &modified_existing {
+            if before_handles.contains(&h) && after_handles.contains(&h) {
+                self.expected_non_graphical_changed.insert(h);
+                record.touched.push(format!("{h:X}"));
+            }
+        }
+        Ok((
+            format!("updated annotation scale: {}", parts.join("; ")),
+            record,
+        ))
+    }
+
+    /// Updates supported annotation scales or the `annotative` flag on one or
+    /// more annotative entities (`set_object_scales` / `OBJECTSCALE`).
+    pub(crate) fn set_object_scales(
+        &mut self,
+        hexes: &[String],
+        annotative: Option<bool>,
+        replace_scales: Option<&[String]>,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<MutationHandles, Error> {
+        use super::annotation_scale::{
+            attach_entity_annotation_scales, clear_entity_annotation_scales,
+            ensure_scale_in_drawing, read_entity_annotation, read_scales_and_variables,
+            root_dict_handle,
+        };
+        use crate::model::{AnnotationScale, DEFAULT_ANNOTATION_SCALE};
+
+        // 1. Validate every handle first.
+        let mut handles: Vec<Handle> = Vec::with_capacity(hexes.len());
+        for hex in hexes {
+            let h = parse_hex_handle(hex)?;
+            let _ = self.ensure_sheet_entity(h, hex)?;
+            let ent = self.drawing.get_entity(h).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::UnknownName,
+                    format!("no entity with handle `{hex}`"),
+                )
+            })?;
+            let supported = matches!(
+                ent,
+                EntityType::Text(_)
+                    | EntityType::MText(_)
+                    | EntityType::Dimension(_)
+                    | EntityType::MultiLeader(_)
+                    | EntityType::Hatch(_)
+                    | EntityType::Insert(_)
+            );
+            if !supported {
+                return Err(Error::new(
+                    ErrorCode::BadValue,
+                    format!(
+                        "object `{hex}` ({}) cannot be annotative; only text, mtext, dimension, \
+                         mleader, hatch and insert support annotation scales",
+                        kind_of(ent)
+                    ),
+                )
+                .at_field("target"));
+            }
+            if !handles.contains(&h) {
+                handles.push(h);
+            }
+        }
+
+        let before_handles: HashSet<u64> = self.drawing.objects.keys().map(|h| h.value()).collect();
+        let mut modified_existing: HashSet<u64> = HashSet::new();
+        if let Some(rh) = root_dict_handle(&self.drawing) {
+            modified_existing.insert(rh.value());
+            if let Some(ObjectType::Dictionary(d)) = self.drawing.objects.get(&rh) {
+                if let Some((_, sl_h)) = d
+                    .entries
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("ACAD_SCALELIST"))
+                {
+                    modified_existing.insert(sl_h.value());
+                }
+            }
+        }
+
+        let (mut drawing_scales, active_name, _, mut scale_by_handle) =
+            read_scales_and_variables(&self.drawing);
+        let active_scale = active_name
+            .as_deref()
+            .and_then(|n| {
+                drawing_scales
+                    .iter()
+                    .find(|s| s.name.eq_ignore_ascii_case(n))
+                    .cloned()
+                    .or_else(|| AnnotationScale::from_name(n))
+            })
+            .unwrap_or_else(|| AnnotationScale::new(DEFAULT_ANNOTATION_SCALE, 1.0, 1.0));
+
+        let resolve_scale =
+            |name: &str, list: &mut Vec<AnnotationScale>| -> Result<AnnotationScale, Error> {
+                if let Some(found) = list.iter().find(|s| s.name.eq_ignore_ascii_case(name)) {
+                    return Ok(found.clone());
+                }
+                if let Some(parsed) = AnnotationScale::from_name(name) {
+                    list.push(parsed.clone());
+                    return Ok(parsed);
+                }
+                Err(Error::new(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "unknown annotation scale `{name}`; provide a ratio such as `1:50` or add \
+                         it with `set_annotation_scale`"
+                    ),
+                ))
+            };
+
+        let mut block_is_anno: HashSet<String> = HashSet::new();
+        for br in self.drawing.block_records.iter() {
+            if super::annotation_scale::block_is_annotative(&self.drawing, br.handle) {
+                block_is_anno.insert(br.name.to_lowercase());
+            }
+        }
+
+        if annotative != Some(false) {
+            self.ensure_annotative_application_registered()?;
+        }
+
+        let mut record = MutationHandles::default();
+        for h in handles {
+            // Track any existing xdict/context dictionaries on this entity.
+            if let Some(ent) = self.drawing.get_entity(h) {
+                if let Some(xd) = ent.common().xdictionary_handle {
+                    modified_existing.insert(xd.value());
+                    if let Some(ObjectType::Dictionary(d)) = self.drawing.objects.get(&xd) {
+                        if let Some((_, mgr_h)) = d
+                            .entries
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("AcDbContextDataManager"))
+                        {
+                            modified_existing.insert(mgr_h.value());
+                            if let Some(ObjectType::Dictionary(md)) =
+                                self.drawing.objects.get(mgr_h)
+                            {
+                                if let Some((_, sd_h)) = md
+                                    .entries
+                                    .iter()
+                                    .find(|(k, _)| k.eq_ignore_ascii_case("ACDB_ANNOTATIONSCALES"))
+                                {
+                                    modified_existing.insert(sd_h.value());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let ent_snapshot = self.drawing.get_entity(h).expect("validated").clone();
+            let (mut was_anno, existing_names, _) =
+                read_entity_annotation(&self.drawing, &ent_snapshot, &scale_by_handle);
+            if let EntityType::Insert(ins) = &ent_snapshot {
+                if block_is_anno.contains(&ins.block_name.to_lowercase()) {
+                    was_anno = true;
+                }
+            }
+
+            let want_anno = match annotative {
+                Some(false) => false,
+                Some(true) => true,
+                None => was_anno || replace_scales.is_some() || !add.is_empty(),
+            };
+
+            if !want_anno {
+                clear_entity_annotation_scales(&mut self.drawing, h);
+                if let Some(mut ent) = self.drawing.get_entity(h).cloned() {
+                    clear_raw_record(&mut ent);
+                    let m = self.commit_edited_entity(h, ent);
+                    record.touched.extend(m.touched);
+                }
+                continue;
+            }
+
+            let mut target_scales: Vec<AnnotationScale> = Vec::new();
+            if let Some(explicit) = replace_scales {
+                for name in explicit {
+                    let sc = resolve_scale(name, &mut drawing_scales)?;
+                    if !target_scales
+                        .iter()
+                        .any(|s| s.name.eq_ignore_ascii_case(&sc.name))
+                    {
+                        target_scales.push(sc);
+                    }
+                }
+            } else {
+                let seed: Vec<String> = if existing_names.is_empty() {
+                    vec![active_scale.name.clone()]
+                } else {
+                    existing_names
+                };
+                for name in &seed {
+                    if let Ok(sc) = resolve_scale(name, &mut drawing_scales) {
+                        if !target_scales
+                            .iter()
+                            .any(|s| s.name.eq_ignore_ascii_case(&sc.name))
+                        {
+                            target_scales.push(sc);
+                        }
+                    }
+                }
+                for name in add {
+                    let sc = resolve_scale(name, &mut drawing_scales)?;
+                    if !target_scales
+                        .iter()
+                        .any(|s| s.name.eq_ignore_ascii_case(&sc.name))
+                    {
+                        target_scales.push(sc);
+                    }
+                }
+                for name in remove {
+                    target_scales.retain(|s| !s.name.eq_ignore_ascii_case(name));
+                }
+            }
+            if target_scales.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::BadValue,
+                    "cannot remove the last annotation scale from an annotative object; set \
+                     `annotative: false` instead",
+                )
+                .at_field("remove"));
+            }
+
+            let mut scale_handles: HashMap<String, Handle> = HashMap::new();
+            for sc in &target_scales {
+                if let Some(sh) = ensure_scale_in_drawing(&mut self.drawing, sc) {
+                    if before_handles.contains(&sh.value()) {
+                        modified_existing.insert(sh.value());
+                    }
+                    scale_handles.insert(sc.name.to_lowercase(), sh);
+                    scale_by_handle.insert(sh, sc.clone());
+                }
+            }
+            let default_scale = target_scales
+                .iter()
+                .find(|s| s.name.eq_ignore_ascii_case(&active_scale.name))
+                .cloned()
+                .unwrap_or_else(|| target_scales[0].clone());
+
+            attach_entity_annotation_scales(
+                &mut self.drawing,
+                h,
+                &target_scales,
+                &default_scale,
+                &scale_handles,
+                !self.source_format.is_dwg(),
+            );
+            if let Some(mut ent) = self.drawing.get_entity(h).cloned() {
+                clear_raw_record(&mut ent);
+                let m = self.commit_edited_entity(h, ent);
+                record.touched.extend(m.touched);
+            }
+        }
+
+        let after_handles: HashSet<u64> = self.drawing.objects.keys().map(|h| h.value()).collect();
+        for &h in &after_handles {
+            if !before_handles.contains(&h) {
+                self.expected_non_graphical_added.insert(h);
+                record.added.push(format!("{h:X}"));
+            }
+        }
+        for &h in &before_handles {
+            if !after_handles.contains(&h) {
+                self.expected_non_graphical_removed.insert(h);
+                record.deleted.push(format!("{h:X}"));
+            }
+        }
+        for &h in &modified_existing {
+            if before_handles.contains(&h) && after_handles.contains(&h) {
+                self.expected_non_graphical_changed.insert(h);
+            }
+        }
+        Ok(record)
     }
 
     fn commit_edited_entity(&mut self, handle: Handle, updated: EntityType) -> MutationHandles {
@@ -3321,6 +3785,7 @@ impl RevisionSession {
             self.app_registered,
             self.revcloud_app_registered,
             self.transparency_app_registered,
+            self.annotative_app_registered,
             &mut unexpected,
         );
         diff_named_table("UCS", &before.ucss, &after.ucss, &mut unexpected);
@@ -5012,6 +5477,7 @@ fn diff_app_id_table(
     app_registered: bool,
     revcloud_app_registered: bool,
     transparency_app_registered: bool,
+    annotative_app_registered: bool,
     out: &mut Vec<UnexpectedChange>,
 ) {
     for (key, orig) in before {
@@ -5037,7 +5503,9 @@ fn diff_app_id_table(
             || (revcloud_app_registered
                 && name.eq_ignore_ascii_case(crate::model::REVCLOUD_APPLICATION))
             || (transparency_app_registered
-                && name.eq_ignore_ascii_case(page_setup::LAYER_TRANSPARENCY_APP));
+                && name.eq_ignore_ascii_case(page_setup::LAYER_TRANSPARENCY_APP))
+            || (annotative_app_registered
+                && name.eq_ignore_ascii_case(super::annotation_scale::ANNOTATIVE_APP));
         if !before.contains_key(key) && !is_expected_app {
             out.push(UnexpectedChange {
                 kind: "APPID".to_owned(),

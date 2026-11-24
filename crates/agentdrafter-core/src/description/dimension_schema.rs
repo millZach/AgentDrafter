@@ -172,6 +172,9 @@ pub(super) fn dimension_defs(defs: &mut Map<String, Value>) {
                         { "type": "string", "pattern": format!("^{POSITIVE_NUMBER}$") },
                     ],
                 },
+                "annotative": super::annotation_scale::annotative_property(
+                    "Whether dimensions in this style are annotative by default. Without it, false."
+                ),
             },
         }),
     );
@@ -295,6 +298,8 @@ pub(super) fn dimension_defs(defs: &mut Map<String, Value>) {
                 "type": TEXT_TYPES,
                 "not": { "type": "string", "pattern": "[{}\\\\\\n]|%%" },
             })),
+            "annotative": { "$ref": "#/$defs/annotative" },
+            "annotation_scales": { "$ref": "#/$defs/object_annotation_scales" },
         }),
     );
     // Each kind requires its own keys and takes no other kind's, as the

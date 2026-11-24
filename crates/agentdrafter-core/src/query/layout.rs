@@ -85,6 +85,10 @@ pub struct ViewportFound {
     pub scale: f64,
     /// Its scale as a ratio, paper to model, such as `1:4`.
     pub ratio: String,
+    /// Explicit annotation scale name for this viewport (`CANNOSCALE` override),
+    /// when set separately from its geometric scale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotation_scale: Option<String>,
     /// Whether its view is locked.
     pub locked: bool,
     /// The boundary it is clipped to, when it is not rectangular: its
@@ -413,6 +417,7 @@ fn sheet_layout(
             view_center: v.view_center,
             scale: v.scale,
             ratio: v.ratio(),
+            annotation_scale: v.annotation_scale.clone(),
             locked: v.locked,
             clip: v.clip.clone(),
             frozen_layers: v.frozen_layers.clone(),

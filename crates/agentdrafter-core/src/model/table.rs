@@ -360,6 +360,8 @@ impl Table {
             layer: self.layer.clone(),
             field: None,
             properties: self.properties.clone(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         })
     }
 

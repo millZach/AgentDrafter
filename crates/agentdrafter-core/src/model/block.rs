@@ -48,6 +48,11 @@ pub struct Block {
     /// rotations, and lookup tables). Empty for an ordinary static block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parameters: Vec<DynamicParameter>,
+    /// Whether this block definition is annotative (`ANNOTATIVE`): inserts of
+    /// it draw scaled by the inverse of the active annotation scale so the
+    /// symbol lands on paper at its declared paper size.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub annotative: bool,
 }
 
 /// The box a block's text or attribute definition draws within, such as
@@ -232,6 +237,12 @@ pub struct Insert {
     /// The name an agent selects the insert by, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Whether this insert is annotative (`ANNOTATIVE`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub annotative: bool,
+    /// The annotation scales this annotative insert supports (`OBJECTSCALE`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotation_scales: Vec<String>,
     #[serde(default = "layer_zero")]
     pub layer: String,
     #[serde(flatten)]
@@ -300,6 +311,8 @@ pub fn attribute_text(
         layer,
         field: None,
         properties: definition.properties.clone(),
+        annotative: false,
+        annotation_scales: Vec::new(),
     }
 }
 
@@ -430,6 +443,8 @@ pub(crate) fn definition_text(definition: &AttributeDefinition) -> Text {
         layer: definition.layer.clone(),
         field: None,
         properties: definition.properties.clone(),
+        annotative: false,
+        annotation_scales: Vec::new(),
     }
 }
 
@@ -472,6 +487,8 @@ mod tests {
             name: None,
             layer: "symbols".into(),
             properties: Default::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         }
     }
 
@@ -482,6 +499,7 @@ mod tests {
             objects: Vec::new(),
             cells: Vec::new(),
             parameters: Vec::new(),
+            annotative: false,
         }
     }
 

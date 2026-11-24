@@ -683,6 +683,181 @@ impl RecordFile {
         Ok(())
     }
 
+    /// Reads a top-level scalar key from the file, if present.
+    pub(crate) fn top_scalar(&self, key: &str) -> Option<String> {
+        let Kind::Mapping(entries) = &self.root.kind else {
+            return None;
+        };
+        scalar_of(entries, key).map(str::to_owned)
+    }
+
+    /// Sets or updates a top-level scalar key in the file (such as
+    /// `annotation_scale` or `anno_all_visible`), creating it before `objects`
+    /// when not yet written.
+    pub(crate) fn set_top_scalar(&mut self, key: &str, value: Value) -> Result<(), Error> {
+        let path = self.path.clone();
+        let Kind::Mapping(entries) = &mut self.root.kind else {
+            return Err(record_shape_in("a mapping", &path));
+        };
+        let node = node_of(&value);
+        if let Some(entry) = entries.iter_mut().find(|e| e.key == key) {
+            entry.value = node;
+        } else {
+            let pos = entries
+                .iter()
+                .position(|e| e.key == "objects")
+                .unwrap_or(entries.len());
+            entries.insert(pos, new_entry(key, node));
+        }
+        self.note_rewrite(key);
+        Ok(())
+    }
+
+    /// Updates a template's annotation scale settings (`CANNOSCALE`,
+    /// `ANNOALLVISIBLE`, `SCALELISTEDIT`): adds or removes entries in
+    /// `annotation_scales`, sets `annotation_scale`, and sets `anno_all_visible`.
+    pub(crate) fn set_annotation_scale(
+        &mut self,
+        scale: Option<&str>,
+        anno_all_visible: Option<bool>,
+        add_scales: &std::collections::BTreeMap<String, [f64; 2]>,
+        remove_scales: &[String],
+    ) -> Result<String, Error> {
+        use super::annotation_scale::{
+            ANNOTATION_SCALES_KEY, ANNOTATION_SCALE_KEY, ANNO_ALL_VISIBLE_KEY,
+        };
+        let mut parts: Vec<String> = Vec::new();
+        if !add_scales.is_empty() || !remove_scales.is_empty() {
+            let entries = self.table_mut(ANNOTATION_SCALES_KEY)?;
+            for (name, [paper, drawing]) in add_scales {
+                let pair = node_of(&serde_json::json!([paper, drawing]));
+                if let Some(existing) = entries
+                    .iter_mut()
+                    .find(|e| e.key.eq_ignore_ascii_case(name))
+                {
+                    existing.key = name.clone();
+                    existing.value = pair;
+                } else {
+                    entries.push(new_entry(name, pair));
+                }
+            }
+            for name in remove_scales {
+                if !entries.iter().any(|e| e.key.eq_ignore_ascii_case(name)) {
+                    return Err(Error::new(
+                        ErrorCode::UnknownName,
+                        format!("unknown annotation scale `{name}` in `annotation_scales`"),
+                    )
+                    .at_field("remove_scales"));
+                }
+                entries.retain(|e| !e.key.eq_ignore_ascii_case(name));
+            }
+            self.note_rewrite(ANNOTATION_SCALES_KEY);
+            if !add_scales.is_empty() {
+                let names: Vec<&str> = add_scales.keys().map(String::as_str).collect();
+                parts.push(format!("scales added/updated: {}", names.join(", ")));
+            }
+            if !remove_scales.is_empty() {
+                parts.push(format!("scales removed: {}", remove_scales.join(", ")));
+            }
+        }
+        if let Some(scale_name) = scale {
+            self.set_top_scalar(ANNOTATION_SCALE_KEY, Value::String(scale_name.to_owned()))?;
+            parts.push(format!("annotation_scale = `{scale_name}`"));
+        }
+        if let Some(visible) = anno_all_visible {
+            self.set_top_scalar(ANNO_ALL_VISIBLE_KEY, Value::Bool(visible))?;
+            parts.push(format!("anno_all_visible = {visible}"));
+        }
+        Ok(parts.join("; "))
+    }
+
+    /// Reads an object's explicit `annotative` flag (if written) and
+    /// `annotation_scales` list (if written).
+    pub(crate) fn object_annotation_state(
+        &self,
+        list: ObjectList,
+        index: usize,
+    ) -> (Option<bool>, Vec<String>) {
+        use super::annotation_scale::{ANNOTATION_SCALES_KEY, ANNOTATIVE_KEY};
+        let Some(keys) = self
+            .items(list)
+            .and_then(|items| items.get(index))
+            .and_then(|item| object_parts(item).1)
+        else {
+            return (None, Vec::new());
+        };
+        let annotative = scalar_of(keys, ANNOTATIVE_KEY).and_then(|s| match s {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        });
+        let scales = keys
+            .iter()
+            .find(|e| e.key == ANNOTATION_SCALES_KEY)
+            .and_then(|e| match &e.value.kind {
+                Kind::Sequence(items) => Some(
+                    items
+                        .iter()
+                        .filter_map(|n| match &n.kind {
+                            Kind::Scalar(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        (annotative, scales)
+    }
+
+    /// Updates `annotative` and `annotation_scales` on the object of `list` at
+    /// `index` (`OBJECTSCALE`).
+    pub(crate) fn set_object_scales(
+        &mut self,
+        list: ObjectList,
+        index: usize,
+        annotative: Option<bool>,
+        scales: Option<&[String]>,
+        operation: usize,
+    ) -> Result<(), Error> {
+        use super::annotation_scale::{ANNOTATION_SCALES_KEY, ANNOTATIVE_KEY};
+        self.state(list);
+        let items = self.items_mut(list)?;
+        let item = &mut items[index];
+        let kind = object_parts(item).0.unwrap_or_default().to_owned();
+        let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
+        let mut touched: Vec<String> = Vec::new();
+        if let Some(flag) = annotative {
+            if let Some(entry) = keys.iter_mut().find(|k| k.key == ANNOTATIVE_KEY) {
+                entry.value = node_of(&Value::Bool(flag));
+            } else {
+                keys.push(new_entry(ANNOTATIVE_KEY, node_of(&Value::Bool(flag))));
+            }
+            touched.push(ANNOTATIVE_KEY.to_owned());
+        }
+        match scales {
+            Some(list_vals) if !list_vals.is_empty() => {
+                let arr =
+                    Value::Array(list_vals.iter().map(|s| Value::String(s.clone())).collect());
+                if let Some(entry) = keys.iter_mut().find(|k| k.key == ANNOTATION_SCALES_KEY) {
+                    entry.value = node_of(&arr);
+                } else {
+                    keys.push(new_entry(ANNOTATION_SCALES_KEY, node_of(&arr)));
+                }
+                touched.push(ANNOTATION_SCALES_KEY.to_owned());
+            }
+            Some(_) if keys.iter().any(|k| k.key == ANNOTATION_SCALES_KEY) => {
+                keys.retain(|k| k.key != ANNOTATION_SCALES_KEY);
+                touched.push(ANNOTATION_SCALES_KEY.to_owned());
+            }
+            _ => {}
+        }
+        if !touched.is_empty() {
+            self.touch(list, index, operation, Touch::Keys(touched));
+        }
+        Ok(())
+    }
+
     /// The names of the groups defined on `row` (when `Some(row)`) or at the
     /// top level of the template (when `None`), in order.
     pub(crate) fn group_names(&self, row: Option<usize>) -> Vec<String> {
@@ -1543,9 +1718,9 @@ impl RecordFile {
                     }
                     Ok(with)
                 }
-                _ => Err(record_shape_in(
-                    &format!("a mapping or list under `{table}`"),
-                    &self.path,
+                Kind::Scalar(text) => Ok(format!(
+                    "{indent}{table}: {}{nl}",
+                    scalar_text(text, Context::Flow, column, nl)
                 )),
             }
         };

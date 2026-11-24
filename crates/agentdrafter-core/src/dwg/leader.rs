@@ -451,6 +451,7 @@ fn dwg_style(
     written.align_space = style.text_height;
     written.enable_block_scale = true;
     written.enable_block_rotation = true;
+    written.is_annotative = style.annotative;
     written.break_gap_size = if sheet.units.is_metric() {
         crate::units::Unit::Mm.convert(3.75, sheet.units)
     } else {
@@ -850,8 +851,7 @@ fn read_style(drawing: &CadDocument, written: &DwgStyle) -> Option<MLeaderStyle>
         && written.text_angle_type == StyleAngle::Horizontal
         && written.text_color == Color::ByBlock
         && !written.text_frame
-        && written.scale_factor == 1.0
-        && !written.is_annotative;
+        && written.scale_factor == 1.0;
     if !plain {
         return None;
     }
@@ -871,6 +871,7 @@ fn read_style(drawing: &CadDocument, written: &DwgStyle) -> Option<MLeaderStyle>
         attachment: LeaderAttachment::of_code(left)?,
         leader_color: object_color(written.line_color)?,
         leader_lineweight: object_lineweight(written.line_weight)?,
+        annotative: written.is_annotative,
     })
 }
 
@@ -908,7 +909,6 @@ pub(super) fn read_mleader(
         && written.enable_landing
         && written.scale_factor == 1.0
         && context.scale_factor == 1.0
-        && !written.enable_annotation_scale
         && root.break_points.is_empty()
         && root.direction.y == 0.0
         && root.direction.x.abs() == 1.0
@@ -986,6 +986,8 @@ pub(super) fn read_mleader(
         arrow_size: differs(written.arrowhead_size == style.arrow_size)
             .then_some(written.arrowhead_size),
         mleader_style: style.name.clone(),
+        annotative: written.enable_annotation_scale,
+        annotation_scales: Vec::new(),
         layer,
         properties: Default::default(),
     };
@@ -1566,6 +1568,8 @@ objects:
             name: None,
             layer: "0".into(),
             properties: Default::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         };
         let m = super::block_transform(&insert, crate::model::Point3::new(0.0, -2.0, 0.0));
         assert_eq!((m[3], m[7]), (62.0, 107.0));

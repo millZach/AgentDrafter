@@ -55,6 +55,7 @@ fn text_styles_read_with_their_fonts_and_width_factors() {
                 name: "notes".into(),
                 font: "romans.shx".into(),
                 width_factor: 0.8,
+                annotative: false,
             },
             TextStyle::new("title", "Arial.TTF"),
         ]
@@ -76,6 +77,8 @@ fn text_reads_every_key() {
             layer: "0".into(),
             field: None,
             properties: Default::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         })
     );
 }
@@ -131,6 +134,8 @@ fn mtext_reads_every_key_and_drops_line_breaks_at_the_end() {
             layer: "0".into(),
             field: None,
             properties: Default::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         })
     );
     let Object::MText(text) =
@@ -407,7 +412,7 @@ fn an_unknown_key_lists_the_keys_text_takes() {
         &e,
         ErrorCode::UnknownKey,
         "objects[0].text.oblique",
-        &["a text takes contents, field, position, height, style, width_factor, rotation, justify, layer"],
+        &["a text takes contents, field, position, height, style, width_factor, rotation, justify, annotative, annotation_scales, layer"],
     );
     let e = object_error("mtext: {contents: A, position: [0, 0, 0], height: 1, columns: 2}");
     assert_names(

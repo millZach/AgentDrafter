@@ -189,6 +189,8 @@ pub(super) fn read_hatch(dwg_hatch: &DwgHatch, layer: String) -> Option<Hatch> {
         angle,
         origin: [0.0, 0.0],
         boundary,
+        annotative: false,
+        annotation_scales: Vec::new(),
         layer,
         properties: Default::default(),
     })

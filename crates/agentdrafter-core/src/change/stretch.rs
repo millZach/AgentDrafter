@@ -557,6 +557,8 @@ mod tests {
             name: None,
             layer: "0".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         });
         assert!(matches!(
             compute_stretch(&dev, b, d).unwrap(),

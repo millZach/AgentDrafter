@@ -23,7 +23,7 @@ use crate::units::Unit;
 const TEXT_STYLE_KEY: &str = "text_style";
 
 /// The keys a multileader style takes.
-pub(crate) const MLEADER_STYLE_KEYS: [&str; 9] = [
+pub(crate) const MLEADER_STYLE_KEYS: [&str; 10] = [
     TEXT_STYLE_KEY,
     "text_height",
     "arrowhead",
@@ -33,10 +33,11 @@ pub(crate) const MLEADER_STYLE_KEYS: [&str; 9] = [
     "attachment",
     "leader_color",
     "leader_lineweight",
+    super::annotation_scale::ANNOTATIVE_KEY,
 ];
 
 /// The keys a multileader takes.
-pub(crate) const MLEADER_KEYS: [&str; 14] = [
+pub(crate) const MLEADER_KEYS: [&str; 16] = [
     "leaders",
     "content",
     "landing",
@@ -44,6 +45,8 @@ pub(crate) const MLEADER_KEYS: [&str; 14] = [
     "arrowhead",
     "arrow_size",
     "mleader_style",
+    super::annotation_scale::ANNOTATIVE_KEY,
+    super::annotation_scale::ANNOTATION_SCALES_KEY,
     "layer",
     "color",
     "linetype",
@@ -148,11 +151,13 @@ pub(super) fn mleader_styles(
             style.leader_lineweight =
                 object_lineweight(node, &fields.path_of("leader_lineweight"))?;
         }
+        style.annotative = super::annotation_scale::optional_annotative(&fields)?;
         styles.push(style);
     }
     Ok(styles)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn mleader(
     fields: &Fields,
     units: Unit,
@@ -160,6 +165,7 @@ pub(super) fn mleader(
     text_styles: &[TextStyle],
     mleader_styles: &[MLeaderStyle],
     library: Option<&BlockLibrary>,
+    declared_scales: &[crate::model::AnnotationScale],
     noticed: &mut Vec<Noticed>,
 ) -> Result<MLeader, Error> {
     let mleader_style = mleader_style_name(fields, mleader_styles)?;
@@ -299,6 +305,8 @@ pub(super) fn mleader(
             ),
         ));
     }
+    let (annotative, annotation_scales) =
+        super::annotation_scale::object_annotation(fields, declared_scales)?;
     Ok(MLeader {
         leaders,
         content,
@@ -307,6 +315,8 @@ pub(super) fn mleader(
         arrowhead,
         arrow_size,
         mleader_style,
+        annotative,
+        annotation_scales,
         layer,
         properties: Default::default(),
     })

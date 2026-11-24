@@ -383,6 +383,8 @@ mod tests {
             boundary,
             layer: LAYER_ZERO.into(),
             properties: Default::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         }
     }
 

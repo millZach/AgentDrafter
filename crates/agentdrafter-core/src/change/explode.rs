@@ -476,6 +476,8 @@ fn place_object(
                 boundary,
                 layer,
                 properties,
+                annotative: false,
+                annotation_scales: Vec::new(),
             }))
         }
         Object::Text(t) => {
@@ -498,6 +500,8 @@ fn place_object(
                 layer,
                 field: t.field.clone(),
                 properties,
+                annotative: false,
+                annotation_scales: Vec::new(),
             }))
         }
         Object::MText(t) => {
@@ -521,6 +525,8 @@ fn place_object(
                 layer,
                 field: t.field.clone(),
                 properties,
+                annotative: false,
+                annotation_scales: Vec::new(),
             }))
         }
         Object::Insert(inner) => {
@@ -542,6 +548,8 @@ fn place_object(
                 name: None,
                 layer,
                 properties,
+                annotative: false,
+                annotation_scales: Vec::new(),
             }))
         }
         Object::AttributeDefinition(_)
@@ -975,6 +983,8 @@ fn explode_dimension(
                             layer: dim.layer.clone(),
                             field: None,
                             properties: text_props.clone(),
+                            annotative: false,
+                            annotation_scales: Vec::new(),
                         }));
                     }
                 }
@@ -1198,6 +1208,9 @@ mod tests {
             image_frame: crate::model::WipeoutFrame::Off,
             custom_properties: BTreeMap::new(),
             groups: Vec::new(),
+            annotation_scales: Vec::new(),
+            annotation_scale: None,
+            anno_all_visible: None,
         }
     }
 
@@ -1267,6 +1280,7 @@ mod tests {
             ],
             cells: Vec::new(),
             parameters: Vec::new(),
+            annotative: false,
         });
         let ins = Object::Insert(Insert {
             block: "VALVE".to_owned(),
@@ -1295,6 +1309,8 @@ mod tests {
                 color: ObjectColor::Index(3),
                 ..Properties::default()
             },
+            annotative: false,
+            annotation_scales: Vec::new(),
         });
         let fonts = SheetFonts::find(&sheet, &Settings::default());
         let pieces = compute_explode(&ins, &sheet, &fonts).unwrap();
@@ -1395,6 +1411,8 @@ mod tests {
             }],
             layer: "HATCH".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         });
         let hp = compute_explode(&pat_hatch, &sheet, &fonts).unwrap();
         assert_eq!(hp.len(), 4); // y = 2, 4, 6, 8
@@ -1419,6 +1437,8 @@ mod tests {
             }],
             layer: "FILL".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         });
         let sp = compute_explode(&solid_hatch, &sheet, &fonts).unwrap();
         assert_eq!(sp.len(), 2);
@@ -1440,6 +1460,8 @@ mod tests {
             continued: false,
             layer: "DIM".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         });
         let dp = compute_explode(&dim, &sheet, &fonts).unwrap();
         assert!(dp.iter().any(|o| matches!(o, Object::Line(_))));
@@ -1464,6 +1486,8 @@ mod tests {
             mleader_style: STANDARD_MLEADER_STYLE.to_owned(),
             layer: "NOTES".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         });
         let mp = compute_explode(&mleader, &sheet, &fonts).unwrap();
         assert!(mp.iter().any(|o| matches!(o, Object::Solid(_))));

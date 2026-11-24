@@ -449,6 +449,14 @@ pub struct DisplayListReport {
     /// none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<SheetGroup>,
+    /// Active annotation scale (`CANNOSCALE`), when the sheet declares
+    /// annotation scales or annotative objects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation_scale: Option<String>,
+    /// Defined annotation scales on the sheet (`ACAD_SCALELIST`). Left out when
+    /// the sheet has no annotation scales or annotative objects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotation_scales: Vec<crate::model::AnnotationScale>,
     /// With `snaps`, every point the object snaps find on the objects the
     /// page draws itself, each with its object by its place, the snap,
     /// `which` of the object's points, and for an intersection the other
@@ -629,6 +637,20 @@ pub fn display_list_with(
             Some(preview_of(p, files, &drew, source, settings)?)
         }
     };
+    let has_annotation = sheet.annotation_scale.is_some()
+        || !sheet.annotation_scales.is_empty()
+        || sheet.anno_all_visible.is_some()
+        || sheet.objects.iter().any(|o| sheet.object_is_annotative(o));
+    let annotation_scale = has_annotation.then(|| sheet.active_annotation_scale_name().to_owned());
+    let annotation_scales = if has_annotation {
+        if sheet.annotation_scales.is_empty() {
+            vec![sheet.active_annotation_scale()]
+        } else {
+            sheet.annotation_scales.clone()
+        }
+    } else {
+        Vec::new()
+    };
     Ok(DisplayListReport {
         source: source.display().to_string(),
         name,
@@ -650,6 +672,8 @@ pub fn display_list_with(
         entry: request.entry,
         objects: drawn.objects.clone(),
         groups: drawn.groups.clone(),
+        annotation_scale,
+        annotation_scales,
         snaps,
         edges,
         template: drawn.template,

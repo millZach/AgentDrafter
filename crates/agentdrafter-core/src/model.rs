@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::text::{MText, Text, TextStyle};
 use crate::units::Unit;
 
+pub(crate) mod annotation_scale;
 pub(crate) mod block;
 pub(crate) mod dimension;
 pub(crate) mod dynamic_block;
@@ -31,6 +32,7 @@ pub(crate) mod revision_cloud;
 pub(crate) mod table;
 pub(crate) mod wipeout;
 pub(crate) mod xref;
+pub use annotation_scale::{AnnotationScale, DEFAULT_ANNOTATION_SCALE};
 pub use block::{
     attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert,
 };
@@ -482,6 +484,46 @@ impl Object {
             Object::Viewport(o) => &mut o.properties,
             Object::RasterImage(o) => &mut o.properties,
             Object::PdfUnderlay(o) => &mut o.properties,
+        }
+    }
+
+    /// Whether this object type supports AutoCAD annotation scaling
+    /// (`text`, `mtext`, `dimension`, `mleader`, `hatch`, `insert`).
+    pub fn supports_annotation_scale(&self) -> bool {
+        matches!(
+            self,
+            Object::Text(_)
+                | Object::MText(_)
+                | Object::Dimension(_)
+                | Object::MLeader(_)
+                | Object::Hatch(_)
+                | Object::Insert(_)
+        )
+    }
+
+    /// The object's own `annotative` flag (not counting its style or block).
+    pub fn annotative_flag(&self) -> bool {
+        match self {
+            Object::Text(o) => o.annotative,
+            Object::MText(o) => o.annotative,
+            Object::Dimension(o) => o.annotative,
+            Object::MLeader(o) => o.annotative,
+            Object::Hatch(o) => o.annotative,
+            Object::Insert(o) => o.annotative,
+            _ => false,
+        }
+    }
+
+    /// The annotation scale names explicitly listed on this object.
+    pub fn annotation_scales(&self) -> &[String] {
+        match self {
+            Object::Text(o) => &o.annotation_scales,
+            Object::MText(o) => &o.annotation_scales,
+            Object::Dimension(o) => &o.annotation_scales,
+            Object::MLeader(o) => &o.annotation_scales,
+            Object::Hatch(o) => &o.annotation_scales,
+            Object::Insert(o) => &o.annotation_scales,
+            _ => &[],
         }
     }
 }
@@ -966,6 +1008,18 @@ pub struct Sheet {
     /// (`GROUP` / `ACAD_GROUP`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<Group>,
+    /// Named annotation scales declared on the sheet or read from
+    /// `ACAD_SCALELIST`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotation_scales: Vec<AnnotationScale>,
+    /// Active annotation scale name (`CANNOSCALE`), e.g. `"1:50"`. `None`
+    /// means `"1:1"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation_scale: Option<String>,
+    /// Whether annotative objects draw even when they do not support the
+    /// active viewport or model-space scale (`ANNOALLVISIBLE`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anno_all_visible: Option<bool>,
 }
 
 impl Sheet {
@@ -1186,6 +1240,134 @@ impl Sheet {
             .cloned()
             .or_else(|| DimensionStyle::built_in(name, self.units))
     }
+
+    /// Active annotation scale name (`CANNOSCALE`), defaulting to `"1:1"`.
+    pub fn active_annotation_scale_name(&self) -> &str {
+        self.annotation_scale
+            .as_deref()
+            .unwrap_or(DEFAULT_ANNOTATION_SCALE)
+    }
+
+    /// Resolves an annotation scale name against this sheet's declared
+    /// `annotation_scales` (case-insensitively) or standard ratio syntax
+    /// (`"1:50"`, `"1/4\" = 1'-0\""`, etc.).
+    pub fn resolve_annotation_scale(&self, name: &str) -> Option<AnnotationScale> {
+        self.annotation_scales
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
+            .cloned()
+            .or_else(|| AnnotationScale::from_name(name))
+    }
+
+    /// The sheet's active annotation scale (`CANNOSCALE`), defaulting to `1:1`.
+    pub fn active_annotation_scale(&self) -> AnnotationScale {
+        self.resolve_annotation_scale(self.active_annotation_scale_name())
+            .unwrap_or_else(AnnotationScale::one_to_one)
+    }
+
+    /// The effective annotation scale for `viewport`: its explicit
+    /// `annotation_scale` when set, otherwise a declared scale matching
+    /// `viewport.scale`, otherwise a synthesized scale for `viewport.scale`.
+    pub fn viewport_annotation_scale(&self, viewport: &Viewport) -> AnnotationScale {
+        if let Some(name) = &viewport.annotation_scale {
+            if let Some(scale) = self.resolve_annotation_scale(name) {
+                return scale;
+            }
+        }
+        self.annotation_scales
+            .iter()
+            .find(|s| s.matches_factor(viewport.scale))
+            .cloned()
+            .unwrap_or_else(|| AnnotationScale::from_factor(viewport.scale))
+    }
+
+    /// Whether the named text style is marked `annotative`.
+    pub fn text_style_is_annotative(&self, name: &str) -> bool {
+        self.text_styles
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
+            .is_some_and(|s| s.annotative)
+    }
+
+    /// Whether `object` is effectively annotative on this sheet (via its own
+    /// `annotative` flag, non-empty `annotation_scales`, or its annotative
+    /// style or block definition).
+    pub fn object_is_annotative(&self, object: &Object) -> bool {
+        match object {
+            Object::Text(t) => {
+                t.annotative
+                    || !t.annotation_scales.is_empty()
+                    || self.text_style_is_annotative(&t.style)
+            }
+            Object::MText(m) => {
+                m.annotative
+                    || !m.annotation_scales.is_empty()
+                    || self.text_style_is_annotative(&m.style)
+            }
+            Object::Dimension(d) => {
+                d.annotative
+                    || !d.annotation_scales.is_empty()
+                    || self
+                        .dimension_style(&d.dimension_style)
+                        .is_some_and(|s| s.annotative)
+            }
+            Object::MLeader(m) => {
+                m.annotative
+                    || !m.annotation_scales.is_empty()
+                    || self
+                        .mleader_style(&m.mleader_style)
+                        .is_some_and(|s| s.annotative)
+            }
+            Object::Hatch(h) => h.annotative || !h.annotation_scales.is_empty(),
+            Object::Insert(i) => {
+                i.annotative
+                    || !i.annotation_scales.is_empty()
+                    || self.block_for_insert(i).is_some_and(|b| b.annotative)
+            }
+            _ => false,
+        }
+    }
+
+    /// The annotation scales `object` supports. Empty when `object` is not
+    /// annotative; defaults to `[self.active_annotation_scale()]` when
+    /// annotative with no explicit scale list.
+    pub fn object_annotation_scales(&self, object: &Object) -> Vec<AnnotationScale> {
+        if !self.object_is_annotative(object) {
+            return Vec::new();
+        }
+        let names = object.annotation_scales();
+        if names.is_empty() {
+            return vec![self.active_annotation_scale()];
+        }
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(scale) = self.resolve_annotation_scale(name) {
+                out.push(scale);
+            }
+        }
+        if out.is_empty() {
+            out.push(self.active_annotation_scale());
+        }
+        out
+    }
+
+    /// Whether `object` should be drawn at `scale_factor` (`paper / drawing`).
+    /// Non-annotative objects are always visible; annotative objects are
+    /// visible when `show_all` is true or one of their supported scales matches
+    /// `scale_factor`.
+    pub fn object_visible_at_scale(
+        &self,
+        object: &Object,
+        scale_factor: f64,
+        show_all: bool,
+    ) -> bool {
+        if !self.object_is_annotative(object) || show_all {
+            return true;
+        }
+        self.object_annotation_scales(object)
+            .iter()
+            .any(|s| s.matches_factor(scale_factor))
+    }
 }
 
 /// The paper a sheet is drawn on, as its sheet description or template
@@ -1318,6 +1500,15 @@ pub struct DrawingContents {
     /// Object groups read from `ACAD_GROUP`, referencing indices in `objects`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<Group>,
+    /// Annotation scales read from `ACAD_SCALELIST`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotation_scales: Vec<AnnotationScale>,
+    /// Current annotation scale (`CANNOSCALE`), when non-default or explicitly set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation_scale: Option<String>,
+    /// `ANNOALLVISIBLE` flag when explicitly set in the drawing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anno_all_visible: Option<bool>,
     /// The drawing's first layout the core reads, in the order of their
     /// tabs, whatever tab the drawing was saved on: `objects` then holds
     /// its paper space's objects and viewports beside model space's, and

@@ -180,6 +180,9 @@ pub(crate) fn read_record_with_recovery(
             image_frame: drawing.image_frame,
             custom_properties: drawing.custom_properties,
             groups: drawing.groups,
+            annotation_scales: drawing.annotation_scales,
+            annotation_scale: drawing.annotation_scale,
+            anno_all_visible: drawing.anno_all_visible,
         };
         let resolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source);
         files.extend(resolved_xrefs.files);

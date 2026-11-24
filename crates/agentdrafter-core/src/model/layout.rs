@@ -252,6 +252,10 @@ pub struct Viewport {
     /// How long a length of model space draws on the paper, per unit:
     /// 0.25 for 1:4. More than 0.
     pub scale: f64,
+    /// Optional annotation scale name for this viewport (such as `"1:50"`).
+    /// When `None`, the viewport uses its `scale`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation_scale: Option<String>,
     /// Whether its view is locked, as AutoCAD's display lock keeps it from
     /// being zoomed or panned. It changes nothing it draws.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -464,6 +468,7 @@ mod tests {
             locked: false,
             clip: None,
             frozen_layers: Vec::new(),
+            annotation_scale: None,
             layer: "0".into(),
             properties: Properties::default(),
         };
@@ -486,6 +491,7 @@ mod tests {
             locked: false,
             clip: None,
             frozen_layers: Vec::new(),
+            annotation_scale: None,
             layer: "0".into(),
             properties: Properties::default(),
         };

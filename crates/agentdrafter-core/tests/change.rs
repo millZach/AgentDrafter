@@ -419,6 +419,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("add_group", "GROUP"),
             ("ungroup", "UNGROUP"),
             ("edit_group", "GROUPEDIT"),
+            ("set_annotation_scale", "CANNOSCALE"),
+            ("set_object_scales", "OBJECTSCALE"),
         ]
     );
     let samples = [
@@ -512,6 +514,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "GROUP", "sheet": "S", "name": "FT-101", "targets": [{"id": "S/a"}, {"id": "S/b"}], "description": "Flow transmitter", "selectable": true}),
         json!({"op": "UNGROUP", "sheet": "S", "name": "FT-101"}),
         json!({"op": "GROUPEDIT", "sheet": "S", "name": "FT-101", "add": [{"id": "S/c"}], "rename": "FT-102", "selectable": false}),
+        json!({"op": "CANNOSCALE", "sheet": "S", "scale": "1:50", "anno_all_visible": false, "add_scales": {"1:50": [1, 50]}}),
+        json!({"op": "OBJECTSCALE", "target": {"id": "S/note"}, "annotative": true, "add": ["1:50", "1:100"]}),
     ];
     for (info, sample) in listed.operations.iter().zip(&samples) {
         assert!(info.does.contains(&info.alias), "{}", info.does);

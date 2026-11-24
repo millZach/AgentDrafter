@@ -553,6 +553,8 @@ mod tests {
             continued: false,
             layer: "0".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         }
     }
 
@@ -655,6 +657,8 @@ mod tests {
             continued: false,
             layer: "0".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         };
         near(d.measurement(), 288.4349);
         close(d.sector().unwrap().arc_point(), p(6.6182, 14.301));
@@ -693,6 +697,8 @@ mod tests {
             continued: false,
             layer: "0".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         };
         let laid = d.laid_out(&style, Unit::In, &boxed(0.24));
         let l: Vec<_> = laid.lines().collect();
@@ -746,6 +752,8 @@ mod tests {
             continued: false,
             layer: "0".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         };
         let laid = d.laid_out(&style, Unit::Mm, &boxed(15.0));
         close(laid.text.position, p(541.5698, 76.122));
@@ -791,6 +799,8 @@ mod tests {
             continued: false,
             layer: "0".to_owned(),
             properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
         };
         let laid = d.laid_out(&style, Unit::In, &boxed(1.05));
         let a = arcs(&laid);

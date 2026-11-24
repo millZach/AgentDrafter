@@ -15,10 +15,14 @@ use crate::text::{
 use crate::units::Unit;
 
 /// The keys a text style takes.
-pub(crate) const TEXT_STYLE_KEYS: [&str; 2] = ["font", "width_factor"];
+pub(crate) const TEXT_STYLE_KEYS: [&str; 3] = [
+    "font",
+    "width_factor",
+    super::annotation_scale::ANNOTATIVE_KEY,
+];
 
 /// The keys a single line of text takes.
-pub(crate) const TEXT_KEYS: [&str; 15] = [
+pub(crate) const TEXT_KEYS: [&str; 17] = [
     "contents",
     "field",
     "position",
@@ -27,6 +31,8 @@ pub(crate) const TEXT_KEYS: [&str; 15] = [
     "width_factor",
     "rotation",
     "justify",
+    super::annotation_scale::ANNOTATIVE_KEY,
+    super::annotation_scale::ANNOTATION_SCALES_KEY,
     "layer",
     "color",
     "linetype",
@@ -37,7 +43,7 @@ pub(crate) const TEXT_KEYS: [&str; 15] = [
 ];
 
 /// The keys multiline text takes.
-pub(crate) const MTEXT_KEYS: [&str; 16] = [
+pub(crate) const MTEXT_KEYS: [&str; 18] = [
     "contents",
     "field",
     "position",
@@ -47,6 +53,8 @@ pub(crate) const MTEXT_KEYS: [&str; 16] = [
     "width_factor",
     "rotation",
     "justify",
+    super::annotation_scale::ANNOTATIVE_KEY,
+    super::annotation_scale::ANNOTATION_SCALES_KEY,
     "layer",
     "color",
     "linetype",
@@ -80,6 +88,7 @@ pub(super) fn text_styles(node: &Node) -> Result<Vec<TextStyle>, Error> {
         if let Some(node) = fields.get("width_factor") {
             style.width_factor = width_factor(node, &fields.path_of("width_factor"))?;
         }
+        style.annotative = super::annotation_scale::optional_annotative(&fields)?;
         styles.push(style);
     }
     Ok(styles)
@@ -90,6 +99,7 @@ pub(super) fn text(
     units: Unit,
     layer: String,
     styles: &[TextStyle],
+    declared_scales: &[crate::model::AnnotationScale],
 ) -> Result<Text, Error> {
     let field = match fields.get(super::field::FIELD_KEY) {
         Some(node) if !node.is_bare_null() => Some(super::field::parse_field(
@@ -123,6 +133,8 @@ pub(super) fn text(
         Some(node) => width_factor(node, &fields.path_of("width_factor"))?,
         None => style_of(&style, styles).map_or(1.0, |s| s.width_factor),
     };
+    let (annotative, annotation_scales) =
+        super::annotation_scale::object_annotation(fields, declared_scales)?;
     Ok(Text {
         contents,
         position: point(
@@ -137,6 +149,8 @@ pub(super) fn text(
         justify: justify(fields)?,
         layer,
         field,
+        annotative,
+        annotation_scales,
         properties: Default::default(),
     })
 }
@@ -153,6 +167,7 @@ pub(super) fn mtext(
     units: Unit,
     layer: String,
     styles: &[TextStyle],
+    declared_scales: &[crate::model::AnnotationScale],
 ) -> Result<MText, Error> {
     let field = match fields.get(super::field::FIELD_KEY) {
         Some(node) if !node.is_bare_null() => Some(super::field::parse_field(
@@ -196,6 +211,8 @@ pub(super) fn mtext(
         Some(node) => Some(width_factor(node, &fields.path_of("width_factor"))?),
         None => None,
     };
+    let (annotative, annotation_scales) =
+        super::annotation_scale::object_annotation(fields, declared_scales)?;
     Ok(MText {
         contents,
         position: point(
@@ -211,6 +228,8 @@ pub(super) fn mtext(
         justify: attachment(fields)?,
         layer,
         field,
+        annotative,
+        annotation_scales,
         properties: Default::default(),
     })
 }

@@ -624,6 +624,9 @@ pub(crate) fn plot_dwg_bytes(
         image_frame: drawing.image_frame,
         custom_properties: drawing.custom_properties,
         groups: drawing.groups,
+        annotation_scales: drawing.annotation_scales,
+        annotation_scale: drawing.annotation_scale,
+        anno_all_visible: drawing.anno_all_visible,
     };
     let resolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source);
     let mut files = vec![(SourceKind::of(source), source.to_path_buf(), bytes.to_vec())];

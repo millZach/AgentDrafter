@@ -219,6 +219,8 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                     },
                 },
                 "state": { "$ref": "#/$defs/dynamic_state" },
+                "annotative": { "$ref": "#/$defs/annotative" },
+                "annotation_scales": { "$ref": "#/$defs/object_annotation_scales" },
             }),
         ),
     );
@@ -298,7 +300,7 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
             }),
         ),
     );
-    let [base_point_key, objects_key, parameters_key] = BLOCK_KEYS;
+    let [base_point_key, objects_key, parameters_key, annotative_key] = BLOCK_KEYS;
     defs.insert(
         "block".into(),
         json!({
@@ -331,6 +333,9 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                     "type": "object",
                     "additionalProperties": { "$ref": "#/$defs/dynamic_parameter" },
                 },
+                annotative_key: super::annotation_scale::annotative_property(
+                    "Whether inserts of this block are annotative by default. Without it, false."
+                ),
             },
         }),
     );

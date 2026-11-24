@@ -41,12 +41,13 @@ pub(crate) const MODEL: &str = "model";
 pub(crate) const PAPER: &str = "paper";
 
 /// The keys a viewport takes.
-pub(crate) const VIEWPORT_KEYS: [&str; 15] = [
+pub(crate) const VIEWPORT_KEYS: [&str; 16] = [
     "center",
     "width",
     "height",
     "view_center",
     "scale",
+    super::annotation_scale::ANNOTATION_SCALE_KEY,
     "locked",
     "clip",
     "frozen_layers",
@@ -389,6 +390,7 @@ pub(super) fn viewport(
     units: Unit,
     layer: String,
     layers: &[Layer],
+    declared_scales: &[crate::model::AnnotationScale],
 ) -> Result<Viewport, Error> {
     let clip = match fields.get("clip") {
         Some(node) => Some(clip(node, &fields.path_of("clip"), units)?),
@@ -423,6 +425,14 @@ pub(super) fn viewport(
     let scale_node = fields.require("scale")?;
     let scale_path = fields.path_of("scale");
     let scale = scale(scale_node, &scale_path)?;
+    let annotation_scale = match fields.text(super::annotation_scale::ANNOTATION_SCALE_KEY) {
+        Some(node) => Some(super::annotation_scale::resolve_scale_name(
+            node,
+            &fields.path_of(super::annotation_scale::ANNOTATION_SCALE_KEY),
+            declared_scales,
+        )?),
+        None => None,
+    };
     let locked = match fields.get("locked") {
         Some(node) => boolean(node, &fields.path_of("locked"))?,
         None => false,
@@ -437,6 +447,7 @@ pub(super) fn viewport(
         height,
         view_center,
         scale,
+        annotation_scale,
         locked,
         clip,
         frozen_layers,
@@ -820,6 +831,7 @@ pub(crate) fn viewport_def() -> Value {
                     { "type": "string", "pattern": ratio },
                 ],
             },
+            "annotation_scale": super::annotation_scale::viewport_annotation_scale_property(),
             "locked": {
                 "description": "Whether the viewport's view is locked, as AutoCAD's display \
                                 lock keeps it from being zoomed or panned: change_viewport \

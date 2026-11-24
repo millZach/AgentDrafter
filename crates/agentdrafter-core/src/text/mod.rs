@@ -59,6 +59,9 @@ pub struct TextStyle {
     /// states its own.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub width_factor: f64,
+    /// Whether this text style is annotative (`ANNOTATIVE`).
+    #[serde(default, skip_serializing_if = "crate::model::is_false")]
+    pub annotative: bool,
 }
 
 impl TextStyle {
@@ -68,6 +71,7 @@ impl TextStyle {
             name: name.into(),
             font: font.into(),
             width_factor: 1.0,
+            annotative: false,
         }
     }
 
@@ -271,6 +275,12 @@ pub struct Text {
     /// Optional AutoCAD field attached to this text (`FIELD`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<crate::model::TextField>,
+    /// Whether this text is annotative (`ANNOTATIVE`).
+    #[serde(default, skip_serializing_if = "crate::model::is_false")]
+    pub annotative: bool,
+    /// The annotation scales this annotative text supports (`OBJECTSCALE`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotation_scales: Vec<String>,
     #[serde(flatten)]
     pub properties: crate::model::Properties,
 }
@@ -307,6 +317,12 @@ pub struct MText {
     /// Optional AutoCAD field attached to this multiline text (`FIELD`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<crate::model::TextField>,
+    /// Whether this multiline text is annotative (`ANNOTATIVE`).
+    #[serde(default, skip_serializing_if = "crate::model::is_false")]
+    pub annotative: bool,
+    /// The annotation scales this annotative multiline text supports (`OBJECTSCALE`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotation_scales: Vec<String>,
     #[serde(flatten)]
     pub properties: crate::model::Properties,
 }
