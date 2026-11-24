@@ -310,6 +310,20 @@ pub(crate) fn compute_stretch(
                 })))
             }
         }
+        Object::RasterImage(img) => {
+            if box_.contains(img.position) {
+                Ok(StretchAction::MoveWhole)
+            } else {
+                Ok(StretchAction::Untouched)
+            }
+        }
+        Object::PdfUnderlay(pdf) => {
+            if box_.contains(pdf.position) {
+                Ok(StretchAction::MoveWhole)
+            } else {
+                Ok(StretchAction::Untouched)
+            }
+        }
         Object::RevisionCloud(rc) => match &rc.boundary {
             RevisionCloudBoundary::Rectangle { from, to } => {
                 let corners = [

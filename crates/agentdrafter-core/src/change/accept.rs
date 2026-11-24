@@ -507,7 +507,12 @@ pub(crate) fn stamp_revision(files: &[(SourceKind, &Path, &[u8])]) -> StampRevis
     let own: Vec<(SourceKind, &Path, &[u8])> = files
         .iter()
         .copied()
-        .filter(|(kind, ..)| *kind != SourceKind::Xref)
+        .filter(|(kind, ..)| {
+            !matches!(
+                kind,
+                SourceKind::Xref | SourceKind::Image | SourceKind::PdfUnderlay
+            )
+        })
         .collect();
     match own.as_slice() {
         [(SourceKind::Dwg | SourceKind::Dxf, dwg, bytes), rest @ ..] => {

@@ -52,6 +52,18 @@ _Avoid_: text DWG, export file
 Another DWG or DXF file linked into a host drawing (`attach`, carried along when the host is itself referenced, or `overlay`, drawn in the host only) as a block record holding a file path rather than embedded geometry, placed by regular `insert` objects (`xrefs:` in sheet descriptions and templates, `attach_xref` / `XATTACH` / `XREF`, `detach_xref` / `XDETACH`, and `bind_xref` / `XBIND`). Resolved from disk for drawing, querying and checking without embedding geometry into built DWGs, with missing or cyclic references reported under `unresolved_xrefs` and top-level `warnings`.
 _Avoid_: linked file, external block, underlay (an underlay is a PDF or raster image)
 
+**Raster image**:
+An external bitmap image (PNG, JPEG, BMP, GIF or TIFF) linked into a drawing (`image` object, AutoCAD's `IMAGE` / `IMAGEDEF` / `IMAGEDEF_REACTOR`, attached with `add_image` / `IMAGEATTACH` / `IMAGE`), placed on a sheet, template, row or inside a block at a position, width, optional height and rotation, with optional polygonal clip boundary (and inverted clip), brightness, contrast, fade and alpha transparency. Resolved from disk into the display list without embedding pixels in built DWGs, with missing or unreadable files reported under `unresolved_media` and top-level `warnings`.
+_Avoid_: bitmap, picture, texture
+
+**PDF underlay**:
+One page of an external PDF file linked into a drawing (`pdf_underlay` object, AutoCAD's `PDFUNDERLAY` / `PDFDEFINITION`, attached with `add_pdf_underlay` / `PDFATTACH` / `PDFUNDERLAY`), placed at a position, scale and rotation, with optional polygonal clip boundary (and inverted clip), contrast, fade, monochrome and unloaded state. Rasterised from disk into the display list for PNG, PDF and WebGL2 drawing, with missing files or out-of-range pages reported under `unresolved_media` and top-level `warnings`.
+_Avoid_: PDF import (importing converts PDF vectors into geometry; an underlay links the PDF page)
+
+**Image frame**:
+The drawing-wide setting (`image_frame`: `off`, `on`, or `display`; AutoCAD's `IMAGEFRAME` / `RASTERVARIABLES` in `ACAD_IMAGE_VARS`) that controls whether the boundary frames of raster images and PDF underlays draw and plot.
+_Avoid_: image border, crop box
+
 **Sheet**:
 One titled page that prints: a border, a title block and the content inside them. It is drawn in model space alone, or in a layout: its border and title block in paper space, and its content in model space, shown through viewports. A sheet drawn in several layouts is one DWG that prints once for each layout, each on its own paper, all showing its one model space; it keeps one name, and its objects one set of IDs.
 _Avoid_: page, layout (a layout is AutoCAD's paper-space tab, which may hold a sheet)

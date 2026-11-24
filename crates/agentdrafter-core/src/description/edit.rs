@@ -1862,7 +1862,7 @@ impl RecordFile {
             match (kind.as_str(), entry.key.as_str()) {
                 ("line", "from" | "to")
                 | ("arc" | "circle" | "ellipse", "center")
-                | ("text" | "mtext" | "insert" | "table", "position") => {
+                | ("text" | "mtext" | "insert" | "table" | "image" | "pdf_underlay", "position") => {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
                 ("donut", "center") => move_point(&mut entry.value, by, units, &field)?,
@@ -1886,6 +1886,7 @@ impl RecordFile {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
                 ("polyline" | "leader" | "dimension" | "wipeout", "points")
+                | ("image" | "pdf_underlay", "clip")
                 | ("spline", "fit_points" | "control_points")
                 | ("solid", "corners")
                 | ("revision_cloud", "polygon") => {

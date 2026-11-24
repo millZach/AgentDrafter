@@ -17,7 +17,7 @@ use crate::build::BuildReport;
 use crate::change::{AcceptReport, ChangeReport};
 use crate::check::CheckReport;
 use crate::display_list::DisplayListReport;
-use crate::model::UnresolvedXref;
+use crate::model::{MediaKind, UnresolvedMedia, UnresolvedXref};
 use crate::original::ReadReport;
 use crate::plot::{PlotReport, PlotSetReport};
 use crate::query::QueryReport;
@@ -35,13 +35,16 @@ pub enum WarningCode {
     FontLookAlike,
     /// An external reference (xref) could not be found or loaded from disk.
     UnresolvedXref,
+    /// A raster image or PDF underlay could not be found or decoded from disk.
+    UnresolvedMedia,
 }
 
-/// One warning at the top of a reply: a font a look-alike stood in for, or an
-/// external reference that could not be found or loaded.
+/// One warning at the top of a reply: a font a look-alike stood in for, an
+/// external reference, or a raster image / PDF underlay that could not be
+/// found or loaded.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Warning {
-    /// `font_look_alike` or `unresolved_xref`.
+    /// `font_look_alike`, `unresolved_xref`, or `unresolved_media`.
     pub code: WarningCode,
     /// The font that was asked for, as the text style names it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -52,10 +55,16 @@ pub struct Warning {
     /// The external reference block name, for `unresolved_xref`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xref: Option<String>,
-    /// The external reference path that was looked for, for `unresolved_xref`.
+    /// The attachment kind (`image` or `pdf_underlay`), for `unresolved_media`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_kind: Option<MediaKind>,
+    /// The PDF page name, for an unresolved PDF underlay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
+    /// The path that was looked for, for `unresolved_xref` or `unresolved_media`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// Why the external reference could not be loaded, for `unresolved_xref`.
+    /// Why the reference or attachment could not be loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Every sheet it was used on, in the order the reply gives them;
@@ -84,6 +93,8 @@ impl Warnings {
                     font: font.to_owned(),
                     look_alike: look_alike.to_owned(),
                     xref: None,
+                    media_kind: None,
+                    page: None,
                     path: None,
                     reason: None,
                     sheets: Vec::new(),
@@ -115,6 +126,8 @@ impl Warnings {
                     font: String::new(),
                     look_alike: String::new(),
                     xref: Some(xref.name.clone()),
+                    media_kind: None,
+                    page: None,
                     path: Some(xref.path.clone()),
                     reason: Some(xref.reason.clone()),
                     sheets: Vec::new(),
@@ -134,6 +147,45 @@ impl Warnings {
     pub(crate) fn unresolved_xrefs(&mut self, sheet: &str, unresolved: &[UnresolvedXref]) {
         for xref in unresolved {
             self.unresolved_xref(xref, Some(sheet));
+        }
+    }
+
+    /// Notes an unresolved raster image or PDF underlay on `sheet`.
+    pub(crate) fn unresolved_media(&mut self, media: &UnresolvedMedia, sheet: Option<&str>) {
+        let at = match self.0.iter().position(|w| {
+            w.code == WarningCode::UnresolvedMedia
+                && w.media_kind == Some(media.kind)
+                && w.path.as_deref() == Some(media.path.as_str())
+                && w.page == media.page
+        }) {
+            Some(at) => at,
+            None => {
+                self.0.push(Warning {
+                    code: WarningCode::UnresolvedMedia,
+                    font: String::new(),
+                    look_alike: String::new(),
+                    xref: None,
+                    media_kind: Some(media.kind),
+                    page: media.page.clone(),
+                    path: Some(media.path.clone()),
+                    reason: Some(media.reason.clone()),
+                    sheets: Vec::new(),
+                });
+                self.0.len() - 1
+            }
+        };
+        if let Some(sheet) = sheet {
+            let sheets = &mut self.0[at].sheets;
+            if !sheets.iter().any(|s| s == sheet) {
+                sheets.push(sheet.to_owned());
+            }
+        }
+    }
+
+    /// Notes every unresolved raster image or PDF underlay on `sheet`.
+    pub(crate) fn unresolved_medias(&mut self, sheet: &str, unresolved: &[UnresolvedMedia]) {
+        for media in unresolved {
+            self.unresolved_media(media, Some(sheet));
         }
     }
 
@@ -168,6 +220,20 @@ impl Warnings {
                     }
                     for sheet in &warning.sheets {
                         self.unresolved_xref(&xref, Some(sheet));
+                    }
+                }
+                WarningCode::UnresolvedMedia => {
+                    let media = UnresolvedMedia {
+                        kind: warning.media_kind.unwrap_or(MediaKind::Image),
+                        path: warning.path.clone().unwrap_or_default(),
+                        page: warning.page.clone(),
+                        reason: warning.reason.clone().unwrap_or_default(),
+                    };
+                    if warning.sheets.is_empty() {
+                        self.unresolved_media(&media, None);
+                    }
+                    for sheet in &warning.sheets {
+                        self.unresolved_media(&media, Some(sheet));
                     }
                 }
             }
@@ -223,6 +289,7 @@ impl Warns for RenderReport {
         let sheet = own_sheet(&self.source);
         warnings.sheet(&sheet, &self.font_substitutions);
         warnings.unresolved_xrefs(&sheet, &self.unresolved_xrefs);
+        warnings.unresolved_medias(&sheet, &self.unresolved_media);
     }
 }
 
@@ -231,6 +298,7 @@ impl Warns for PlotReport {
         let sheet = own_sheet(&self.source);
         warnings.sheet(&sheet, &self.font_substitutions);
         warnings.unresolved_xrefs(&sheet, &self.unresolved_xrefs);
+        warnings.unresolved_medias(&sheet, &self.unresolved_media);
     }
 }
 
@@ -240,6 +308,7 @@ impl Warns for PlotSetReport {
             if let Some(result) = &sheet.result {
                 warnings.sheet(&sheet.sheet, &result.font_substitutions);
                 warnings.unresolved_xrefs(&sheet.sheet, &result.unresolved_xrefs);
+                warnings.unresolved_medias(&sheet.sheet, &result.unresolved_media);
             }
         }
     }
@@ -249,12 +318,14 @@ impl Warns for DisplayListReport {
     fn warn(&self, warnings: &mut Warnings) {
         warnings.sheet(&self.sheet, &self.font_substitutions);
         warnings.unresolved_xrefs(&self.sheet, &self.unresolved_xrefs);
+        warnings.unresolved_medias(&self.sheet, &self.unresolved_media);
     }
 }
 
 impl Warns for ReadReport {
     fn warn(&self, warnings: &mut Warnings) {
         warnings.unresolved_xrefs(&self.sheet, &self.unresolved_xrefs);
+        warnings.unresolved_medias(&self.sheet, &self.unresolved_media);
     }
 }
 
@@ -262,6 +333,7 @@ impl Warns for QueryReport {
     fn warn(&self, warnings: &mut Warnings) {
         for sheet in &self.sheets {
             warnings.unresolved_xrefs(sheet, &self.unresolved_xrefs);
+            warnings.unresolved_medias(sheet, &self.unresolved_media);
         }
     }
 }

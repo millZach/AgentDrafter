@@ -24,14 +24,18 @@ fn items_of(list: &DisplayList, object: usize) -> Vec<&Item> {
 fn runs(item: &Item) -> &Vec<Vec<Point2>> {
     match &item.shape {
         Shape::Stroke { runs, .. } => runs,
-        Shape::Fill { .. } | Shape::Mask { .. } => panic!("{item:?} is a fill or mask"),
+        Shape::Fill { .. } | Shape::Mask { .. } | Shape::Image { .. } => {
+            panic!("{item:?} is a fill, mask or image")
+        }
     }
 }
 
 fn lineweight(item: &Item) -> f64 {
     match &item.shape {
         Shape::Stroke { lineweight, .. } => *lineweight,
-        Shape::Fill { .. } | Shape::Mask { .. } => panic!("{item:?} is a fill or mask"),
+        Shape::Fill { .. } | Shape::Mask { .. } | Shape::Image { .. } => {
+            panic!("{item:?} is a fill, mask or image")
+        }
     }
 }
 

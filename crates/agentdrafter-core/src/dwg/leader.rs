@@ -336,7 +336,7 @@ pub(super) fn check_library_arrowheads(
         };
         let expected: Option<Vec<Object>> = arrow_entities(*arrowhead)
             .iter()
-            .map(|e| super::read_object(e, &[]))
+            .map(|e| super::read_object(None, e, &[]))
             .collect();
         let same = expected.is_some_and(|expected| {
             block.base_point.x == 0.0

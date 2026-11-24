@@ -85,6 +85,7 @@ mod import;
 mod interface;
 mod leftovers;
 mod looking_at;
+mod media;
 mod model;
 mod original;
 mod output;
@@ -148,8 +149,8 @@ pub use display_list::{
 };
 pub use display_snaps::DisplaySnap;
 pub use draw::{
-    nearest, object_bounds, outlines, pick, Bounds, Color, DisplayList, FillRule, Item, Outline,
-    PageFrom, Point2, Shape, TextRun,
+    nearest, object_bounds, outlines, pick, Bounds, Color, DisplayImage, DisplayList, FillRule,
+    Item, Outline, PageFrom, Point2, Shape, TextRun,
 };
 pub use error::{Error, ErrorCode};
 pub use geometry::measure::{Box3, Measures};
@@ -165,6 +166,7 @@ pub use looking_at::{
     look_at, looking_at, looking_at_left_off, LookAtRequest, LookingAtReport, LookingAtRequest,
     LOOKING_AT_FILE, MOST_SELECTED,
 };
+pub use media::{apply_image_adjustments, decode_base64, decode_png_rgba, encode_base64};
 pub use model::{
     attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, DynamicParameter,
     DynamicParameterKind, DynamicValue, Insert, LookupRow, VisibilityState,
@@ -188,6 +190,10 @@ pub use model::{
 pub use model::{Cell, Clip, Layout, Paper, Viewport};
 pub use model::{FieldItem, FieldKind, TextField, DEFAULT_FIELD_TEMPLATE, UNEVALUATED_FIELD};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
+pub use model::{
+    MediaKind, PdfUnderlay, RasterImage, ResolvedMedia, UnresolvedMedia, DEFAULT_IMAGE_BRIGHTNESS,
+    DEFAULT_IMAGE_CONTRAST, DEFAULT_PDF_CONTRAST, MAX_PDF_FADE,
+};
 pub use model::{
     ObjectPlotStyle, ObjectTransparency, PageSetup, PlotArea, PlotScale, PlotStyleMode,
     MAX_TRANSPARENCY, NORMAL_PLOT_STYLE,

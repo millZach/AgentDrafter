@@ -27,6 +27,12 @@ miniz_oxide = "0.8.9"
 # Regular expressions for replace_text (MIT or Apache-2.0).
 regex = "1"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Raster image decoding (PNG, JPEG, BMP, GIF, TIFF) for raster images (MIT or Apache-2.0).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "tiff"] }
+# Pure-Rust PDF rasteriser for PDF underlays (Apache-2.0 or MIT; embedded Standard 14 fonts BSD-3-Clause).
+hayro = { version = "0.9", features = ["embed-fonts"] }
+
 [features]
 # Only for tests: a process whose environment holds
 # AGENTDRAFTER_TEST_STOP_COMMIT_AT=<step> stops a commit at that step and

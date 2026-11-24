@@ -102,6 +102,7 @@ pub(crate) fn check_drawing_xrefs(
         blocks: drawing.blocks.clone(),
         xrefs: drawing.xrefs.clone(),
         resolved_xrefs: Vec::new(),
+        resolved_media: Vec::new(),
         objects: Vec::new(),
         paper: None,
         page_setup: None,
@@ -109,6 +110,7 @@ pub(crate) fn check_drawing_xrefs(
         layout: None,
         other_layouts: Vec::new(),
         wipeout_frame: drawing.wipeout_frame,
+        image_frame: drawing.image_frame,
         custom_properties: drawing.custom_properties.clone(),
     };
     resolve_sheet_xrefs(&mut sheet, host_path).unresolved
@@ -591,6 +593,14 @@ pub(crate) fn prefix_object(object: &mut Object, prefix: &str, block_renames: &[
             prefix_properties(&mut o.properties, prefix);
         }
         Object::Wipeout(o) => {
+            rewrite_layer(&mut o.layer);
+            prefix_properties(&mut o.properties, prefix);
+        }
+        Object::RasterImage(o) => {
+            rewrite_layer(&mut o.layer);
+            prefix_properties(&mut o.properties, prefix);
+        }
+        Object::PdfUnderlay(o) => {
             rewrite_layer(&mut o.layer);
             prefix_properties(&mut o.properties, prefix);
         }

@@ -416,6 +416,10 @@ pub struct DisplayListReport {
     /// every reference resolved cleanly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
+    /// Raster images or PDF underlays that could not be found or decoded. Left
+    /// out when every attachment resolved cleanly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_media: Vec<crate::model::UnresolvedMedia>,
     /// The journal's entry the set is drawn as it was just after, when it
     /// was asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -620,6 +624,7 @@ pub fn display_list_with(
         font_substitutions: fonts.substitutions(),
         hatches_cut_short: list.hatches_cut_short.clone(),
         unresolved_xrefs: drawn.unresolved_xrefs,
+        unresolved_media: drawn.unresolved_media,
         entry: request.entry,
         objects: drawn.objects.clone(),
         snaps,
@@ -896,6 +901,7 @@ struct Drawn {
     objects_not_drawn: usize,
     not_drawn: Vec<crate::model::RecordsOfKind>,
     unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
+    unresolved_media: Vec<crate::model::UnresolvedMedia>,
     objects: Vec<SheetObject>,
     /// A drawing set's sheet's template and the sheets built from it.
     template: Option<TemplateReach>,
@@ -1074,6 +1080,8 @@ fn read(
         let host = record.file.clone();
         let unresolved_xrefs =
             crate::xref::resolve_sheet_xrefs(&mut record.sheet, &host).unresolved;
+        let unresolved_media =
+            crate::media::resolve_sheet_media_for_host(&mut record.sheet, &host).unresolved;
         let ids: Vec<(String, Option<String>)> = (0..record.objects.len())
             .map(|i| (record.id(i), record.objects[i].name.clone()))
             .collect();
@@ -1119,6 +1127,7 @@ fn read(
             objects_not_drawn: 0,
             not_drawn: Vec::new(),
             unresolved_xrefs,
+            unresolved_media,
             template,
         });
     }
@@ -1160,6 +1169,7 @@ fn read(
         objects_not_drawn: record.objects_not_drawn,
         not_drawn: record.not_drawn,
         unresolved_xrefs: record.unresolved_xrefs,
+        unresolved_media: record.unresolved_media,
         template: None,
     })
 }

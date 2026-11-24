@@ -86,6 +86,8 @@ fn object_kind_name(object: &Object) -> &'static str {
         Object::Solid(_) => "solid",
         Object::RevisionCloud(_) => "revision_cloud",
         Object::Wipeout(_) => "wipeout",
+        Object::RasterImage(_) => "image",
+        Object::PdfUnderlay(_) => "pdf_underlay",
         Object::Text(_) => "text",
         Object::MText(_) => "mtext",
         Object::AttributeDefinition(_) => "attdef",
@@ -1426,6 +1428,82 @@ pub(crate) fn object_to_record_keys(
             );
             push_common_keys(&mut keys, &w.layer, &w.properties, id, name, space);
             ("wipeout", keys)
+        }
+        Object::RasterImage(img) => {
+            keys.insert("path".to_owned(), json!(img.path));
+            keys.insert("position".to_owned(), pt_json(img.position));
+            keys.insert("width".to_owned(), json!(img.width));
+            if let Some(h) = img.height {
+                keys.insert("height".to_owned(), json!(h));
+            }
+            if img.rotation != 0.0 {
+                keys.insert("rotation".to_owned(), json!(img.rotation));
+            }
+            if let Some(clip) = &img.clip {
+                keys.insert(
+                    "clip".to_owned(),
+                    Value::Array(clip.iter().map(|&p| json!([p[0], p[1], 0.0])).collect()),
+                );
+            }
+            if img.clip_inverted {
+                keys.insert("clip_inverted".to_owned(), Value::Bool(true));
+            }
+            if !img.show {
+                keys.insert("show".to_owned(), Value::Bool(false));
+            }
+            if img.brightness != 50 {
+                keys.insert("brightness".to_owned(), json!(img.brightness));
+            }
+            if img.contrast != 50 {
+                keys.insert("contrast".to_owned(), json!(img.contrast));
+            }
+            if img.fade != 0 {
+                keys.insert("fade".to_owned(), json!(img.fade));
+            }
+            if !img.transparent {
+                keys.insert("transparent".to_owned(), Value::Bool(false));
+            }
+            push_common_keys(&mut keys, &img.layer, &img.properties, id, name, space);
+            ("image", keys)
+        }
+        Object::PdfUnderlay(pdf) => {
+            keys.insert("path".to_owned(), json!(pdf.path));
+            if pdf.page != "1" {
+                keys.insert("page".to_owned(), json!(pdf.page));
+            }
+            keys.insert("position".to_owned(), pt_json(pdf.position));
+            if (pdf.scale - 1.0).abs() > 1e-12 {
+                keys.insert("scale".to_owned(), json!(pdf.scale));
+            }
+            if pdf.rotation != 0.0 {
+                keys.insert("rotation".to_owned(), json!(pdf.rotation));
+            }
+            if let Some(clip) = &pdf.clip {
+                keys.insert(
+                    "clip".to_owned(),
+                    Value::Array(clip.iter().map(|&p| json!([p[0], p[1], 0.0])).collect()),
+                );
+            }
+            if pdf.clip_inverted {
+                keys.insert("clip_inverted".to_owned(), Value::Bool(true));
+            }
+            if !pdf.show {
+                keys.insert("show".to_owned(), Value::Bool(false));
+            }
+            if pdf.unloaded {
+                keys.insert("unloaded".to_owned(), Value::Bool(true));
+            }
+            if pdf.monochrome {
+                keys.insert("monochrome".to_owned(), Value::Bool(true));
+            }
+            if pdf.contrast != 100 {
+                keys.insert("contrast".to_owned(), json!(pdf.contrast));
+            }
+            if pdf.fade != 0 {
+                keys.insert("fade".to_owned(), json!(pdf.fade));
+            }
+            push_common_keys(&mut keys, &pdf.layer, &pdf.properties, id, name, space);
+            ("pdf_underlay", keys)
         }
         Object::RevisionCloud(rc) => {
             match &rc.boundary {

@@ -291,6 +291,10 @@ pub struct QueryReport {
     /// out when every reference resolved cleanly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
+    /// Raster images and PDF underlays that could not be found or decoded
+    /// from disk. Left out when every attachment resolved cleanly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_media: Vec<crate::model::UnresolvedMedia>,
     /// The drawing set's inconsistent mark, when a change set landed on
     /// some of its sheets and failed on others: the answer reads the
     /// records as they are.
@@ -592,6 +596,7 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
         objects_not_read,
         not_read,
         unresolved_xrefs,
+        unresolved_media,
     } = load(source, request.sheet.as_deref(), need_set_paper)?;
     let looked_at: Vec<&SheetRecord> = records.iter().collect();
     let looked = LookedAt(&looked_at, request.sheet.is_some());
@@ -631,6 +636,7 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
         objects_not_read,
         not_read,
         unresolved_xrefs,
+        unresolved_media,
         inconsistent: if source.is_dir() {
             crate::change::inconsistent(source)
         } else {
@@ -647,6 +653,7 @@ struct Loaded {
     objects_not_read: usize,
     not_read: Vec<RecordsOfKind>,
     unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
+    unresolved_media: Vec<crate::model::UnresolvedMedia>,
 }
 
 /// Reads the sheets a query looks at, with the declared unit: every sheet
@@ -667,6 +674,7 @@ fn load(source: &Path, sheet: Option<&str>, need_set_paper: bool) -> Result<Load
                 objects_not_read: loaded.objects_not_read,
                 not_read: loaded.not_read,
                 unresolved_xrefs: loaded.unresolved_xrefs,
+                unresolved_media: loaded.unresolved_media,
             });
         }
         let mut record = read_sheet_record(source)?;
@@ -675,12 +683,15 @@ fn load(source: &Path, sheet: Option<&str>, need_set_paper: bool) -> Result<Load
         }
         let unresolved_xrefs =
             crate::xref::resolve_sheet_xrefs(&mut record.sheet, source).unresolved;
+        let unresolved_media =
+            crate::media::resolve_sheet_media_for_host(&mut record.sheet, source).unresolved;
         return Ok(Loaded {
             units: Some(record.sheet.units),
             records: vec![record],
             objects_not_read: 0,
             not_read: Vec::new(),
             unresolved_xrefs,
+            unresolved_media,
         });
     }
     let set = SavedSet::read(source)?;
@@ -689,6 +700,7 @@ fn load(source: &Path, sheet: Option<&str>, need_set_paper: bool) -> Result<Load
         return Err(no_such_sheet(sheet, &set.names()));
     }
     let mut unresolved_xrefs = Vec::new();
+    let mut unresolved_media = Vec::new();
     let records = looked_at
         .into_iter()
         .map(|row| {
@@ -706,6 +718,12 @@ fn load(source: &Path, sheet: Option<&str>, need_set_paper: bool) -> Result<Load
                     unresolved_xrefs.push(u);
                 }
             }
+            for u in crate::media::resolve_sheet_media_for_host(&mut record.sheet, &host).unresolved
+            {
+                if !unresolved_media.contains(&u) {
+                    unresolved_media.push(u);
+                }
+            }
             Ok(record)
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -715,6 +733,7 @@ fn load(source: &Path, sheet: Option<&str>, need_set_paper: bool) -> Result<Load
         objects_not_read: 0,
         not_read: Vec::new(),
         unresolved_xrefs,
+        unresolved_media,
     })
 }
 
@@ -1230,6 +1249,23 @@ impl Space {
                     draw::Shape::Fill { rule, contours } => d.fills.push((rule, contours)),
                     draw::Shape::Mask { contours } => {
                         d.fills.push((draw::FillRule::EvenOdd, contours))
+                    }
+                    draw::Shape::Image {
+                        origin,
+                        u_axis,
+                        v_axis,
+                        clip,
+                        clip_inverted,
+                        ..
+                    } => {
+                        let outline = draw::Shape::image_outline(
+                            origin,
+                            u_axis,
+                            v_axis,
+                            clip.as_deref(),
+                            clip_inverted,
+                        );
+                        d.fills.push((draw::FillRule::EvenOdd, vec![outline]));
                     }
                 }
             }
@@ -1896,6 +1932,8 @@ fn points_of(object: &Object) -> Vec<(String, Point3)> {
         Object::Donut(donut) => one("center", donut.center),
         Object::Solid(solid) => listed("corners", &solid.corners),
         Object::Wipeout(wipeout) => listed("points", &wipeout.points),
+        Object::RasterImage(image) => one("position", image.position),
+        Object::PdfUnderlay(underlay) => one("position", underlay.position),
         Object::RevisionCloud(cloud) => match &cloud.boundary {
             crate::model::RevisionCloudBoundary::Rectangle { from, to } => {
                 vec![("from".to_owned(), *from), ("to".to_owned(), *to)]

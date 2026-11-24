@@ -52,6 +52,7 @@ mod ids;
 mod import;
 mod layout;
 mod leader;
+mod media;
 mod page_setup;
 mod revise;
 mod table;
@@ -265,8 +266,28 @@ pub(crate) fn write_new_sheet_as(
     if has_wipeout || !sheet.wipeout_frame.is_off() {
         wipeout::write_wipeout_frame(&mut drawing, sheet.wipeout_frame);
     }
+    let has_raster_image = sheet
+        .objects
+        .iter()
+        .chain(sheet.blocks.iter().flat_map(|b| b.objects.iter()))
+        .any(|o| matches!(o, Object::RasterImage(_)));
+    if has_raster_image || !sheet.image_frame.is_off() {
+        media::write_image_frame(&mut drawing, sheet.image_frame, sheet.units);
+    }
     table::add_table_styles(&mut drawing, sheet)?;
     let units = insertion_units(sheet.units);
+    let mut media_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(dir) = record.file.parent().filter(|p| !p.as_os_str().is_empty()) {
+        media_dirs.push(dir.to_path_buf());
+        if let Some(lib) = &sheet.block_library {
+            if let Some(lib_dir) = dir.join(lib).parent() {
+                if lib_dir != dir {
+                    media_dirs.push(lib_dir.to_path_buf());
+                }
+            }
+        }
+    }
+    let media_dir_refs: Vec<&Path> = media_dirs.iter().map(std::path::PathBuf::as_path).collect();
     for definition in &sheet.blocks {
         // Dynamic blocks write their default-evaluated geometry into the named
         // block record so default-state inserts draw cleanly without overlapping
@@ -274,7 +295,29 @@ pub(crate) fn write_new_sheet_as(
         let master = definition.evaluated(&std::collections::BTreeMap::new());
         let owner = block::add_block_record(&mut drawing, master.as_ref(), units)?;
         for object in &master.objects {
-            let mut dwg_object = dwg_object(object, start_of, &sheet.blocks)?;
+            let mut dwg_object = match object {
+                Object::RasterImage(img) => {
+                    let h = drawing.allocate_handle();
+                    let px = sheet
+                        .resolved_media_for(crate::model::MediaKind::Image, &img.path, None)
+                        .map(|m| (m.width_px, m.height_px))
+                        .or_else(|| {
+                            crate::media::probe_image_dimensions(&img.path, &media_dir_refs)
+                        });
+                    let (mut e, _) = media::dwg_raster_image(&mut drawing, img, px, h);
+                    img.layer.clone_into(&mut e.common_mut().layer);
+                    set_properties(e.common_mut(), &img.properties);
+                    e
+                }
+                Object::PdfUnderlay(pdf) => {
+                    let h = drawing.allocate_handle();
+                    let (mut e, _) = media::dwg_pdf_underlay(&mut drawing, pdf, h);
+                    pdf.layer.clone_into(&mut e.common_mut().layer);
+                    set_properties(e.common_mut(), &pdf.properties);
+                    e
+                }
+                _ => dwg_object(object, start_of, &sheet.blocks)?,
+            };
             dwg_object.common_mut().owner_handle = owner;
             if named_plot_styles {
                 page_setup::set_entity_plot_style(
@@ -341,6 +384,56 @@ pub(crate) fn write_new_sheet_as(
                 &on.name,
                 (&record.name, &written.id, written.name.as_deref()),
             )?;
+            id_to_handle.insert(written.id.to_lowercase(), handle);
+            continue;
+        }
+        if let Object::RasterImage(img) = object {
+            let h = drawing.allocate_handle();
+            let px = sheet
+                .resolved_media_for(crate::model::MediaKind::Image, &img.path, None)
+                .map(|m| (m.width_px, m.height_px))
+                .or_else(|| crate::media::probe_image_dimensions(&img.path, &media_dir_refs));
+            let (mut dwg_img, _) = media::dwg_raster_image(&mut drawing, img, px, h);
+            let common = dwg_img.common_mut();
+            img.layer.clone_into(&mut common.layer);
+            set_properties(common, &img.properties);
+            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    dwg_img.common_mut(),
+                    &img.properties.plot_style,
+                );
+            }
+            let handle = add_to(&mut drawing, dwg_img, paper).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add a raster image to the drawing: {e}"),
+                )
+            })?;
+            id_to_handle.insert(written.id.to_lowercase(), handle);
+            continue;
+        }
+        if let Object::PdfUnderlay(pdf) = object {
+            let h = drawing.allocate_handle();
+            let (mut dwg_pdf, _) = media::dwg_pdf_underlay(&mut drawing, pdf, h);
+            let common = dwg_pdf.common_mut();
+            pdf.layer.clone_into(&mut common.layer);
+            set_properties(common, &pdf.properties);
+            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    dwg_pdf.common_mut(),
+                    &pdf.properties.plot_style,
+                );
+            }
+            let handle = add_to(&mut drawing, dwg_pdf, paper).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add a PDF underlay to the drawing: {e}"),
+                )
+            })?;
             id_to_handle.insert(written.id.to_lowercase(), handle);
             continue;
         }
@@ -906,6 +999,12 @@ fn dwg_object(
             return Err(Error::new(
                 ErrorCode::DwgWrite,
                 "a viewport belongs in a sheet's paper space",
+            ))
+        }
+        Object::RasterImage(_) | Object::PdfUnderlay(_) => {
+            return Err(Error::new(
+                ErrorCode::DwgWrite,
+                "raster images and PDF underlays require drawing-level definition wiring",
             ))
         }
         Object::Insert(insert) => {
@@ -1557,6 +1656,7 @@ fn contents(
         objects_not_read: not_read.len(),
         ltscale: drawing.header.linetype_scale,
         wipeout_frame: wipeout::read_wipeout_frame(drawing),
+        image_frame: media::read_image_frame(drawing),
         custom_properties: field::read_custom_properties(drawing),
         layout,
         other_layouts,
@@ -2333,9 +2433,13 @@ fn read_layer(
 /// One of our objects, if the DWG object and its own colour, linetype,
 /// lineweight and linetype scale have a model in the core. An insert is
 /// read only when its block is one of `blocks`.
-pub(super) fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
+pub(super) fn read_object(
+    drawing: Option<&CadDocument>,
+    dwg_object: &EntityType,
+    blocks: &[Block],
+) -> Option<Object> {
     read_object_in(
-        None,
+        drawing,
         dwg_object,
         blocks,
         &[],
@@ -2390,6 +2494,12 @@ fn read_object_in(
             })
         }
         EntityType::Wipeout(w) => Object::Wipeout(wipeout::read_wipeout(w, layer)?),
+        EntityType::RasterImage(img) => {
+            Object::RasterImage(media::read_raster_image(drawing?, img, layer)?)
+        }
+        EntityType::Underlay(u) => {
+            Object::PdfUnderlay(media::read_pdf_underlay(drawing?, u, layer)?)
+        }
         EntityType::Polyline3D(spatial)
             if !spatial.flags.spline_fit
                 && !spatial.flags.is_3d_mesh
@@ -3562,6 +3672,7 @@ mod tests {
             blocks: Vec::new(),
             xrefs: Vec::new(),
             resolved_xrefs: Vec::new(),
+            resolved_media: Vec::new(),
             objects: Vec::new(),
             paper: None,
             page_setup: None,
@@ -3569,6 +3680,7 @@ mod tests {
             layout: None,
             other_layouts: Vec::new(),
             wipeout_frame: crate::model::WipeoutFrame::Off,
+            image_frame: crate::model::WipeoutFrame::Off,
             custom_properties: std::collections::BTreeMap::new(),
         }
     }
@@ -4629,13 +4741,13 @@ mod tests {
     #[test]
     fn an_objects_own_properties_are_read_and_a_true_colour_is_not() {
         let mut line = DwgLine::from_points(Vector3::ZERO, Vector3::UNIT_X);
-        let read = read_object(&EntityType::Line(line.clone()), &[]).unwrap();
+        let read = read_object(None, &EntityType::Line(line.clone()), &[]).unwrap();
         assert!(read.properties().is_by_layer());
         line.common.color = Color::Index(1);
         line.common.linetype = "Hidden".to_owned();
         line.common.line_weight = LineWeight::Value(35);
         line.common.linetype_scale = 0.5;
-        let read = read_object(&EntityType::Line(line.clone()), &[]).unwrap();
+        let read = read_object(None, &EntityType::Line(line.clone()), &[]).unwrap();
         assert_eq!(
             *read.properties(),
             Properties {
@@ -4649,12 +4761,12 @@ mod tests {
         line.common.color = Color::ByBlock;
         line.common.linetype = "BYBLOCK".to_owned();
         line.common.line_weight = LineWeight::ByBlock;
-        let read = read_object(&EntityType::Line(line.clone()), &[]).unwrap();
+        let read = read_object(None, &EntityType::Line(line.clone()), &[]).unwrap();
         assert_eq!(read.properties().color, ObjectColor::ByBlock);
         assert_eq!(read.properties().linetype, ObjectLinetype::ByBlock);
         assert_eq!(read.properties().lineweight, ObjectLineweight::ByBlock);
         line.common.color = Color::Rgb { r: 1, g: 2, b: 3 };
-        assert!(read_object(&EntityType::Line(line), &[]).is_none());
+        assert!(read_object(None, &EntityType::Line(line), &[]).is_none());
     }
 
     #[test]

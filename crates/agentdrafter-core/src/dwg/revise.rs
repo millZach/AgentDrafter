@@ -592,7 +592,41 @@ impl RevisionSession {
         if matches!(object, Object::Wipeout(_)) {
             self.ensure_wipeout_variables();
         }
-        let mut dwg_obj = dwg_object(object, start_of, &blocks)?;
+        if matches!(object, Object::RasterImage(_)) {
+            self.ensure_image_variables();
+        }
+        let mut dwg_obj = match object {
+            Object::RasterImage(img) => {
+                let h = self.drawing.allocate_handle();
+                let px = crate::media::probe_image_dimensions(&img.path, &[]);
+                let (mut e, media_handles) =
+                    super::media::dwg_raster_image(&mut self.drawing, img, px, h);
+                img.layer.clone_into(&mut e.common_mut().layer);
+                super::set_properties(e.common_mut(), &img.properties);
+                for added in media_handles.added {
+                    self.expected_non_graphical_added.insert(added);
+                }
+                for changed in media_handles.changed {
+                    self.expected_non_graphical_changed.insert(changed);
+                }
+                e
+            }
+            Object::PdfUnderlay(pdf) => {
+                let h = self.drawing.allocate_handle();
+                let (mut e, media_handles) =
+                    super::media::dwg_pdf_underlay(&mut self.drawing, pdf, h);
+                pdf.layer.clone_into(&mut e.common_mut().layer);
+                super::set_properties(e.common_mut(), &pdf.properties);
+                for added in media_handles.added {
+                    self.expected_non_graphical_added.insert(added);
+                }
+                for changed in media_handles.changed {
+                    self.expected_non_graphical_changed.insert(changed);
+                }
+                e
+            }
+            _ => dwg_object(object, start_of, &blocks)?,
+        };
         match (explicit_id, explicit_name) {
             (Some(id_part), name_part) => {
                 self.ensure_application_registered()?;
@@ -634,6 +668,31 @@ impl RevisionSession {
         if let Some((root, vars_h, created)) =
             super::wipeout::write_wipeout_frame(&mut self.drawing, crate::model::WipeoutFrame::Off)
         {
+            self.expected_non_graphical_changed.insert(root.value());
+            if created {
+                self.expected_non_graphical_added.insert(vars_h.value());
+            } else {
+                self.expected_non_graphical_changed.insert(vars_h.value());
+            }
+        }
+    }
+
+    fn ensure_image_variables(&mut self) {
+        let has_existing = self
+            .drawing
+            .objects
+            .values()
+            .any(|o| matches!(o, ObjectType::RasterVariables(_)));
+        if has_existing {
+            return;
+        }
+        let units =
+            super::unit(self.drawing.header.insertion_units).unwrap_or(crate::units::Unit::Mm);
+        if let Some((root, vars_h, created)) = super::media::write_image_frame(
+            &mut self.drawing,
+            crate::model::WipeoutFrame::Off,
+            units,
+        ) {
             self.expected_non_graphical_changed.insert(root.value());
             if created {
                 self.expected_non_graphical_added.insert(vars_h.value());
@@ -2437,7 +2496,41 @@ impl RevisionSession {
             if matches!(obj, Object::Wipeout(_)) {
                 self.ensure_wipeout_variables();
             }
-            let mut dwg_obj = dwg_object(obj, start_of, &known_blocks)?;
+            if matches!(obj, Object::RasterImage(_)) {
+                self.ensure_image_variables();
+            }
+            let mut dwg_obj = match obj {
+                Object::RasterImage(img) => {
+                    let h = self.drawing.allocate_handle();
+                    let px = crate::media::probe_image_dimensions(&img.path, &[]);
+                    let (mut e, media_handles) =
+                        super::media::dwg_raster_image(&mut self.drawing, img, px, h);
+                    img.layer.clone_into(&mut e.common_mut().layer);
+                    super::set_properties(e.common_mut(), &img.properties);
+                    for added in media_handles.added {
+                        self.expected_non_graphical_added.insert(added);
+                    }
+                    for changed in media_handles.changed {
+                        self.expected_non_graphical_changed.insert(changed);
+                    }
+                    e
+                }
+                Object::PdfUnderlay(pdf) => {
+                    let h = self.drawing.allocate_handle();
+                    let (mut e, media_handles) =
+                        super::media::dwg_pdf_underlay(&mut self.drawing, pdf, h);
+                    pdf.layer.clone_into(&mut e.common_mut().layer);
+                    super::set_properties(e.common_mut(), &pdf.properties);
+                    for added in media_handles.added {
+                        self.expected_non_graphical_added.insert(added);
+                    }
+                    for changed in media_handles.changed {
+                        self.expected_non_graphical_changed.insert(changed);
+                    }
+                    e
+                }
+                _ => dwg_object(obj, start_of, &known_blocks)?,
+            };
             dwg_obj.common_mut().owner_handle = br_handle;
             let h = self.drawing.add_entity(dwg_obj).map_err(|e| {
                 Error::new(
@@ -3787,7 +3880,9 @@ fn translate_entity(object: &mut EntityType, delta: Vector3) -> Result<(), Error
         | EntityType::MText(_)
         | EntityType::Insert(_)
         | EntityType::Hatch(_)
-        | EntityType::Wipeout(_) => {
+        | EntityType::Wipeout(_)
+        | EntityType::RasterImage(_)
+        | EntityType::Underlay(_) => {
             // acadrust's `Entity::translate` applies WCS->OCS arbitrary-axis
             // projection for all OCS entities (handling -Z and tilted normals
             // accurately) and translates world-space XDATA along with the entity.
@@ -3859,6 +3954,8 @@ fn rotate_entity(object: &mut EntityType, about: [f64; 3], degrees: f64) -> Resu
             | EntityType::MText(_)
             | EntityType::Insert(_)
             | EntityType::Hatch(_)
+            | EntityType::RasterImage(_)
+            | EntityType::Underlay(_)
     ) {
         return Err(Error::new(
             ErrorCode::BadValue,
@@ -3996,6 +4093,15 @@ fn rotate_entity(object: &mut EntityType, about: [f64; 3], degrees: f64) -> Resu
                 }
             }
         }
+        EntityType::RasterImage(img) => {
+            img.insertion_point = rot_pt(img.insertion_point, about, sin, cos);
+            img.u_vector = rot_vec3(img.u_vector, sin, cos);
+            img.v_vector = rot_vec3(img.v_vector, sin, cos);
+        }
+        EntityType::Underlay(u) => {
+            u.insertion_point = rot_pt(u.insertion_point, about, sin, cos);
+            u.rotation = normalize_degrees(u.rotation.to_degrees() + degrees).to_radians();
+        }
         other => {
             return Err(Error::new(
                 ErrorCode::BadValue,
@@ -4056,6 +4162,8 @@ fn scale_entity(object: &mut EntityType, about: [f64; 3], factor: f64) -> Result
             | EntityType::MText(_)
             | EntityType::Insert(_)
             | EntityType::Hatch(_)
+            | EntityType::RasterImage(_)
+            | EntityType::Underlay(_)
     ) {
         return Err(Error::new(
             ErrorCode::BadValue,
@@ -4215,6 +4323,17 @@ fn scale_entity(object: &mut EntityType, about: [f64; 3], factor: f64) -> Result
                     }
                 }
             }
+        }
+        EntityType::RasterImage(img) => {
+            img.insertion_point = scale_pt(img.insertion_point, about, factor);
+            img.u_vector = img.u_vector * factor;
+            img.v_vector = img.v_vector * factor;
+        }
+        EntityType::Underlay(u) => {
+            u.insertion_point = scale_pt(u.insertion_point, about, factor);
+            u.x_scale *= factor;
+            u.y_scale *= factor;
+            u.z_scale *= factor;
         }
         other => {
             return Err(Error::new(

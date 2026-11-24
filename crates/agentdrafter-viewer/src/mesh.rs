@@ -97,11 +97,36 @@ pub struct SheetReply {
 /// The clip of a segment drawn whole: a box larger than any sheet.
 pub const NO_CLIP: [f32; 4] = [-1e30, -1e30, 1e30, 1e30];
 
-/// What a run of items draws: stroke segments or fill triangles.
+/// What a run of items draws: stroke segments, fill triangles, or a raster
+/// image / PDF underlay quad.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Strokes,
     Fills,
+    Image,
+}
+
+/// One textured quad ready to draw in WebGL2 for a [`Shape::Image`] item.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeshImage {
+    /// Index into `DisplayList::images`.
+    pub image: usize,
+    /// Two triangles covering the image quad: six vertices `[x, y, u, v]`
+    /// relative to [`Mesh::origin`], where `(0, 0)` is top-left and `(1, 1)`
+    /// is bottom-right of the PNG texture.
+    pub quad: [[f32; 4]; 6],
+    /// Viewport clip box `[left, bottom, right, top]` relative to `origin`, or
+    /// [`NO_CLIP`].
+    pub clip_rect: [f32; 4],
+    /// Optional index into [`Mesh::stencils`] for the image's own clip polygon.
+    pub own_stencil: Option<u32>,
+    pub brightness: u8,
+    pub contrast: u8,
+    pub contrast_neutral: u8,
+    pub fade: u8,
+    pub monochrome: bool,
+    pub transparent: bool,
+    pub opacity_scale: f32,
 }
 
 /// Items next to one another in the display list that draw the same kind
@@ -180,8 +205,10 @@ pub struct Mesh {
     /// The sheet of paper the drawing sits on, in drawing units:
     /// `[left, bottom, right, top]`.
     pub paper: [f64; 4],
-    /// Whether any item on the sheet has transparency > 0.
+    /// Whether any item on the sheet has transparency > 0 or draws an image.
     pub has_transparency: bool,
+    /// Textured image quads for `Kind::Image` runs, in draw order.
+    pub images: Vec<MeshImage>,
 }
 
 /// What a loaded sheet is, for the page.
@@ -267,7 +294,9 @@ impl Mesh {
             stencils: Vec::new(),
             paper,
             has_transparency: sheet.display_list.items.iter().any(|i| i.transparency > 0),
+            images: Vec::new(),
         };
+        let mut image_clip_polys: Vec<(usize, Vec<Vec<[f64; 2]>>)> = Vec::new();
         let mut tessellator = FillTessellator::new();
         for (place, item) in sheet.display_list.items.iter().enumerate() {
             let place = place as u32;
@@ -412,6 +441,86 @@ impl Mesh {
                             .map(|t| t.map(|corner| base + corner)),
                     );
                 }
+                Shape::Image {
+                    image,
+                    origin: img_origin,
+                    u_axis,
+                    v_axis,
+                    clip,
+                    clip_inverted,
+                    brightness,
+                    contrast,
+                    contrast_neutral,
+                    fade,
+                    monochrome,
+                    transparent,
+                } => {
+                    let bl = at(*img_origin);
+                    let br = at([img_origin[0] + u_axis[0], img_origin[1] + u_axis[1]]);
+                    let tr = at([
+                        img_origin[0] + u_axis[0] + v_axis[0],
+                        img_origin[1] + u_axis[1] + v_axis[1],
+                    ]);
+                    let tl = at([img_origin[0] + v_axis[0], img_origin[1] + v_axis[1]]);
+                    let clip_rect = match item.clip {
+                        Some(b) => {
+                            let lo = at(b.min);
+                            let hi = at(b.max);
+                            [lo[0], lo[1], hi[0], hi[1]]
+                        }
+                        None => NO_CLIP,
+                    };
+                    let opacity_scale = if item.transparency > 0 {
+                        (100.0 - f32::from(item.transparency)) / 100.0
+                    } else {
+                        1.0
+                    };
+                    let img_idx = mesh.images.len();
+                    if let Some(poly) = clip {
+                        if poly.len() >= 3 {
+                            let rings = if *clip_inverted {
+                                let corners = Shape::image_outline(
+                                    *img_origin,
+                                    *u_axis,
+                                    *v_axis,
+                                    None,
+                                    false,
+                                );
+                                vec![corners, poly.clone()]
+                            } else {
+                                vec![poly.clone()]
+                            };
+                            image_clip_polys.push((img_idx, rings));
+                        }
+                    }
+                    mesh.images.push(MeshImage {
+                        image: *image,
+                        quad: [
+                            [bl[0], bl[1], 0.0, 1.0],
+                            [br[0], br[1], 1.0, 1.0],
+                            [tr[0], tr[1], 1.0, 0.0],
+                            [bl[0], bl[1], 0.0, 1.0],
+                            [tr[0], tr[1], 1.0, 0.0],
+                            [tl[0], tl[1], 0.0, 0.0],
+                        ],
+                        clip_rect,
+                        own_stencil: None,
+                        brightness: *brightness,
+                        contrast: *contrast,
+                        contrast_neutral: *contrast_neutral,
+                        fade: *fade,
+                        monochrome: *monochrome,
+                        transparent: *transparent,
+                        opacity_scale,
+                    });
+                    mesh.has_transparency = true;
+                    mesh.runs.push(Run {
+                        kind: Kind::Image,
+                        first: img_idx as u32,
+                        count: 1,
+                        clip: cut,
+                    });
+                }
             }
             let added = [
                 (Kind::Strokes, segments, mesh.segments.len()),
@@ -452,6 +561,32 @@ impl Mesh {
                 .extend((1..corners.saturating_sub(1)).map(|i| [base, base + i, base + i + 1]));
             mesh.stencils
                 .push((first, mesh.triangles.len() as u32 - first));
+        }
+        // Image-specific clip polygons (and inverted clip rings), added as
+        // additional even-odd stencil fans after the viewport boundaries.
+        for (img_idx, rings) in image_clip_polys {
+            let first = mesh.triangles.len() as u32;
+            for ring in &rings {
+                if ring.len() < 3 {
+                    continue;
+                }
+                let base = mesh.fill_points.len() as u32;
+                mesh.fill_points.extend(ring.iter().map(|&p| at(p)));
+                mesh.fill_colors
+                    .extend(std::iter::repeat_n([0, 0, 0, 0], ring.len()));
+                mesh.fill_screen_colors
+                    .extend(std::iter::repeat_n([0, 0, 0, 0], ring.len()));
+                mesh.fill_items.extend(std::iter::repeat_n(0, ring.len()));
+                let corners = ring.len() as u32;
+                mesh.triangles
+                    .extend((1..corners.saturating_sub(1)).map(|i| [base, base + i, base + i + 1]));
+            }
+            let count = mesh.triangles.len() as u32 - first;
+            if count > 0 {
+                let stencil_idx = mesh.stencils.len() as u32;
+                mesh.stencils.push((first, count));
+                mesh.images[img_idx].own_stencil = Some(stencil_idx);
+            }
         }
         mesh
     }
@@ -910,7 +1045,7 @@ mod tests {
                     .iter()
                     .map(|run| run.len().saturating_sub(1).max(usize::from(run.len() == 1)))
                     .sum(),
-                Shape::Fill { .. } | Shape::Mask { .. } => 0,
+                Shape::Fill { .. } | Shape::Mask { .. } | Shape::Image { .. } => 0,
             })
             .sum();
         assert!(expected > 1000, "a loop sheet draws {expected} segments");

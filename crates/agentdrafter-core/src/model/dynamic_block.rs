@@ -856,6 +856,24 @@ fn translate_object(obj: &mut Object, dv: Point3) {
                 *p = add_pt(*p, dv);
             }
         }
+        Object::RasterImage(img) => {
+            img.position = add_pt(img.position, dv);
+            if let Some(clip) = &mut img.clip {
+                for p in clip {
+                    p[0] += dv.x;
+                    p[1] += dv.y;
+                }
+            }
+        }
+        Object::PdfUnderlay(pdf) => {
+            pdf.position = add_pt(pdf.position, dv);
+            if let Some(clip) = &mut pdf.clip {
+                for p in clip {
+                    p[0] += dv.x;
+                    p[1] += dv.y;
+                }
+            }
+        }
         Object::RevisionCloud(RevisionCloud { boundary, .. }) => match boundary {
             RevisionCloudBoundary::Rectangle { from, to } => {
                 *from = add_pt(*from, dv);
@@ -953,6 +971,30 @@ fn stretch_object(obj: &mut Object, bmin: [f64; 2], bmax: [f64; 2], dv: Point3) 
                     *p = add_pt(*p, dv);
                     moved = true;
                 }
+            }
+        }
+        Object::RasterImage(img) => {
+            if in_box(img.position, bmin, bmax) {
+                img.position = add_pt(img.position, dv);
+                if let Some(clip) = &mut img.clip {
+                    for p in clip {
+                        p[0] += dv.x;
+                        p[1] += dv.y;
+                    }
+                }
+                moved = true;
+            }
+        }
+        Object::PdfUnderlay(pdf) => {
+            if in_box(pdf.position, bmin, bmax) {
+                pdf.position = add_pt(pdf.position, dv);
+                if let Some(clip) = &mut pdf.clip {
+                    for p in clip {
+                        p[0] += dv.x;
+                        p[1] += dv.y;
+                    }
+                }
+                moved = true;
             }
         }
         Object::RevisionCloud(RevisionCloud { boundary, .. }) => match boundary {
@@ -1142,6 +1184,24 @@ fn rotate_object(obj: &mut Object, pivot: Point3, degrees: f64) {
         Object::Wipeout(Wipeout { points, .. }) => {
             for p in points {
                 *p = rotate_pt(*p, pivot, sin, cos);
+            }
+        }
+        Object::RasterImage(img) => {
+            img.position = rotate_pt(img.position, pivot, sin, cos);
+            img.rotation = normalize_degrees(img.rotation + degrees);
+            if let Some(clip) = &mut img.clip {
+                for p in clip {
+                    *p = rotate_2d(*p, pivot, sin, cos);
+                }
+            }
+        }
+        Object::PdfUnderlay(pdf) => {
+            pdf.position = rotate_pt(pdf.position, pivot, sin, cos);
+            pdf.rotation = normalize_degrees(pdf.rotation + degrees);
+            if let Some(clip) = &mut pdf.clip {
+                for p in clip {
+                    *p = rotate_2d(*p, pivot, sin, cos);
+                }
             }
         }
         Object::RevisionCloud(cloud) => {
@@ -1352,6 +1412,22 @@ fn mirror_object(obj: &mut Object, a: Point3, b: Point3) {
         Object::Wipeout(Wipeout { points, .. }) => {
             for p in points {
                 *p = mirror_pt(*p, a, b);
+            }
+        }
+        Object::RasterImage(img) => {
+            img.position = mirror_pt(img.position, a, b);
+            if let Some(clip) = &mut img.clip {
+                for p in clip {
+                    *p = mirror_2d(*p, a, b);
+                }
+            }
+        }
+        Object::PdfUnderlay(pdf) => {
+            pdf.position = mirror_pt(pdf.position, a, b);
+            if let Some(clip) = &mut pdf.clip {
+                for p in clip {
+                    *p = mirror_2d(*p, a, b);
+                }
             }
         }
         Object::RevisionCloud(cloud) => {

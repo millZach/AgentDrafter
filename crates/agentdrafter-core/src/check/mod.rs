@@ -130,6 +130,10 @@ pub struct CheckReport {
     /// out when every reference resolved cleanly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
+    /// Raster images and PDF underlays that could not be found or decoded
+    /// from disk. Left out when every attachment resolved cleanly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_media: Vec<crate::model::UnresolvedMedia>,
     /// The drawing set's inconsistent mark, when a change set landed on
     /// some of its sheets and failed on others: the checker reads the
     /// records as they are.
@@ -322,6 +326,7 @@ pub(crate) fn check_dwg_bytes(
         objects_not_read: loaded.objects_not_read,
         not_read: loaded.not_read,
         unresolved_xrefs: loaded.unresolved_xrefs,
+        unresolved_media: loaded.unresolved_media,
     };
     Ok(check_loaded(source, loaded, settings))
 }
@@ -347,6 +352,7 @@ fn check_loaded(source: &Path, loaded: Loaded, settings: &Settings) -> CheckRepo
         objects_not_read,
         not_read,
         unresolved_xrefs,
+        unresolved_media,
     } = loaded;
     let tolerance = Unit::Mm.convert(CHECK_TOLERANCE_MM, units.unwrap_or(Unit::Mm));
     let mut findings = Vec::new();
@@ -402,6 +408,7 @@ fn check_loaded(source: &Path, loaded: Loaded, settings: &Settings) -> CheckRepo
     let sheets: Vec<String> = records.iter().map(|r| r.name.clone()).collect();
     for sheet in &sheets {
         warnings.unresolved_xrefs(sheet, &unresolved_xrefs);
+        warnings.unresolved_medias(sheet, &unresolved_media);
     }
     let mut report_message = message(&sheets, &findings, &checks_skipped);
     if objects_not_read > 0 {
@@ -425,6 +432,7 @@ fn check_loaded(source: &Path, loaded: Loaded, settings: &Settings) -> CheckRepo
         not_read,
         font_substitutions: substitutions,
         unresolved_xrefs,
+        unresolved_media,
         inconsistent: if source.is_dir() {
             crate::change::inconsistent(source)
         } else {
@@ -499,6 +507,7 @@ struct Loaded {
     objects_not_read: usize,
     not_read: Vec<RecordsOfKind>,
     unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
+    unresolved_media: Vec<crate::model::UnresolvedMedia>,
 }
 
 /// Reads the sheets to check from their saved files, with the declared
@@ -529,6 +538,7 @@ fn load(
                 objects_not_read: loaded.objects_not_read,
                 not_read: loaded.not_read,
                 unresolved_xrefs: loaded.unresolved_xrefs,
+                unresolved_media: loaded.unresolved_media,
             });
         }
         let mut record = read_sheet_record(source)?;
@@ -537,12 +547,15 @@ fn load(
         }
         let unresolved_xrefs =
             crate::xref::resolve_sheet_xrefs(&mut record.sheet, source).unresolved;
+        let unresolved_media =
+            crate::media::resolve_sheet_media_for_host(&mut record.sheet, source).unresolved;
         return Ok(Loaded {
             units: Some(record.sheet.units),
             records: vec![record],
             objects_not_read: 0,
             not_read: Vec::new(),
             unresolved_xrefs,
+            unresolved_media,
         });
     }
     let set = match files {
@@ -553,6 +566,7 @@ fn load(
         return Err(error);
     }
     let mut unresolved_xrefs = Vec::new();
+    let mut unresolved_media = Vec::new();
     let records = set
         .rows
         .iter()
@@ -572,6 +586,12 @@ fn load(
                     unresolved_xrefs.push(u);
                 }
             }
+            for u in crate::media::resolve_sheet_media_for_host(&mut record.sheet, &host).unresolved
+            {
+                if !unresolved_media.contains(&u) {
+                    unresolved_media.push(u);
+                }
+            }
             Ok(record)
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -581,6 +601,7 @@ fn load(
         objects_not_read: 0,
         not_read: Vec::new(),
         unresolved_xrefs,
+        unresolved_media,
     })
 }
 

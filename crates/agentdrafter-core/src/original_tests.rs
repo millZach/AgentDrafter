@@ -3002,6 +3002,7 @@ fn check_preserves_sheet_units_for_viewport_dimensions_and_uses_inch_units_on_ex
         blocks: read_ref.blocks,
         xrefs: read_ref.xrefs,
         resolved_xrefs: Vec::new(),
+        resolved_media: Vec::new(),
         objects: read_ref.objects,
         paper: read_ref.paper,
         page_setup: read_ref.page_setup,
@@ -3009,6 +3010,7 @@ fn check_preserves_sheet_units_for_viewport_dimensions_and_uses_inch_units_on_ex
         layout: read_ref.layout,
         other_layouts: read_ref.other_layouts,
         wipeout_frame: read_ref.wipeout_frame,
+        image_frame: read_ref.image_frame,
         custom_properties: read_ref.custom_properties,
     };
     let ref_fonts = crate::text::placement::SheetFonts::find(&ref_sheet, &Settings::default());

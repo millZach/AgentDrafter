@@ -186,6 +186,21 @@ pub struct DisplayList {
     /// seen through it name under `clip_boundary`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clip_boundaries: Vec<Vec<Point2>>,
+    /// Raster images and rasterised PDF underlay pages drawn by `Shape::Image`
+    /// items, stored once per unique attachment as canonical base64-encoded
+    /// straight-RGBA8 PNG bytes so PNG, PDF and the WebGL2 viewer draw the
+    /// exact same pixels (ADR-0011).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<DisplayImage>,
+}
+
+/// One resolved raster image or PDF underlay page carried in a [`DisplayList`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DisplayImage {
+    pub width: u32,
+    pub height: u32,
+    /// Canonical straight-RGBA8 PNG bytes encoded as RFC 4648 base64.
+    pub png_base64: String,
 }
 
 /// A hatch whose pattern needed more lines or dashes than one hatch draws:
@@ -328,6 +343,35 @@ pub enum Shape {
     /// AutoCAD's WIPEOUT does: white on paper (PNG, PDF, paper look) and the
     /// canvas background on a dark screen.
     Mask { contours: Vec<Vec<Point2>> },
+    /// A raster image or rasterised PDF underlay page placed at `origin` with
+    /// full horizontal span `u_axis` and full vertical span `v_axis`.
+    Image {
+        /// Index into [`DisplayList::images`].
+        image: usize,
+        /// Lower-left corner in drawing units.
+        origin: Point2,
+        /// Vector from lower-left to lower-right in drawing units.
+        u_axis: Point2,
+        /// Vector from lower-left to upper-left in drawing units.
+        v_axis: Point2,
+        /// Optional polygonal clip boundary in drawing units.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clip: Option<Vec<Point2>>,
+        #[serde(default, skip_serializing_if = "crate::model::media::is_false")]
+        clip_inverted: bool,
+        #[serde(default = "crate::model::media::default_image_brightness")]
+        brightness: u8,
+        #[serde(default = "crate::model::media::default_image_contrast")]
+        contrast: u8,
+        #[serde(default = "crate::model::media::default_image_contrast")]
+        contrast_neutral: u8,
+        #[serde(default)]
+        fade: u8,
+        #[serde(default)]
+        monochrome: bool,
+        #[serde(default = "crate::model::media::default_true")]
+        transparent: bool,
+    },
 }
 
 /// Which points of a fill's contours are inside.
@@ -372,13 +416,50 @@ impl Bounds {
 }
 
 impl Shape {
+    /// Outer boundary polygon of an image shape (the clip polygon when clipped
+    /// outside, or its four corners).
+    pub fn image_outline(
+        origin: Point2,
+        u_axis: Point2,
+        v_axis: Point2,
+        clip: Option<&[Point2]>,
+        clip_inverted: bool,
+    ) -> Vec<Point2> {
+        if !clip_inverted {
+            if let Some(c) = clip {
+                if c.len() >= 3 {
+                    return c.to_vec();
+                }
+            }
+        }
+        vec![
+            origin,
+            [origin[0] + u_axis[0], origin[1] + u_axis[1]],
+            [
+                origin[0] + u_axis[0] + v_axis[0],
+                origin[1] + u_axis[1] + v_axis[1],
+            ],
+            [origin[0] + v_axis[0], origin[1] + v_axis[1]],
+        ]
+    }
+
     /// Every point the shape is drawn through.
     pub fn points(&self) -> impl Iterator<Item = Point2> + '_ {
-        let lists = match self {
-            Shape::Stroke { runs, .. } => runs,
-            Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
+        let owned: Vec<Point2> = match self {
+            Shape::Stroke { runs, .. } => runs.iter().flatten().copied().collect(),
+            Shape::Fill { contours, .. } | Shape::Mask { contours } => {
+                contours.iter().flatten().copied().collect()
+            }
+            Shape::Image {
+                origin,
+                u_axis,
+                v_axis,
+                clip,
+                clip_inverted,
+                ..
+            } => Self::image_outline(*origin, *u_axis, *v_axis, clip.as_deref(), *clip_inverted),
         };
-        lists.iter().flatten().copied()
+        owned.into_iter()
     }
 }
 
@@ -586,6 +667,38 @@ impl Placed {
             Shape::Mask { contours } => Shape::Mask {
                 contours: place(contours),
             },
+            Shape::Image {
+                image,
+                origin,
+                u_axis,
+                v_axis,
+                clip,
+                clip_inverted,
+                brightness,
+                contrast,
+                contrast_neutral,
+                fade,
+                monochrome,
+                transparent,
+            } => {
+                let p0 = self.point(origin);
+                let pu = self.point([origin[0] + u_axis[0], origin[1] + u_axis[1]]);
+                let pv = self.point([origin[0] + v_axis[0], origin[1] + v_axis[1]]);
+                Shape::Image {
+                    image,
+                    origin: p0,
+                    u_axis: [pu[0] - p0[0], pu[1] - p0[1]],
+                    v_axis: [pv[0] - p0[0], pv[1] - p0[1]],
+                    clip: clip.map(|pts| pts.into_iter().map(|p| self.point(p)).collect()),
+                    clip_inverted,
+                    brightness,
+                    contrast,
+                    contrast_neutral,
+                    fade,
+                    monochrome,
+                    transparent,
+                }
+            }
         }
     }
 
@@ -1076,6 +1189,111 @@ impl<'a> Drawer<'a> {
                 if draw_frame {
                     let frame = flat_polyline(&wipeout.boundary_polyline());
                     out.shapes.extend(frame.shapes);
+                }
+                out
+            }
+            Object::RasterImage(img) => {
+                let media_idx = self.sheet.resolved_media.iter().position(|m| {
+                    m.kind == crate::model::MediaKind::Image
+                        && m.path == img.path
+                        && m.page.is_none()
+                });
+                let natural_px = media_idx.map(|i| {
+                    let m = &self.sheet.resolved_media[i];
+                    (m.width_px, m.height_px)
+                });
+                let (u_axis, v_axis) = img.axes(natural_px);
+                let origin = flat(img.position);
+                let mut out = Drawn::default();
+                let draw_frame = match self.sheet.image_frame {
+                    crate::model::WipeoutFrame::Off => false,
+                    crate::model::WipeoutFrame::On => true,
+                    crate::model::WipeoutFrame::Display => self.purpose == Purpose::Screen,
+                };
+                if let Some(idx) = media_idx {
+                    if img.show {
+                        out.shapes.push(Shape::Image {
+                            image: idx,
+                            origin,
+                            u_axis,
+                            v_axis,
+                            clip: img.clip.clone(),
+                            clip_inverted: img.clip_inverted,
+                            brightness: img.brightness,
+                            contrast: img.contrast,
+                            contrast_neutral: crate::model::DEFAULT_IMAGE_CONTRAST,
+                            fade: img.fade,
+                            monochrome: false,
+                            transparent: img.transparent,
+                        });
+                    }
+                } else {
+                    // Missing/unresolved image: draw boundary placeholder so
+                    // extents and selection reflect where the image sits.
+                    let mut ring = img.effective_outline(None);
+                    if let Some(&first) = ring.first() {
+                        ring.push(first);
+                        add_stroke(&mut out, pen.lineweight, vec![ring]);
+                    }
+                }
+                if draw_frame && media_idx.is_some() {
+                    let mut ring = img.effective_outline(natural_px);
+                    if let Some(&first) = ring.first() {
+                        ring.push(first);
+                        add_stroke(&mut out, pen.lineweight, vec![ring]);
+                    }
+                }
+                out
+            }
+            Object::PdfUnderlay(pdf) => {
+                let media_idx = if pdf.unloaded {
+                    None
+                } else {
+                    self.sheet.resolved_media.iter().position(|m| {
+                        m.kind == crate::model::MediaKind::PdfUnderlay
+                            && m.path == pdf.path
+                            && m.page.as_deref() == Some(pdf.page.as_str())
+                    })
+                };
+                let page_pt = media_idx.and_then(|i| self.sheet.resolved_media[i].page_pt);
+                let (u_axis, v_axis) = pdf.axes(self.sheet.units, page_pt);
+                let origin = flat(pdf.position);
+                let mut out = Drawn::default();
+                let draw_frame = match self.sheet.image_frame {
+                    crate::model::WipeoutFrame::Off => false,
+                    crate::model::WipeoutFrame::On => true,
+                    crate::model::WipeoutFrame::Display => self.purpose == Purpose::Screen,
+                };
+                if let Some(idx) = media_idx {
+                    if pdf.show {
+                        out.shapes.push(Shape::Image {
+                            image: idx,
+                            origin,
+                            u_axis,
+                            v_axis,
+                            clip: pdf.clip.clone(),
+                            clip_inverted: pdf.clip_inverted,
+                            brightness: crate::model::DEFAULT_IMAGE_BRIGHTNESS,
+                            contrast: pdf.contrast,
+                            contrast_neutral: crate::model::DEFAULT_PDF_CONTRAST,
+                            fade: pdf.fade,
+                            monochrome: pdf.monochrome,
+                            transparent: true,
+                        });
+                    }
+                } else if !pdf.unloaded {
+                    let mut ring = pdf.effective_outline(self.sheet.units, None);
+                    if let Some(&first) = ring.first() {
+                        ring.push(first);
+                        add_stroke(&mut out, pen.lineweight, vec![ring]);
+                    }
+                }
+                if draw_frame && media_idx.is_some() {
+                    let mut ring = pdf.effective_outline(self.sheet.units, page_pt);
+                    if let Some(&first) = ring.first() {
+                        ring.push(first);
+                        add_stroke(&mut out, pen.lineweight, vec![ring]);
+                    }
                 }
                 out
             }
@@ -1621,6 +1839,7 @@ pub(crate) fn draw_sheet_for(
         frozen_here: &[],
     };
     let mut list = DisplayList::default();
+    populate_images(sheet, &mut list);
     if sheet.layout.is_some() {
         // A sheet drawn in a layout prints its layout.
         layout::draw(&drawer, tolerance, &mut list);
@@ -1630,6 +1849,21 @@ pub(crate) fn draw_sheet_for(
         drawer.sheet_object(index, object, tolerance, &mut list);
     }
     list
+}
+
+fn populate_images(sheet: &Sheet, list: &mut DisplayList) {
+    if sheet.resolved_media.is_empty() {
+        return;
+    }
+    list.images = sheet
+        .resolved_media
+        .iter()
+        .map(|m| DisplayImage {
+            width: m.width_px,
+            height: m.height_px,
+            png_base64: crate::media::encode_base64(&m.png_bytes),
+        })
+        .collect();
 }
 
 /// Draws each of a sheet's objects in its own coordinates, as
@@ -1654,6 +1888,7 @@ pub(crate) fn draw_objects(
         frozen_here: &[],
     };
     let mut list = DisplayList::default();
+    populate_images(sheet, &mut list);
     for (index, object) in sheet.objects.iter().enumerate() {
         drawer.sheet_object(index, object, tolerance, &mut list);
     }

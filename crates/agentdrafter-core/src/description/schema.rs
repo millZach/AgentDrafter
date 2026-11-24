@@ -96,7 +96,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, custom_properties_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, xrefs_key, objects_key, paper_key, page_setup_key, layout_key, layouts_key] =
+    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, image_frame_key, custom_properties_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, xrefs_key, objects_key, paper_key, page_setup_key, layout_key, layouts_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -121,6 +121,12 @@ pub fn sheet_description_schema() -> Value {
             wipeout_frame_key: {
                 "description": "How wipeout frames are shown and plotted, matching AutoCAD's \
                                 WIPEOUTFRAME: `off` (0, hidden everywhere, the default), `on` (1, \
+                                shown and plotted) or `display` (2, shown on screen, not plotted).",
+                "enum": super::wipeout::WIPEOUT_FRAME_NAMES,
+            },
+            image_frame_key: {
+                "description": "How raster image frames are shown and plotted, matching AutoCAD's \
+                                IMAGEFRAME: `off` (0, hidden everywhere, the default), `on` (1, \
                                 shown and plotted) or `display` (2, shown on screen, not plotted).",
                 "enum": super::wipeout::WIPEOUT_FRAME_NAMES,
             },
@@ -887,6 +893,8 @@ fn defs() -> Map<String, Value> {
             }),
         ),
     );
+    defs.insert("image".into(), super::media::image_def());
+    defs.insert("pdf_underlay".into(), super::media::pdf_underlay_def());
     defs.insert(
         "arc".into(),
         object_def(

@@ -399,7 +399,7 @@ fn the_pipeline_cuts_at_a_boundary_and_leaves_out_layers_frozen_in_a_viewport() 
             .find(|i| i.object == v && i.viewport.is_none())
             .map(|i| match &i.shape {
                 Shape::Stroke { lineweight, .. } => *lineweight,
-                Shape::Fill { .. } | Shape::Mask { .. } => -1.0,
+                Shape::Fill { .. } | Shape::Mask { .. } | Shape::Image { .. } => -1.0,
             })
             .unwrap()
     };

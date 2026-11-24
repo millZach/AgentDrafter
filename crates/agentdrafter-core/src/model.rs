@@ -24,6 +24,7 @@ pub(crate) mod hatch;
 pub(crate) mod layout;
 pub(crate) mod leader;
 pub(crate) mod leader_block;
+pub(crate) mod media;
 pub(crate) mod page_setup;
 pub(crate) mod revision_cloud;
 pub(crate) mod table;
@@ -50,6 +51,10 @@ pub use leader::{
     MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText, MTextBox, STANDARD_MLEADER_STYLE,
 };
 pub use leader_block::{BlockConnection, Outline};
+pub use media::{
+    MediaKind, PdfUnderlay, RasterImage, ResolvedMedia, UnresolvedMedia, DEFAULT_IMAGE_BRIGHTNESS,
+    DEFAULT_IMAGE_CONTRAST, DEFAULT_PDF_CONTRAST, MAX_PDF_FADE,
+};
 pub use page_setup::{
     ObjectPlotStyle, ObjectTransparency, PageSetup, PlotArea, PlotScale, PlotStyleMode,
     MAX_TRANSPARENCY, NORMAL_PLOT_STYLE,
@@ -359,6 +364,11 @@ pub enum Object {
     Dimension(Dimension),
     /// A viewport, which belongs in a sheet's paper space.
     Viewport(Viewport),
+    /// An attached raster image (`IMAGE` / `IMAGEATTACH`).
+    #[serde(rename = "image")]
+    RasterImage(RasterImage),
+    /// An attached PDF underlay (`PDFUNDERLAY` / `PDFATTACH`).
+    PdfUnderlay(PdfUnderlay),
 }
 
 impl Object {
@@ -385,6 +395,8 @@ impl Object {
             Object::Leader(_) => "leader",
             Object::Dimension(_) => "dimension",
             Object::Viewport(_) => "viewport",
+            Object::RasterImage(_) => "image",
+            Object::PdfUnderlay(_) => "pdf_underlay",
         }
     }
 
@@ -411,6 +423,8 @@ impl Object {
             Object::Leader(o) => &o.layer,
             Object::Dimension(o) => &o.layer,
             Object::Viewport(o) => &o.layer,
+            Object::RasterImage(o) => &o.layer,
+            Object::PdfUnderlay(o) => &o.layer,
         }
     }
 
@@ -437,6 +451,8 @@ impl Object {
             Object::Leader(o) => &o.properties,
             Object::Dimension(o) => &o.properties,
             Object::Viewport(o) => &o.properties,
+            Object::RasterImage(o) => &o.properties,
+            Object::PdfUnderlay(o) => &o.properties,
         }
     }
 
@@ -462,6 +478,8 @@ impl Object {
             Object::Leader(o) => &mut o.properties,
             Object::Dimension(o) => &mut o.properties,
             Object::Viewport(o) => &mut o.properties,
+            Object::RasterImage(o) => &mut o.properties,
+            Object::PdfUnderlay(o) => &mut o.properties,
         }
     }
 }
@@ -900,6 +918,10 @@ pub struct Sheet {
     /// written as local block definitions when building a DWG/DXF.
     #[serde(skip)]
     pub resolved_xrefs: Vec<Block>,
+    /// Runtime-resolved raster images and PDF underlays decoded from disk for
+    /// drawing, querying and checking. Never serialized into sheet descriptions.
+    #[serde(skip)]
+    pub resolved_media: Vec<ResolvedMedia>,
     pub objects: Vec<Object>,
     /// The paper the sheet is drawn on, if its sheet description or
     /// template declares it. Only the checker reads it: a build, a render
@@ -930,6 +952,10 @@ pub struct Sheet {
     /// matching AutoCAD's `WIPEOUTFRAME` (`WIPEOUTVARIABLES.display_frame`).
     #[serde(default, skip_serializing_if = "WipeoutFrame::is_off")]
     pub wipeout_frame: WipeoutFrame,
+    /// How raster image frames are shown and plotted (`off`, `on` or `display`),
+    /// matching AutoCAD's `IMAGEFRAME` (`RASTERVARIABLES.display_image_frame`).
+    #[serde(default, skip_serializing_if = "WipeoutFrame::is_off")]
+    pub image_frame: WipeoutFrame,
     /// Custom drawing properties (`DWGPROPS`), mapped from property name to
     /// value, referenced by `custom_property` fields (`\AcVar CustomDP.<name>`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -937,6 +963,19 @@ pub struct Sheet {
 }
 
 impl Sheet {
+    /// Returns the resolved raster image or PDF underlay decoded from disk,
+    /// if available.
+    pub fn resolved_media_for(
+        &self,
+        kind: MediaKind,
+        path: &str,
+        page: Option<&str>,
+    ) -> Option<&ResolvedMedia> {
+        self.resolved_media
+            .iter()
+            .find(|m| m.kind == kind && m.path == path && m.page.as_deref() == page)
+    }
+
     /// Returns the evaluated block definition for `insert`: for a dynamic
     /// insert read from a DWG that references an evaluated anonymous block
     /// (`*U<n>`), borrows that evaluated block; otherwise evaluates the named
@@ -1263,6 +1302,9 @@ pub struct DrawingContents {
     /// How wipeout frames are shown and plotted, read from `ACAD_WIPEOUT_VARS`.
     #[serde(default, skip_serializing_if = "WipeoutFrame::is_off")]
     pub wipeout_frame: WipeoutFrame,
+    /// How raster image frames are shown and plotted, read from `ACAD_IMAGE_VARS`.
+    #[serde(default, skip_serializing_if = "WipeoutFrame::is_off")]
+    pub image_frame: WipeoutFrame,
     /// Custom drawing properties read from the DWG's summary info (`DWGPROPS`),
     /// excluding AgentDrafter's own build mark.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

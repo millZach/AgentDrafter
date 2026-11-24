@@ -18,7 +18,7 @@ use crate::build::FileId;
 use crate::description::sheet_description_at;
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
-use crate::model::{Paper, RecordsOfKind, Sheet, UnresolvedXref};
+use crate::model::{Paper, RecordsOfKind, Sheet, UnresolvedMedia, UnresolvedXref};
 use crate::stamp::{self, SourceKind};
 use crate::units::Unit;
 
@@ -83,6 +83,8 @@ pub(crate) struct Record {
     pub files: Vec<(SourceKind, PathBuf, Vec<u8>)>,
     /// External references that could not be found or loaded.
     pub unresolved_xrefs: Vec<UnresolvedXref>,
+    /// Raster images or PDF underlays that could not be found or decoded.
+    pub unresolved_media: Vec<UnresolvedMedia>,
 }
 
 impl Record {
@@ -166,6 +168,7 @@ pub(crate) fn read_record_with_recovery(
             blocks: drawing.blocks,
             xrefs: drawing.xrefs,
             resolved_xrefs: Vec::new(),
+            resolved_media: Vec::new(),
             objects: drawing.objects,
             // A DWG that opens on its layout plots on its layout's paper.
             paper: drawing.paper.or(paper),
@@ -174,10 +177,13 @@ pub(crate) fn read_record_with_recovery(
             layout: drawing.layout,
             other_layouts: drawing.other_layouts,
             wipeout_frame: drawing.wipeout_frame,
+            image_frame: drawing.image_frame,
             custom_properties: drawing.custom_properties,
         };
         let resolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source);
         files.extend(resolved_xrefs.files);
+        let resolved_media = crate::media::resolve_sheet_media_for_host(&mut sheet, source);
+        files.extend(resolved_media.files);
         return Ok(Record {
             sheet,
             units: drawing.units,
@@ -186,6 +192,7 @@ pub(crate) fn read_record_with_recovery(
             ids,
             files,
             unresolved_xrefs: resolved_xrefs.unresolved,
+            unresolved_media: resolved_media.unresolved,
         });
     }
     let text = String::from_utf8(bytes.clone()).map_err(|_| {
@@ -202,6 +209,8 @@ pub(crate) fn read_record_with_recovery(
     }
     let resolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source);
     files.extend(resolved_xrefs.files);
+    let resolved_media = crate::media::resolve_sheet_media_for_host(&mut sheet, source);
+    files.extend(resolved_media.files);
     Ok(Record {
         units: Some(sheet.units),
         sheet,
@@ -210,6 +219,7 @@ pub(crate) fn read_record_with_recovery(
         ids: Vec::new(),
         files,
         unresolved_xrefs: resolved_xrefs.unresolved,
+        unresolved_media: resolved_media.unresolved,
     })
 }
 

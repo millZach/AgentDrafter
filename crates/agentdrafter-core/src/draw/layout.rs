@@ -172,6 +172,38 @@ impl DisplayList {
                     }
                     Shape::Mask { contours }
                 }
+                Shape::Image {
+                    image,
+                    origin,
+                    u_axis,
+                    v_axis,
+                    clip,
+                    clip_inverted,
+                    brightness,
+                    contrast,
+                    contrast_neutral,
+                    fade,
+                    monochrome,
+                    transparent,
+                } => {
+                    let p0 = on(origin);
+                    let pu = on([origin[0] + u_axis[0], origin[1] + u_axis[1]]);
+                    let pv = on([origin[0] + v_axis[0], origin[1] + v_axis[1]]);
+                    Shape::Image {
+                        image,
+                        origin: p0,
+                        u_axis: [pu[0] - p0[0], pu[1] - p0[1]],
+                        v_axis: [pv[0] - p0[0], pv[1] - p0[1]],
+                        clip: clip.map(placed),
+                        clip_inverted,
+                        brightness,
+                        contrast,
+                        contrast_neutral,
+                        fade,
+                        monochrome,
+                        transparent,
+                    }
+                }
             };
             self.items.push(Item {
                 viewport: Some(index),
