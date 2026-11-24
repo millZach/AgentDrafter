@@ -33,6 +33,7 @@ use super::operations::{
     TextToFrontWhich, TransformBy, ROW_VALUE_KEY,
 };
 use super::replace::{TextMatchKind, TextMatcher, TextScope};
+use super::trim_extend::{compute_extend, compute_trim, ExtendEnd, TrimKeep};
 use super::MARK_FILE;
 use super::{
     mark_report, quoted_list, read_mark, relative_to, AttributeRemoved, AttributeUpdated,
@@ -495,6 +496,8 @@ struct Done {
     replacements: Vec<TextReplaced>,
     /// Each insert attribute changed by `set_attributes`.
     attributes_set: Vec<AttributeUpdated>,
+    /// The ID of the second object created when `trim` splits an object in two.
+    split_id: Option<String>,
     message: String,
 }
 
@@ -566,6 +569,17 @@ fn objects_changed(
         }
         for a in &d.attributes_set {
             add(a.id.clone(), HowChanged::Changed);
+        }
+        if let Some(split) = &d.split_id {
+            let local = split
+                .split_once(ID_SEPARATOR)
+                .map_or(split.as_str(), |(_, l)| l);
+            for &k in &op_sheets[i] {
+                add(
+                    format!("{}{ID_SEPARATOR}{local}", files.name(k)),
+                    HowChanged::Added,
+                );
+            }
         }
         // Each copy is added, on every sheet it is on.
         for (copy, on) in d.copies.iter().zip(&d.copy_sheets) {
@@ -945,6 +959,10 @@ pub(super) fn apply(
                     .filter(|_| included[i])
                     .map(|d| d.attributes_set.clone())
                     .unwrap_or_default(),
+                split_id: d
+                    .as_ref()
+                    .filter(|_| included[i])
+                    .and_then(|d| d.split_id.clone()),
                 attributes_removed: d.map(|d| d.attributes_removed).unwrap_or_default(),
                 error: if included[i] {
                     None
@@ -1249,6 +1267,37 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 }
                 continue;
             }
+            Body::Trim {
+                target, boundaries, ..
+            }
+            | Body::Extend {
+                target, boundaries, ..
+            } => {
+                let all = std::iter::once((target, "target"))
+                    .chain(boundaries.iter().map(|(t, f)| (t, f.as_str())));
+                for (t, key) in all {
+                    let (sheet, field) = match t {
+                        Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
+                        Target::Name {
+                            sheet: Some(sheet), ..
+                        } => (sheet, format!("{key}.sheet")),
+                        Target::Name { sheet: None, .. } => continue,
+                    };
+                    if files.sheet(sheet).is_none() {
+                        return Err(op_error(
+                            op.index,
+                            op.spec.name,
+                            ErrorCode::UnknownName,
+                            format!(
+                                "the set holds no sheet `{sheet}`; its sheets: {}",
+                                files.sheet_names()
+                            ),
+                            &field,
+                        ));
+                    }
+                }
+                continue;
+            }
         };
         if files.sheet(sheet).is_none() {
             return Err(op_error(
@@ -1443,6 +1492,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 created_row_values: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
                 message: format!(
                     "adds {} {object}, `{id}`, {place}{}",
                     article(object),
@@ -1550,6 +1600,33 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         );
     }
 
+    if let Body::Trim {
+        target,
+        boundaries,
+        keep,
+        new_id,
+    } = &op.body
+    {
+        return apply_trim(
+            at,
+            op,
+            target,
+            boundaries,
+            *keep,
+            new_id.as_deref(),
+            settings,
+        );
+    }
+
+    if let Body::Extend {
+        target,
+        boundaries,
+        end,
+    } = &op.body
+    {
+        return apply_extend(at, op, target, boundaries, *end, settings);
+    }
+
     if let Body::Table {
         op: table_op,
         table,
@@ -1633,6 +1710,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::ReplaceText { .. }
         | Body::SetAttributes { .. }
         | Body::Offset { .. }
+        | Body::Trim { .. }
+        | Body::Extend { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -1851,6 +1930,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         created_row_values: Vec::new(),
         replacements: Vec::new(),
         attributes_set: Vec::new(),
+        split_id: None,
         snapped: Vec::new(),
         message: String::new(),
     };
@@ -2049,6 +2129,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::ReplaceText { .. }
         | Body::SetAttributes { .. }
         | Body::Offset { .. }
+        | Body::Trim { .. }
+        | Body::Extend { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2879,6 +2961,7 @@ fn apply_table(
             created_row_values: Vec::new(),
             replacements: Vec::new(),
             attributes_set: Vec::new(),
+            split_id: None,
             snapped: Vec::new(),
             message: format!("{message}, so on {}", every_sheet(&files.names(&sheets))),
         }),
@@ -3075,6 +3158,7 @@ fn apply_block(
             created_row_values: Vec::new(),
             replacements: Vec::new(),
             attributes_set: Vec::new(),
+            split_id: None,
             snapped: Vec::new(),
             message: format!("{what}{removed}{on}"),
         }),
@@ -3250,6 +3334,7 @@ fn apply_import(
             created_row_values: Vec::new(),
             replacements: Vec::new(),
             attributes_set: Vec::new(),
+            split_id: None,
             snapped: Vec::new(),
             message: format!(
                 "imports from `{}` into the block library `{written}`: {}{left_out}{on}",
@@ -3968,6 +4053,7 @@ fn apply_dimension_from(
             created_row_values: Vec::new(),
             replacements: Vec::new(),
             attributes_set: Vec::new(),
+            split_id: None,
             message: format!(
                 "adds {what}, `{added}`, from `{}`, {place}{}",
                 found.id,
@@ -4332,6 +4418,7 @@ fn apply_transform(
             created_row_values: Vec::new(),
             replacements: Vec::new(),
             attributes_set: Vec::new(),
+            split_id: None,
             message,
         }),
         sheets: reach,
@@ -4883,6 +4970,7 @@ fn apply_copy(
             created_row_values: Vec::new(),
             replacements: Vec::new(),
             attributes_set: Vec::new(),
+            split_id: None,
             message,
         }),
         sheets: reach,
@@ -5175,6 +5263,7 @@ fn apply_draw_order(
             created_row_values: Vec::new(),
             replacements: Vec::new(),
             attributes_set: Vec::new(),
+            split_id: None,
             snapped: Vec::new(),
             message: format!(
                 "moves {} {} in draw order",
@@ -5280,6 +5369,7 @@ fn apply_text_to_front(
             created_row_values: Vec::new(),
             replacements: Vec::new(),
             attributes_set: Vec::new(),
+            split_id: None,
             snapped: Vec::new(),
             message: format!(
                 "brings {moved_count} {} object{} to the front {place}",
@@ -5983,6 +6073,7 @@ fn apply_replace_text(
             created_row_values: Vec::new(),
             replacements,
             attributes_set: Vec::new(),
+            split_id: None,
             snapped: Vec::new(),
             message,
         }),
@@ -6292,6 +6383,7 @@ fn apply_set_attributes(
             created_row_values: Vec::new(),
             replacements: Vec::new(),
             attributes_set,
+            split_id: None,
             snapped: Vec::new(),
             message,
         }),
@@ -6499,11 +6591,408 @@ fn apply_offset(
             created_row_values: Vec::new(),
             replacements: Vec::new(),
             attributes_set: Vec::new(),
+            split_id: None,
             snapped,
             message: format!(
                 "offsets `{}` by {dist_str} ({}) to {kind} `{full_id}`{erase_note}{template_note}",
                 found.id, files.units
             ),
+        }),
+        sheets: reach,
+        refuse: false,
+    }
+}
+
+/// Collects all geometry curves of `boundaries` on sheet `target_row` in the
+/// same space as `target_idx`.
+#[allow(clippy::too_many_arguments)]
+fn collect_boundary_curves(
+    at: &mut Attempt,
+    op: &Operation,
+    record: &SheetRecord,
+    target_row: usize,
+    target_idx: usize,
+    target_file: FileRef,
+    boundaries: &[(Target, String)],
+    settings: &Settings,
+) -> Result<Vec<Curve>, Error> {
+    let files = at.files;
+    let fonts = SheetFonts::find(&record.sheet, settings);
+    let reader = Reader {
+        sheet: &record.sheet,
+        fonts: &fonts,
+    };
+    let mut curves = Vec::new();
+    for (b_target, b_field) in boundaries {
+        let b_found = match resolve(at, b_target, op) {
+            Ok(f) => f,
+            Err(applied) => {
+                return Err(applied.outcome.err().unwrap_or_else(|| {
+                    op_error(
+                        op.index,
+                        op.spec.name,
+                        ErrorCode::UnknownName,
+                        "boundary object not found",
+                        b_field,
+                    )
+                }));
+            }
+        };
+        if b_found.row != target_row {
+            return Err(op_error(
+                op.index,
+                op.spec.name,
+                ErrorCode::BadValue,
+                format!(
+                    "boundary `{}` is on sheet `{}`, not on sheet `{}`",
+                    b_found.id,
+                    files.name(b_found.row),
+                    files.name(target_row)
+                ),
+                b_field,
+            ));
+        }
+        if matches!(target_file, FileRef::Template(t) if files.templates[t].sheets.len() > 1)
+            && matches!(b_found.file, FileRef::Rows(_))
+        {
+            return Err(op_error(
+                op.index,
+                op.spec.name,
+                ErrorCode::BadValue,
+                format!(
+                    "boundary `{}` is a row-only object on `{}`, so it cannot cut a shared \
+                     template object",
+                    b_found.id,
+                    files.name(target_row)
+                ),
+                b_field,
+            ));
+        }
+        let b_local = b_found
+            .id
+            .split_once(ID_SEPARATOR)
+            .map_or(b_found.id.as_str(), |(_, l)| l);
+        let b_in_row = matches!(b_found.file, FileRef::Rows(_));
+        let Some(b_idx) = record
+            .objects
+            .iter()
+            .position(|o| o.in_row == b_in_row && o.id.eq_ignore_ascii_case(b_local))
+        else {
+            return Err(op_error(
+                op.index,
+                op.spec.name,
+                ErrorCode::UnknownName,
+                format!("could not read boundary `{}`", b_found.id),
+                b_field,
+            ));
+        };
+        if !record.sheet.same_space(target_idx, b_idx) {
+            return Err(op_error(
+                op.index,
+                op.spec.name,
+                ErrorCode::BadValue,
+                format!(
+                    "boundary `{}` is in a different space from `target`",
+                    b_found.id
+                ),
+                b_field,
+            ));
+        }
+        for part in reader.parts(&record.sheet.objects[b_idx]) {
+            curves.push(part.curve);
+        }
+    }
+    Ok(curves)
+}
+
+/// Cuts `target` back to `boundaries` (`trim` / AutoCAD `TRIM`, `TR`).
+fn apply_trim(
+    at: &mut Attempt,
+    op: &Operation,
+    target: &Target,
+    boundaries: &[(Target, String)],
+    keep: TrimKeep,
+    new_id: Option<&str>,
+    settings: &Settings,
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+    let found = match resolve(at, target, op) {
+        Ok(found) => found,
+        Err(applied) => return *applied,
+    };
+    let reach = at.reach(found.file, found.row);
+    if let Some(refusal) = many_paths(files, found.file, op, "target") {
+        return refusal;
+    }
+    if let Some(layer) =
+        batch_object_locked_layer(at, files, found.row, found.file, found.list, found.index)
+    {
+        return fail(
+            reach,
+            op_err(
+                ErrorCode::Locked,
+                format!(
+                    "`{}` is on layer `{layer}`, which is locked; unlock it first with \
+                     change_layer, set: {{\"locked\": false}}",
+                    found.id
+                ),
+                "target",
+            ),
+        );
+    }
+    let rows = match at.rows_now() {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+    let record = match sheet_record(at, &rows, found.row, &mut Vec::new()) {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+    let local = found
+        .id
+        .split_once(ID_SEPARATOR)
+        .map_or(found.id.as_str(), |(_, l)| l)
+        .to_owned();
+    let in_row = matches!(found.file, FileRef::Rows(_));
+    let Some(obj_idx) = record
+        .objects
+        .iter()
+        .position(|o| o.in_row == in_row && o.id.eq_ignore_ascii_case(&local))
+    else {
+        return fail(
+            reach,
+            op_err(
+                ErrorCode::UnknownName,
+                format!("could not read `{}` to trim it", found.id),
+                "target",
+            ),
+        );
+    };
+    let boundary_curves = match collect_boundary_curves(
+        at, op, &record, found.row, obj_idx, found.file, boundaries, settings,
+    ) {
+        Ok(c) => c,
+        Err(e) => return fail(reach, e),
+    };
+    let base = &record.sheet.objects[obj_idx];
+    let space = crate::query::space_of(&record.sheet, obj_idx);
+    let obj_name = record.objects[obj_idx].name.clone();
+    let trimmed = match compute_trim(base, &boundary_curves, keep) {
+        Ok(t) => t,
+        Err(e) => return fail(reach, op_err(e.code, e.message, "boundary")),
+    };
+    let split_local_id = if let Some(ref split_obj) = trimmed.split {
+        Some(match new_id {
+            Some(explicit) => explicit.to_owned(),
+            None => {
+                let mut taken: BTreeSet<String> = BTreeSet::new();
+                for &k in &reach {
+                    match at.objects(k) {
+                        Ok(objects) => {
+                            taken.extend(objects.into_iter().map(|o| o.3.id.to_lowercase()));
+                        }
+                        Err(e) => return fail(reach.clone(), e),
+                    }
+                }
+                let prefix = split_obj.type_name();
+                (1..)
+                    .map(|n| format!("{prefix}-{n}"))
+                    .find(|c| !taken.contains(&c.to_lowercase()))
+                    .expect("a free id")
+            }
+        })
+    } else {
+        None
+    };
+
+    let path = match found.file {
+        FileRef::Rows(f) => files.rows_files[f].path.clone(),
+        FileRef::Template(t) => files.templates[t].path.clone(),
+    };
+    let (kept_kind, kept_keys) =
+        object_to_record_keys(&trimmed.kept, &local, obj_name.as_deref(), space.as_deref());
+    let rec = match at.file(found.file) {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+    let before = rec.object_text(found.list, found.index);
+    if let Err(e) = rec.replace_object(found.list, found.index, kept_kind, &kept_keys, op.index) {
+        return fail(reach, op_err(e.code, e.message, "target"));
+    }
+    let after = rec.object_text(found.list, found.index);
+    let mut split_full_id = None;
+    if let (Some(split_obj), Some(split_local)) = (&trimmed.split, &split_local_id) {
+        let (sk, skeys) = object_to_record_keys(split_obj, split_local, None, space.as_deref());
+        if let Err(e) = rec.add(found.list, sk, &skeys, op.index) {
+            return fail(reach, op_err(e.code, e.message, "new_id"));
+        }
+        split_full_id = Some(format!(
+            "{}{ID_SEPARATOR}{split_local}",
+            files.name(found.row)
+        ));
+    }
+    let message = match &split_full_id {
+        Some(sid) => format!(
+            "trims `{}` (keep `{}`) and splits off `{sid}`",
+            found.id,
+            keep.name()
+        ),
+        None => format!("trims `{}` (keep `{}`)", found.id, keep.name()),
+    };
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: Some(found.id),
+            before: Some(before),
+            after: Some(after),
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
+            split_id: split_full_id,
+            snapped: Vec::new(),
+            message,
+        }),
+        sheets: reach,
+        refuse: false,
+    }
+}
+
+/// Carries an open `target` on to `boundaries` (`extend` / AutoCAD `EXTEND`, `EX`).
+fn apply_extend(
+    at: &mut Attempt,
+    op: &Operation,
+    target: &Target,
+    boundaries: &[(Target, String)],
+    end: ExtendEnd,
+    settings: &Settings,
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+    let found = match resolve(at, target, op) {
+        Ok(found) => found,
+        Err(applied) => return *applied,
+    };
+    let reach = at.reach(found.file, found.row);
+    if let Some(refusal) = many_paths(files, found.file, op, "target") {
+        return refusal;
+    }
+    if let Some(layer) =
+        batch_object_locked_layer(at, files, found.row, found.file, found.list, found.index)
+    {
+        return fail(
+            reach,
+            op_err(
+                ErrorCode::Locked,
+                format!(
+                    "`{}` is on layer `{layer}`, which is locked; unlock it first with \
+                     change_layer, set: {{\"locked\": false}}",
+                    found.id
+                ),
+                "target",
+            ),
+        );
+    }
+    let rows = match at.rows_now() {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+    let record = match sheet_record(at, &rows, found.row, &mut Vec::new()) {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+    let local = found
+        .id
+        .split_once(ID_SEPARATOR)
+        .map_or(found.id.as_str(), |(_, l)| l)
+        .to_owned();
+    let in_row = matches!(found.file, FileRef::Rows(_));
+    let Some(obj_idx) = record
+        .objects
+        .iter()
+        .position(|o| o.in_row == in_row && o.id.eq_ignore_ascii_case(&local))
+    else {
+        return fail(
+            reach,
+            op_err(
+                ErrorCode::UnknownName,
+                format!("could not read `{}` to extend it", found.id),
+                "target",
+            ),
+        );
+    };
+    let boundary_curves = match collect_boundary_curves(
+        at, op, &record, found.row, obj_idx, found.file, boundaries, settings,
+    ) {
+        Ok(c) => c,
+        Err(e) => return fail(reach, e),
+    };
+    let base = &record.sheet.objects[obj_idx];
+    let space = crate::query::space_of(&record.sheet, obj_idx);
+    let obj_name = record.objects[obj_idx].name.clone();
+    let extended = match compute_extend(base, &boundary_curves, end) {
+        Ok(obj) => obj,
+        Err(e) => return fail(reach, op_err(e.code, e.message, "boundary")),
+    };
+    let path = match found.file {
+        FileRef::Rows(f) => files.rows_files[f].path.clone(),
+        FileRef::Template(t) => files.templates[t].path.clone(),
+    };
+    let (ext_kind, ext_keys) =
+        object_to_record_keys(&extended, &local, obj_name.as_deref(), space.as_deref());
+    let rec = match at.file(found.file) {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+    let before = rec.object_text(found.list, found.index);
+    if let Err(e) = rec.replace_object(found.list, found.index, ext_kind, &ext_keys, op.index) {
+        return fail(reach, op_err(e.code, e.message, "target"));
+    }
+    let after = rec.object_text(found.list, found.index);
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: Some(found.id.clone()),
+            before: Some(before),
+            after: Some(after),
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
+            split_id: None,
+            snapped: Vec::new(),
+            message: format!("extends `{}` ({} end)", found.id, end.name()),
         }),
         sheets: reach,
         refuse: false,
@@ -6810,6 +7299,7 @@ fn apply_revision_cloud_around(
             created_row_values: Vec::new(),
             replacements: Vec::new(),
             attributes_set: Vec::new(),
+            split_id: None,
             message: format!(
                 "adds a revision_cloud, `{id}`, around {}, {place}",
                 quoted_list(&around_ids)
@@ -7689,6 +8179,8 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::SetAttribute { target, .. }
         | Body::SetBlockState { target, .. }
         | Body::Offset { target, .. }
+        | Body::Trim { target, .. }
+        | Body::Extend { target, .. }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => reaches(target),
@@ -7842,6 +8334,8 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
             }
         }
         Body::Offset { .. } => "distance".to_owned(),
+        Body::Trim { .. } => "boundary".to_owned(),
+        Body::Extend { .. } => "boundary".to_owned(),
     }
 }
 
@@ -8013,6 +8507,8 @@ fn target_words(op: &Operation) -> String {
         | Body::SetAttribute { target, .. }
         | Body::SetBlockState { target, .. }
         | Body::Offset { target, .. }
+        | Body::Trim { target, .. }
+        | Body::Extend { target, .. }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => target.words(),

@@ -28,6 +28,7 @@ use crate::change::operations::{
 };
 use crate::change::original_journal::OriginalJournal;
 use crate::change::replace::{TextMatcher, TextScope};
+use crate::change::trim_extend::{compute_extend, compute_trim};
 use crate::change::{
     AttributeUpdated, HowChanged, ObjectChanged, OriginalRevisionMeta, SnapResolved, TextReplaced,
 };
@@ -124,6 +125,8 @@ pub struct RevisionOperationOutcome {
     pub replacements: Vec<TextReplaced>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attributes_set: Vec<AttributeUpdated>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub split_id: Option<String>,
 }
 
 /// The active working revision a chained revision was built on top of.
@@ -1668,6 +1671,7 @@ fn apply_revision_op(
                 snapped,
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::AddRevisionCloud {
@@ -1903,6 +1907,7 @@ fn apply_revision_op(
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::DrawOrder { targets, order } => {
@@ -1999,6 +2004,7 @@ fn apply_revision_op(
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::TextToFront { to, which } => {
@@ -2047,6 +2053,7 @@ fn apply_revision_op(
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::SetAttribute {
@@ -2085,6 +2092,7 @@ fn apply_revision_op(
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::SetBlockState { target, state } => {
@@ -2149,6 +2157,7 @@ fn apply_revision_op(
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::ReplaceText {
@@ -2371,6 +2380,7 @@ fn apply_revision_op(
                 snapped: Vec::new(),
                 replacements,
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::SetAttributes {
@@ -2474,6 +2484,7 @@ fn apply_revision_op(
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set,
+                split_id: None,
             })
         }
         Body::Offset {
@@ -2567,6 +2578,229 @@ fn apply_revision_op(
                 snapped,
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
+            })
+        }
+        Body::Trim {
+            target,
+            boundaries,
+            keep,
+            new_id,
+        } => {
+            let loaded = ensure_record(session, cached, source, sheet_name)?;
+            let found = resolve_target(session, loaded, target, sheet_name, op, "target")?;
+            check_unlocked(session, &found.handle, &found.id, op, "target")?;
+            let obj_idx = (0..loaded.record.sheet.objects.len())
+                .find(|&i| loaded.record.handle_of(i) == Some(found.handle.as_str()))
+                .ok_or_else(|| {
+                    op_error(
+                        index,
+                        op_name,
+                        ErrorCode::UnknownName,
+                        format!("could not read `{}` to trim it", found.id),
+                        "target",
+                    )
+                })?;
+            let fonts = SheetFonts::find(&loaded.record.sheet, settings);
+            let reader = Reader {
+                sheet: &loaded.record.sheet,
+                fonts: &fonts,
+            };
+            let mut b_curves = Vec::new();
+            for (bt, bf) in boundaries {
+                let bf_found = resolve_target(session, loaded, bt, sheet_name, op, bf)?;
+                let b_idx = (0..loaded.record.sheet.objects.len())
+                    .find(|&i| loaded.record.handle_of(i) == Some(bf_found.handle.as_str()))
+                    .ok_or_else(|| {
+                        op_error(
+                            index,
+                            op_name,
+                            ErrorCode::UnknownName,
+                            format!("could not read boundary `{}`", bf_found.id),
+                            bf,
+                        )
+                    })?;
+                if !loaded.record.sheet.same_space(obj_idx, b_idx) {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::BadValue,
+                        format!(
+                            "boundary `{}` is in a different space from `target`",
+                            bf_found.id
+                        ),
+                        bf,
+                    ));
+                }
+                for part in reader.parts(&loaded.record.sheet.objects[b_idx]) {
+                    b_curves.push(part.curve);
+                }
+            }
+            let base = loaded.record.sheet.objects[obj_idx].clone();
+            let obj_name = loaded.record.objects[obj_idx].name.clone();
+            let trimmed = compute_trim(&base, &b_curves, *keep)
+                .map_err(|e| op_error(index, op_name, e.code, e.message, "boundary"))?;
+            let space = session.space_of_handle(&found.handle)?;
+            let start_of = |t: &crate::text::Text| fonts.start(t);
+            let local_id = found
+                .id
+                .split_once('/')
+                .map(|(_, l)| l)
+                .filter(|l| !l.starts_with(HANDLE_ID));
+            let del = session.delete_object(&found.handle)?;
+            let (new_hex, added) = session.add_object(
+                &trimmed.kept,
+                &space,
+                sheet_name,
+                local_id,
+                obj_name.as_deref(),
+                &start_of,
+            )?;
+            let mut handles_touched = del.touched;
+            handles_touched.extend(added.touched);
+            let mut handles_added = added.added;
+            let handles_deleted = del.deleted;
+            let mut split_full_id = None;
+            if let Some(split_obj) = &trimmed.split {
+                let (shex, sadd) = session.add_object(
+                    split_obj,
+                    &space,
+                    sheet_name,
+                    new_id.as_deref(),
+                    None,
+                    &start_of,
+                )?;
+                handles_touched.extend(sadd.touched);
+                handles_added.extend(sadd.added);
+                split_full_id = Some(match new_id {
+                    Some(explicit) => format!("{sheet_name}/{explicit}"),
+                    None => handle_id(sheet_name, &shex),
+                });
+            }
+            let kept_id = match local_id {
+                Some(explicit) => format!("{sheet_name}/{explicit}"),
+                None => handle_id(sheet_name, &new_hex),
+            };
+            let message = match &split_full_id {
+                Some(sid) => format!(
+                    "trimmed `{}` (keep `{}`) and split off `{sid}`",
+                    found.id,
+                    keep.name()
+                ),
+                None => format!("trimmed `{}` (keep `{}`)", found.id, keep.name()),
+            };
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message,
+                id: Some(kept_id),
+                handle: Some(new_hex),
+                handles_touched,
+                handles_added,
+                handles_deleted,
+                copies: Vec::new(),
+                snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
+                split_id: split_full_id,
+            })
+        }
+        Body::Extend {
+            target,
+            boundaries,
+            end,
+        } => {
+            let loaded = ensure_record(session, cached, source, sheet_name)?;
+            let found = resolve_target(session, loaded, target, sheet_name, op, "target")?;
+            check_unlocked(session, &found.handle, &found.id, op, "target")?;
+            let obj_idx = (0..loaded.record.sheet.objects.len())
+                .find(|&i| loaded.record.handle_of(i) == Some(found.handle.as_str()))
+                .ok_or_else(|| {
+                    op_error(
+                        index,
+                        op_name,
+                        ErrorCode::UnknownName,
+                        format!("could not read `{}` to extend it", found.id),
+                        "target",
+                    )
+                })?;
+            let fonts = SheetFonts::find(&loaded.record.sheet, settings);
+            let reader = Reader {
+                sheet: &loaded.record.sheet,
+                fonts: &fonts,
+            };
+            let mut b_curves = Vec::new();
+            for (bt, bf) in boundaries {
+                let bf_found = resolve_target(session, loaded, bt, sheet_name, op, bf)?;
+                let b_idx = (0..loaded.record.sheet.objects.len())
+                    .find(|&i| loaded.record.handle_of(i) == Some(bf_found.handle.as_str()))
+                    .ok_or_else(|| {
+                        op_error(
+                            index,
+                            op_name,
+                            ErrorCode::UnknownName,
+                            format!("could not read boundary `{}`", bf_found.id),
+                            bf,
+                        )
+                    })?;
+                if !loaded.record.sheet.same_space(obj_idx, b_idx) {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::BadValue,
+                        format!(
+                            "boundary `{}` is in a different space from `target`",
+                            bf_found.id
+                        ),
+                        bf,
+                    ));
+                }
+                for part in reader.parts(&loaded.record.sheet.objects[b_idx]) {
+                    b_curves.push(part.curve);
+                }
+            }
+            let base = loaded.record.sheet.objects[obj_idx].clone();
+            let obj_name = loaded.record.objects[obj_idx].name.clone();
+            let extended = compute_extend(&base, &b_curves, *end)
+                .map_err(|e| op_error(index, op_name, e.code, e.message, "boundary"))?;
+            let space = session.space_of_handle(&found.handle)?;
+            let start_of = |t: &crate::text::Text| fonts.start(t);
+            let local_id = found
+                .id
+                .split_once('/')
+                .map(|(_, l)| l)
+                .filter(|l| !l.starts_with(HANDLE_ID));
+            let del = session.delete_object(&found.handle)?;
+            let (new_hex, added) = session.add_object(
+                &extended,
+                &space,
+                sheet_name,
+                local_id,
+                obj_name.as_deref(),
+                &start_of,
+            )?;
+            let mut handles_touched = del.touched;
+            handles_touched.extend(added.touched);
+            let kept_id = match local_id {
+                Some(explicit) => format!("{sheet_name}/{explicit}"),
+                None => handle_id(sheet_name, &new_hex),
+            };
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message: format!("extended `{}` ({} end)", found.id, end.name()),
+                id: Some(kept_id),
+                handle: Some(new_hex),
+                handles_touched,
+                handles_added: added.added,
+                handles_deleted: del.deleted,
+                copies: Vec::new(),
+                snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::Change {
@@ -2642,6 +2876,7 @@ fn apply_revision_op(
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::Move { target, motion } => {
@@ -2670,6 +2905,7 @@ fn apply_revision_op(
                 snapped,
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::Delete { target } => {
@@ -2693,6 +2929,7 @@ fn apply_revision_op(
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::Transform { targets, by } => {
@@ -2760,6 +2997,7 @@ fn apply_revision_op(
                 snapped,
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::Copy { targets, pattern } => {
@@ -2953,6 +3191,7 @@ fn apply_revision_op(
                 snapped,
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::Table {
@@ -2991,6 +3230,7 @@ fn apply_revision_op(
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         Body::Table {
@@ -3033,6 +3273,7 @@ fn apply_revision_op(
                 snapped: Vec::new(),
                 replacements: Vec::new(),
                 attributes_set: Vec::new(),
+                split_id: None,
             })
         }
         _ => Err(op_error(

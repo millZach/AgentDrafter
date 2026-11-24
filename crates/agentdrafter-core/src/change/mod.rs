@@ -44,6 +44,7 @@ pub(crate) mod original_journal;
 mod proposals;
 mod recover;
 pub(crate) mod replace;
+pub(crate) mod trim_extend;
 mod undo;
 
 use std::fs;
@@ -254,6 +255,10 @@ pub struct OperationOutcome {
     /// Each insert attribute a `set_attributes` operation changed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attributes_set: Vec<AttributeUpdated>,
+    /// The ID of the second object created when `trim` (`keep: "ends"`) splits
+    /// an object into two pieces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub split_id: Option<String>,
     /// Why it did not land.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,
