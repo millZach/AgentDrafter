@@ -1104,7 +1104,7 @@ fn run_query(
 ) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: QueryRequest = parse("query", input)?;
-    Ok(done(query_with(&request, &settings)))
+    Ok(done_warned(query_with(&request, &settings)))
 }
 
 // operations
@@ -1890,7 +1890,7 @@ fn read_input() -> Value {
 
 fn run_read(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<JsonReply, Error> {
     let request: ReadRequest = parse("read", input)?;
-    Ok(done(read_original(&request)))
+    Ok(done_warned(read_original(&request)))
 }
 
 /// The drawing set a command's input reads, if it names one: the folder its

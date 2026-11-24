@@ -27,7 +27,8 @@ use crate::description::normalize_degrees;
 use crate::error::{Error, ErrorCode};
 use crate::model::block::definition_text;
 use crate::model::{
-    attribute_text, Attribute, AttributeDefinition, Block, Insert, Point3, LAYER_ZERO,
+    attribute_text, Attribute, AttributeDefinition, Block, Insert, Point3, Xref, XrefKind,
+    LAYER_ZERO,
 };
 use crate::text::{Justify, Text};
 
@@ -107,6 +108,51 @@ pub(super) fn add_block_record(
         )
     })?;
     Ok(handle)
+}
+
+/// Adds an external reference block record for `xref`, in the drawing's
+/// `units` code, and returns its handle. No objects are owned by an xref
+/// block record.
+pub(super) fn add_xref_record(
+    drawing: &mut CadDocument,
+    xref: &Xref,
+    units: i16,
+) -> Result<Handle, Error> {
+    let mut record = BlockRecord::new(xref.name.clone());
+    record.set_handle(drawing.allocate_handle());
+    record.block_entity_handle = drawing.allocate_handle();
+    record.block_end_handle = drawing.allocate_handle();
+    record.flags.is_xref = true;
+    record.flags.is_xref_overlay = xref.kind == XrefKind::Overlay;
+    record.flags.is_xref_unloaded = xref.unloaded;
+    record.xref_path = xref.path.clone();
+    record.units = units;
+    let handle = record.handle;
+    drawing.block_records.add(record).map_err(|e| {
+        Error::new(
+            ErrorCode::DwgWrite,
+            format!(
+                "could not add external reference `{}` to the drawing: {e}",
+                xref.name
+            ),
+        )
+    })?;
+    Ok(handle)
+}
+
+/// The DWG insert for an external reference placement (carrying no attributes).
+pub(super) fn dwg_xref_insert(insert: &Insert) -> DwgInsert {
+    DwgInsert::new(insert.block.clone(), vector(insert.position))
+        .with_scale(
+            if insert.mirrored {
+                -insert.scale
+            } else {
+                insert.scale
+            },
+            insert.scale,
+            insert.scale,
+        )
+        .with_rotation(insert.rotation.to_radians())
 }
 
 /// The DWG attribute definition for one of ours, which starts at `start`:
@@ -273,16 +319,18 @@ pub(super) fn read_attribute_definition(
 /// reads back with [`Insert::readable_attributes`].
 #[cfg(test)]
 pub(super) fn read_insert(dwg: &DwgInsert, layer: String, blocks: &[Block]) -> Option<Insert> {
-    read_insert_in(None, dwg, layer, blocks)
+    read_insert_in(None, dwg, layer, blocks, &[])
 }
 
 /// Reads an insert, resolving dynamic block effective names and saved parameter
-/// states when `drawing` is provided.
+/// states when `drawing` is provided, and accepting inserts of declared
+/// external references in `xrefs`.
 pub(super) fn read_insert_in(
     drawing: Option<&CadDocument>,
     dwg: &DwgInsert,
     layer: String,
     blocks: &[Block],
+    xrefs: &[Xref],
 ) -> Option<Insert> {
     let scale = dwg.y_scale();
     let mirrored = dwg.x_scale() == -scale;
@@ -296,7 +344,28 @@ pub(super) fn read_insert_in(
     if !plain {
         return None;
     }
-    let block = blocks.iter().find(|b| b.name == dwg.block_name)?;
+    let Some(block) = blocks.iter().find(|b| b.name == dwg.block_name) else {
+        let xref = xrefs
+            .iter()
+            .find(|x| x.name == dwg.block_name || x.name.eq_ignore_ascii_case(&dwg.block_name))?;
+        if !dwg.attributes.is_empty() {
+            return None;
+        }
+        return Some(Insert {
+            block: xref.name.clone(),
+            position: point(dwg.insert_point),
+            scale,
+            rotation: normalize_degrees(dwg.rotation.to_degrees()),
+            mirrored,
+            readable_attributes: false,
+            attributes: Vec::new(),
+            state: std::collections::BTreeMap::new(),
+            evaluated_block: None,
+            name: super::ids::read_name(&dwg.common),
+            layer,
+            properties: Default::default(),
+        });
+    };
     let (effective_block, state, evaluated_block) = drawing
         .and_then(|d| super::dynamic_block::read_insert_dynamic_info(d, dwg))
         .unwrap_or_else(|| (block.name.clone(), std::collections::BTreeMap::new(), None));

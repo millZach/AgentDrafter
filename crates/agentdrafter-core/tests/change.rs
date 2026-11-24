@@ -411,6 +411,9 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("redefine_block", "BEDIT"),
             ("attsync", "ATTSYNC"),
             ("import_blocks", "ADCENTER"),
+            ("attach_xref", "XATTACH"),
+            ("detach_xref", "XDETACH"),
+            ("bind_xref", "XBIND"),
         ]
     );
     let samples = [
@@ -496,6 +499,9 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "BEDIT", "library": "blocks.yaml", "name": "BADGE", "base_point": [1, 0, 0], "objects": [{"text": {"contents": "A", "position": [0, 0, 0], "height": 1, "cell": [[0, 0, 0], [1, 1, 0]]}}]}),
         json!({"op": "ATTSYNC", "name": "BADGE"}),
         json!({"op": "adcenter", "library": "blocks.yaml", "from": "../parts/badges.dxf", "blocks": ["BADGE"], "replace": true, "units": "in"}),
+        json!({"op": "XATTACH", "sheet": "S", "name": "SITE", "path": "site.dwg", "kind": "overlay", "position": [0, 0, 0]}),
+        json!({"op": "XDETACH", "sheet": "S", "name": "SITE"}),
+        json!({"op": "XBIND", "sheet": "S", "name": "SITE", "mode": "bind"}),
     ];
     for (info, sample) in listed.operations.iter().zip(&samples) {
         assert!(info.does.contains(&info.alias), "{}", info.does);

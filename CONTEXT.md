@@ -48,6 +48,10 @@ _Avoid_: document, model
 AutoCAD's Drawing Exchange Format, ASCII (the default when building DXF) or binary (`dxf_binary`), read everywhere AgentDrafter reads a DWG and written by `build` (via `format` or a `.dxf` output path) and drawing sets (`format: dxf` or `dxf_binary` in `set.yaml`) with the same build mark (`$CUSTOMPROPERTYTAG` / `$CUSTOMPROPERTY`) and object IDs as a DWG.
 _Avoid_: text DWG, export file
 
+**External reference (xref)**:
+Another DWG or DXF file linked into a host drawing (`attach`, carried along when the host is itself referenced, or `overlay`, drawn in the host only) as a block record holding a file path rather than embedded geometry, placed by regular `insert` objects (`xrefs:` in sheet descriptions and templates, `attach_xref` / `XATTACH` / `XREF`, `detach_xref` / `XDETACH`, and `bind_xref` / `XBIND`). Resolved from disk for drawing, querying and checking without embedding geometry into built DWGs, with missing or cyclic references reported under `unresolved_xrefs` and top-level `warnings`.
+_Avoid_: linked file, external block, underlay (an underlay is a PDF or raster image)
+
 **Sheet**:
 One titled page that prints: a border, a title block and the content inside them. It is drawn in model space alone, or in a layout: its border and title block in paper space, and its content in model space, shown through viewports. A sheet drawn in several layouts is one DWG that prints once for each layout, each on its own paper, all showing its one model space; it keeps one name, and its objects one set of IDs.
 _Avoid_: page, layout (a layout is AutoCAD's paper-space tab, which may hold a sheet)

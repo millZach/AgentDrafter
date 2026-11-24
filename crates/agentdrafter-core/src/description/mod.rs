@@ -51,6 +51,7 @@ mod text;
 pub(crate) use text::{shown_mtext, TEXT_STYLE_KEYS};
 mod wipeout;
 mod written;
+pub(crate) mod xref;
 pub(crate) use written::{ObjectSources, SheetSources, Source};
 
 use std::fs;
@@ -88,7 +89,7 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 17] = [
+pub(crate) const SHEET_KEYS: [&str; 18] = [
     "units",
     "block_library",
     "ltscale",
@@ -101,6 +102,7 @@ pub(crate) const SHEET_KEYS: [&str; 17] = [
     "table_styles",
     "mleader_styles",
     "dimension_styles",
+    xref::XREFS_KEY,
     "objects",
     paper::PAPER_KEY,
     page_setup::PAGE_SETUP_KEY,
@@ -414,6 +416,10 @@ fn sheet_and_records(
         Some(node) => dimension::dimension_styles(node, units, &text_styles)?,
         None => Vec::new(),
     };
+    let xrefs = match fields.get(xref::XREFS_KEY) {
+        Some(node) => xref::xrefs(node, library.as_ref())?,
+        None => Vec::new(),
+    };
     let ltscale = match fields.get("ltscale") {
         Some(node) => layers::linetype_scale(node, "ltscale")?,
         None => 1.0,
@@ -484,6 +490,7 @@ fn sheet_and_records(
     };
     let mut place = Place::Sheet {
         library: library.as_ref(),
+        xrefs: &xrefs,
         objects: Vec::new(),
         noticed: Vec::new(),
         spaces: Vec::new(),
@@ -549,6 +556,8 @@ fn sheet_and_records(
         mleader_styles,
         dimension_styles,
         blocks: Vec::new(),
+        xrefs,
+        resolved_xrefs: Vec::new(),
         objects,
         // A sheet drawn in layouts is on its first layout's paper.
         paper: layout.as_ref().and_then(|l| l.paper.clone()).or(paper),
@@ -957,6 +966,7 @@ pub(crate) fn parse_added_object_json(
     };
     let mut place = objects::Place::Sheet {
         library: Some(&library),
+        xrefs: &[],
         objects: Vec::new(),
         noticed: Vec::new(),
         spaces: Vec::new(),

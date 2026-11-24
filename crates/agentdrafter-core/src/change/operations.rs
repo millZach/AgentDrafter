@@ -108,6 +108,14 @@ pub(crate) enum Kind {
     /// plot scale, centring, offset, plot style table (CTB or STB) and
     /// transparency plotting.
     SetPageSetup,
+    /// Attaches or overlays an external reference (DWG/DXF) and places an
+    /// insert of it: AutoCAD's XATTACH / XREF.
+    AttachXref,
+    /// Detaches an external reference and removes its inserts.
+    DetachXref,
+    /// Binds an external reference into a local block definition: AutoCAD's
+    /// XBIND.
+    BindXref,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -285,6 +293,7 @@ impl Spec {
             Kind::Join => &["J"],
             Kind::Stretch => &["S"],
             Kind::Explode => &["X"],
+            Kind::AttachXref => &["XREF"],
             _ => &[],
         }
     }
@@ -336,7 +345,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 82] = [
+pub(crate) const SPECS: [Spec; 85] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -571,6 +580,21 @@ pub(crate) const SPECS: [Spec; 82] = [
     block("redefine_block", "BEDIT", BlockOp::Redefine),
     block("attsync", "ATTSYNC", BlockOp::Sync),
     block("import_blocks", "ADCENTER", BlockOp::Import),
+    Spec {
+        name: "attach_xref",
+        alias: "XATTACH",
+        kind: Kind::AttachXref,
+    },
+    Spec {
+        name: "detach_xref",
+        alias: "XDETACH",
+        kind: Kind::DetachXref,
+    },
+    Spec {
+        name: "bind_xref",
+        alias: "XBIND",
+        kind: Kind::BindXref,
+    },
 ];
 
 const fn grid(name: &'static str, alias: &'static str, op: GridOp) -> Spec {
@@ -1166,6 +1190,20 @@ fn does(spec: &Spec) -> String {
                                `layout` to target a specific layout tab (or `Model` on a DWG), or \
                                omit it for the template's top-level page setup (or the first \
                                layout on a DWG). AutoCAD's PAGESETUP."
+            .to_owned(),
+        Kind::AttachXref => "Attaches or overlays an external reference (DWG or DXF) under \
+                             `name` pointing to `path` (`kind`: `attach` or `overlay`, default \
+                             `attach`) and places an insert of it at `position` (default \
+                             `[0, 0, 0]`) unless `place` is false. AutoCAD's XATTACH / XREF."
+            .to_owned(),
+        Kind::DetachXref => "Detaches the external reference `name` and deletes every insert \
+                             that places it. AutoCAD's XDETACH (XREF Detach)."
+            .to_owned(),
+        Kind::BindXref => "Binds the external reference `name` into a local block definition \
+                           holding the referenced drawing's model-space objects, importing its \
+                           dependent linetypes, layers, text styles and nested blocks (`mode`: \
+                           `bind` for `xref$0$` prefixing or `insert` for direct merging), and \
+                           keeps every insert in place. AutoCAD's XBIND."
             .to_owned(),
     }
 }
@@ -2822,6 +2860,159 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
             }
             schema
         }
+        Kind::AttachXref => {
+            let mut schema = json!({
+                "type": "object",
+                "required": ["name", "path"],
+                "additionalProperties": false,
+                "properties": {
+                    "sheet": {
+                        "description": "A sheet built from the template to edit: the template is \
+                                        that sheet's (optional on an original DWG).",
+                        "$ref": "#/$defs/sheet_name",
+                    },
+                    "template": {
+                        "description": "The template to edit. Give sheet or template.",
+                        "$ref": "#/$defs/template_path",
+                    },
+                    "name": {
+                        "description": "The external reference's block name (e.g. `GRID` or \
+                                        `TITLE_BLOCK`).",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "path": {
+                        "description": "Path to the referenced DWG or DXF file, relative to the \
+                                        template or host drawing folder (with `/` separators).",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "kind": {
+                        "description": "Attachment mode: `attach` (default, carried along when \
+                                        this drawing is referenced) or `overlay` (drawn in this \
+                                        drawing only).",
+                        "enum": crate::description::xref::XREF_KINDS,
+                    },
+                    "unloaded": {
+                        "description": "Whether the external reference is unloaded. Default false.",
+                        "type": "boolean",
+                    },
+                    "place": {
+                        "description": "Whether to place an insert of the external reference. \
+                                        Default true.",
+                        "type": "boolean",
+                    },
+                    "position": {
+                        "description": "Insertion point `[x, y, z]`. Default `[0, 0, 0]`.",
+                        "type": "array",
+                        "minItems": 3,
+                        "maxItems": 3,
+                        "items": { "type": ["number", "string"] },
+                    },
+                    "scale": {
+                        "description": "Uniform insertion scale (> 0). Default 1.",
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                    },
+                    "rotation": {
+                        "description": "Insertion rotation in degrees anticlockwise. Default 0.",
+                        "type": "number",
+                    },
+                    "layer": {
+                        "description": "Layer for the placed insert. Default `0`.",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "space": {
+                        "description": "Optional space (`model`, `paper`, or a layout name) for \
+                                        the placed insert.",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "id": {
+                        "description": "Optional object ID for the placed insert.",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "insert_name": {
+                        "description": "Optional object name for the placed insert.",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                },
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
+        Kind::DetachXref => {
+            let mut schema = json!({
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": {
+                    "sheet": {
+                        "description": "A sheet built from the template to edit (optional on an \
+                                        original DWG).",
+                        "$ref": "#/$defs/sheet_name",
+                    },
+                    "template": {
+                        "description": "The template to edit. Give sheet or template.",
+                        "$ref": "#/$defs/template_path",
+                    },
+                    "name": {
+                        "description": "The external reference block name to detach.",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                },
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
+        Kind::BindXref => {
+            let mut schema = json!({
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": {
+                    "sheet": {
+                        "description": "A sheet built from the template to edit (optional on an \
+                                        original DWG).",
+                        "$ref": "#/$defs/sheet_name",
+                    },
+                    "template": {
+                        "description": "The template to edit. Give sheet or template.",
+                        "$ref": "#/$defs/template_path",
+                    },
+                    "name": {
+                        "description": "The external reference block name to bind into a local \
+                                        block.",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "mode": {
+                        "description": "How xref-dependent tables are named: `bind` (default, \
+                                        AutoCAD `xref$0$name` prefixing) or `insert` (merge names \
+                                        directly into host tables).",
+                        "enum": crate::model::XrefBindMode::ALL.map(crate::model::XrefBindMode::name),
+                    },
+                },
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
@@ -3116,6 +3307,343 @@ fn read_chamfer_spec(
             "distance".to_owned(),
         )),
     }
+}
+
+/// Parses `sheet` or `template` for a template-scoped operation, defaulting to
+/// `default_sheet` on an original DWG/DXF when omitted.
+fn parse_template_or_sheet_target(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<AddTo, Error> {
+    match (map.get("sheet"), map.get("template")) {
+        (Some(Value::String(sheet)), None) => Ok(AddTo::Sheet(sheet.clone())),
+        (None, Some(Value::String(template))) => Ok(AddTo::Template(template.clone())),
+        (Some(_), Some(_)) => Err(fail(
+            ErrorCode::Usage,
+            "give sheet or template, not both: either names the template to edit".to_owned(),
+            "",
+        )),
+        (None, None) => match default_sheet {
+            Some(sheet) => Ok(AddTo::Sheet(sheet.to_owned())),
+            None => Err(fail(
+                ErrorCode::MissingKey,
+                "missing key `template`: name the template to edit, or a sheet built from it with \
+                 sheet"
+                    .to_owned(),
+                "template",
+            )),
+        },
+        (Some(_), None) => Err(fail(
+            ErrorCode::WrongType,
+            "expected a sheet's name".to_owned(),
+            "sheet",
+        )),
+        (None, Some(_)) => Err(fail(
+            ErrorCode::WrongType,
+            "expected a template's path".to_owned(),
+            "template",
+        )),
+    }
+}
+
+#[inline(never)]
+fn read_attach_xref_body(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let to = parse_template_or_sheet_target(map, default_sheet, fail)?;
+    let name = match map.get("name") {
+        Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
+        Some(Value::String(_)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                "`name` cannot be empty".to_owned(),
+                "name",
+            ))
+        }
+        None => {
+            return Err(fail(
+                ErrorCode::MissingKey,
+                "missing key `name`: the external reference's block name".to_owned(),
+                "name",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `name`, the external reference's block name".to_owned(),
+                "name",
+            ))
+        }
+    };
+    let path = match map.get("path") {
+        Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
+        Some(Value::String(_)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                "`path` cannot be empty".to_owned(),
+                "path",
+            ))
+        }
+        None => {
+            return Err(fail(
+                ErrorCode::MissingKey,
+                "missing key `path`: the path to the referenced DWG or DXF file".to_owned(),
+                "path",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `path`, the path to the referenced DWG or DXF file".to_owned(),
+                "path",
+            ))
+        }
+    };
+    let kind = match map.get("kind") {
+        None | Some(Value::Null) => crate::model::XrefKind::Attach,
+        Some(Value::String(s)) if s == "attach" => crate::model::XrefKind::Attach,
+        Some(Value::String(s)) if s == "overlay" => crate::model::XrefKind::Overlay,
+        Some(Value::String(other)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                format!("unknown xref kind `{other}`; expected `attach` or `overlay`"),
+                "kind",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `kind`: `attach` or `overlay`".to_owned(),
+                "kind",
+            ))
+        }
+    };
+    let unloaded = match map.get("unloaded") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `unloaded`, a boolean".to_owned(),
+                "unloaded",
+            ))
+        }
+    };
+    let place = match map.get("place") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `place`, a boolean".to_owned(),
+                "place",
+            ))
+        }
+    };
+    let position = match map.get("position") {
+        None | Some(Value::Null) => json!([0, 0, 0]),
+        Some(v @ Value::Array(items)) if items.len() == 3 => v.clone(),
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `position`, a 3D point `[x, y, z]`".to_owned(),
+                "position",
+            ))
+        }
+    };
+    let scale = match map.get("scale") {
+        None | Some(Value::Null) => 1.0,
+        Some(Value::Number(n)) => {
+            let s = n.as_f64().unwrap_or(0.0);
+            if !s.is_finite() || s <= 0.0 {
+                return Err(fail(
+                    ErrorCode::BadValue,
+                    "`scale` must be a finite number greater than 0".to_owned(),
+                    "scale",
+                ));
+            }
+            s
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `scale`, a positive number".to_owned(),
+                "scale",
+            ))
+        }
+    };
+    let rotation = match map.get("rotation") {
+        None | Some(Value::Null) => 0.0,
+        Some(Value::Number(n)) => {
+            let r = n.as_f64().unwrap_or(f64::NAN);
+            if !r.is_finite() {
+                return Err(fail(
+                    ErrorCode::BadValue,
+                    "`rotation` must be a finite angle in degrees".to_owned(),
+                    "rotation",
+                ));
+            }
+            r
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `rotation`, a number of degrees".to_owned(),
+                "rotation",
+            ))
+        }
+    };
+    let layer = match map.get("layer") {
+        None | Some(Value::Null) => crate::model::LAYER_ZERO.to_owned(),
+        Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `layer`, a non-empty layer name".to_owned(),
+                "layer",
+            ))
+        }
+    };
+    let space = match map.get("space") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `space`, a non-empty space name".to_owned(),
+                "space",
+            ))
+        }
+    };
+    let id = match map.get("id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `id`, a non-empty object ID".to_owned(),
+                "id",
+            ))
+        }
+    };
+    let insert_name = match map.get("insert_name") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `insert_name`, a non-empty object name".to_owned(),
+                "insert_name",
+            ))
+        }
+    };
+    Ok(Body::AttachXref {
+        to,
+        xref: crate::model::Xref {
+            name,
+            path,
+            kind,
+            unloaded,
+        },
+        place,
+        position,
+        scale,
+        rotation,
+        layer,
+        space,
+        id,
+        insert_name,
+    })
+}
+
+#[inline(never)]
+fn read_detach_xref_body(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let to = parse_template_or_sheet_target(map, default_sheet, fail)?;
+    let name = match map.get("name") {
+        Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
+        Some(Value::String(_)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                "`name` cannot be empty".to_owned(),
+                "name",
+            ))
+        }
+        None => {
+            return Err(fail(
+                ErrorCode::MissingKey,
+                "missing key `name`: the external reference to detach".to_owned(),
+                "name",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `name`, the external reference to detach".to_owned(),
+                "name",
+            ))
+        }
+    };
+    Ok(Body::DetachXref { to, name })
+}
+
+#[inline(never)]
+fn read_bind_xref_body(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let to = parse_template_or_sheet_target(map, default_sheet, fail)?;
+    let name = match map.get("name") {
+        Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
+        Some(Value::String(_)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                "`name` cannot be empty".to_owned(),
+                "name",
+            ))
+        }
+        None => {
+            return Err(fail(
+                ErrorCode::MissingKey,
+                "missing key `name`: the external reference to bind".to_owned(),
+                "name",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `name`, the external reference to bind".to_owned(),
+                "name",
+            ))
+        }
+    };
+    let mode = match map.get("mode") {
+        None | Some(Value::Null) => crate::model::XrefBindMode::Bind,
+        Some(Value::String(s)) if s == "bind" => crate::model::XrefBindMode::Bind,
+        Some(Value::String(s)) if s == "insert" => crate::model::XrefBindMode::Insert,
+        Some(Value::String(other)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                format!("unknown bind mode `{other}`; expected `bind` or `insert`"),
+                "mode",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected `mode`: `bind` or `insert`".to_owned(),
+                "mode",
+            ))
+        }
+    };
+    Ok(Body::BindXref { to, name, mode })
 }
 
 /// Parses `boundary` (one target) or `boundaries` (a non-empty list of targets)
@@ -4075,6 +4603,31 @@ pub(crate) enum Body {
         to: AddTo,
         layout: Option<String>,
         set: Map<String, Value>,
+    },
+    /// Attaches or overlays an external reference (`XATTACH` / `XREF`) and
+    /// optionally places an insert of it.
+    AttachXref {
+        to: AddTo,
+        xref: crate::model::Xref,
+        place: bool,
+        position: Value,
+        scale: f64,
+        rotation: f64,
+        layer: String,
+        space: Option<String>,
+        id: Option<String>,
+        insert_name: Option<String>,
+    },
+    /// Detaches an external reference and removes every insert placing it.
+    DetachXref {
+        to: AddTo,
+        name: String,
+    },
+    /// Binds an external reference into a local block definition (`XBIND`).
+    BindXref {
+        to: AddTo,
+        name: String,
+        mode: crate::model::XrefBindMode,
     },
     /// Sets an attribute on every insert matching a query selection: AutoCAD's
     /// GATTE.
@@ -5697,6 +6250,33 @@ fn operation(
                 }
             };
             Body::SetPageSetup { to, layout, set }
+        }
+        Kind::AttachXref => {
+            keys(&[
+                "sheet",
+                "template",
+                "name",
+                "path",
+                "kind",
+                "unloaded",
+                "place",
+                "position",
+                "scale",
+                "rotation",
+                "layer",
+                "space",
+                "id",
+                "insert_name",
+            ])?;
+            read_attach_xref_body(map, default_sheet, &fail)?
+        }
+        Kind::DetachXref => {
+            keys(&["sheet", "template", "name"])?;
+            read_detach_xref_body(map, default_sheet, &fail)?
+        }
+        Kind::BindXref => {
+            keys(&["sheet", "template", "name", "mode"])?;
+            read_bind_xref_body(map, default_sheet, &fail)?
         }
         Kind::SetAttributes => {
             keys(&[

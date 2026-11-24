@@ -28,6 +28,7 @@ pub(crate) mod page_setup;
 pub(crate) mod revision_cloud;
 pub(crate) mod table;
 pub(crate) mod wipeout;
+pub(crate) mod xref;
 pub use block::{
     attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert,
 };
@@ -62,6 +63,7 @@ pub use table::{
     STANDARD_TABLE_STYLE,
 };
 pub use wipeout::{Wipeout, WipeoutFrame};
+pub use xref::{UnresolvedXref, Xref, XrefBindMode, XrefKind};
 
 /// The layer every drawing has, and the one an object sits on unless it names another.
 pub const LAYER_ZERO: &str = "0";
@@ -890,6 +892,14 @@ pub struct Sheet {
     /// among the sheet's.
     #[serde(default)]
     pub blocks: Vec<Block>,
+    /// External references (xrefs) declared on the sheet or read from a DWG/DXF.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub xrefs: Vec<Xref>,
+    /// Runtime-resolved blocks loaded from external references for drawing,
+    /// querying and checking. Never serialized into sheet descriptions or
+    /// written as local block definitions when building a DWG/DXF.
+    #[serde(skip)]
+    pub resolved_xrefs: Vec<Block>,
     pub objects: Vec<Object>,
     /// The paper the sheet is drawn on, if its sheet description or
     /// template declares it. Only the checker reads it: a build, a render
@@ -947,6 +957,12 @@ impl Sheet {
             .find(|b| b.name == insert.block)
             .or_else(|| {
                 self.blocks
+                    .iter()
+                    .find(|b| b.name.eq_ignore_ascii_case(&insert.block))
+            })
+            .or_else(|| self.resolved_xrefs.iter().find(|b| b.name == insert.block))
+            .or_else(|| {
+                self.resolved_xrefs
                     .iter()
                     .find(|b| b.name.eq_ignore_ascii_case(&insert.block))
             })?;
@@ -1214,6 +1230,10 @@ pub struct DrawingContents {
     /// The drawing's block definitions the core has a model for, in table
     /// order, leaving out model space and the layouts.
     pub blocks: Vec<Block>,
+    /// The drawing's attached and overlaid external references (xrefs), in
+    /// table order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub xrefs: Vec<Xref>,
     /// For each block in `blocks`, in the same order, the handle of each of
     /// its `objects`, in hexadecimal as AutoCAD lists it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

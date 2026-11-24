@@ -27,7 +27,7 @@ use super::{
 use crate::error::{Error, ErrorCode};
 use crate::model::{
     Arc, BlockLibrary, Circle, DimensionStyle, Ellipse, HatchPattern, Layer, Line, Linetype,
-    MLeaderStyle, Object, Spline, TableStyle, FIT_DEGREE, LAYER_ZERO,
+    MLeaderStyle, Object, Spline, TableStyle, Xref, FIT_DEGREE, LAYER_ZERO,
 };
 use crate::text::TextStyle;
 use crate::units::Unit;
@@ -144,6 +144,9 @@ pub(super) struct Tables<'a> {
 pub(super) enum Place<'a> {
     Sheet {
         library: Option<&'a BlockLibrary>,
+        /// The external references declared on this sheet, which an insert on
+        /// the sheet may place without a block library entry.
+        xrefs: &'a [Xref],
         /// The record of each object read so far, with its ID and name.
         objects: Vec<ObjectRecord>,
         /// What reading the objects so far noticed, such as an attribute
@@ -415,12 +418,18 @@ pub(super) fn object(
         (
             "insert",
             Place::Sheet {
-                library, noticed, ..
-            }
-            | Place::Block {
+                library,
+                xrefs,
+                noticed,
+                ..
+            },
+        ) => insert(&fields, units, layer, *library, xrefs, noticed).map(Object::Insert),
+        (
+            "insert",
+            Place::Block {
                 library, noticed, ..
             },
-        ) => insert(&fields, units, layer, *library, noticed).map(Object::Insert),
+        ) => insert(&fields, units, layer, *library, &[], noticed).map(Object::Insert),
         (other, _) => unreachable!("object type `{other}` is listed but not read"),
     }?;
     *object.properties_mut() = properties;

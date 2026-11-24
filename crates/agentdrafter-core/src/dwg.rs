@@ -37,8 +37,8 @@ use crate::model::MTextBox;
 use crate::model::{
     is_one, Arc, Block, Circle, DecodeReport, DrawingContents, Ellipse, IdAndName, Layer, Line,
     Linetype, Lineweight, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
-    Properties, RecordsOfKind, RevisionCloud, Solid, Spline, BUILT_IN_LINETYPES, BY_BLOCK,
-    BY_LAYER, CONTINUOUS, FIT_DEGREE, LAYER_ZERO, REVCLOUD_APPLICATION,
+    Properties, RecordsOfKind, RevisionCloud, Solid, Spline, Xref, XrefKind, BUILT_IN_LINETYPES,
+    BY_BLOCK, BY_LAYER, CONTINUOUS, FIT_DEGREE, LAYER_ZERO, REVCLOUD_APPLICATION,
 };
 use crate::text::{MText as MTextObject, Text as TextObject};
 use crate::units::Unit;
@@ -295,6 +295,9 @@ pub(crate) fn write_new_sheet_as(
             })?;
         }
     }
+    for xref in &sheet.xrefs {
+        block::add_xref_record(&mut drawing, xref, units)?;
+    }
     let mut dynamic_writer = dynamic_block::DynamicBlockWriter::new();
     // After the sheet's blocks, so that a block of its library drawn as
     // AutoCAD's arrowhead block is the one a leader draws with.
@@ -488,6 +491,39 @@ pub(crate) fn write_new_sheet_as(
             continue;
         }
         if let Object::Insert(insert) = object {
+            if sheet
+                .xrefs
+                .iter()
+                .any(|x| x.name == insert.block || x.name.eq_ignore_ascii_case(&insert.block))
+            {
+                let mut dwg_ins = block::dwg_xref_insert(insert);
+                insert.layer.clone_into(&mut dwg_ins.common.layer);
+                set_properties(&mut dwg_ins.common, &insert.properties);
+                ids::write_id_and_name(
+                    &mut dwg_ins.common,
+                    &record.name,
+                    &written.id,
+                    written.name.as_deref(),
+                );
+                if named_plot_styles {
+                    page_setup::set_entity_plot_style(
+                        &mut drawing,
+                        &mut dwg_ins.common,
+                        &insert.properties.plot_style,
+                    );
+                }
+                let handle =
+                    add_to(&mut drawing, EntityType::Insert(dwg_ins), paper).map_err(|e| {
+                        Error::new(
+                            ErrorCode::DwgWrite,
+                            format!(
+                                "could not add an external reference insert to the drawing: {e}"
+                            ),
+                        )
+                    })?;
+                id_to_handle.insert(written.id.to_lowercase(), handle);
+                continue;
+            }
             let Some(definition) = sheet.blocks.iter().find(|b| b.name == insert.block) else {
                 return Err(Error::new(
                     ErrorCode::DwgWrite,
@@ -1237,6 +1273,22 @@ fn contents(
             && !inserted.contains(&r.name.to_lowercase())
             && !content_blocks.contains(&r.handle)
     };
+    let is_xref_record =
+        |r: &BlockRecord| r.flags.is_xref || r.flags.is_xref_overlay || !r.xref_path.is_empty();
+    let xrefs: Vec<Xref> = records
+        .iter()
+        .filter(|r| is_xref_record(r))
+        .map(|r| Xref {
+            name: r.name.clone(),
+            path: r.xref_path.clone(),
+            kind: if r.flags.is_xref_overlay {
+                XrefKind::Overlay
+            } else {
+                XrefKind::Attach
+            },
+            unloaded: r.flags.is_xref_unloaded,
+        })
+        .collect();
     let ad_evaluated_blocks = dynamic_block::agentdrafter_evaluated_blocks(drawing);
     let mut read: Vec<Option<ReadBlock>> = records.iter().map(|_| None).collect();
     loop {
@@ -1264,7 +1316,7 @@ fn contents(
     let blocks_not_read = read
         .iter()
         .zip(&records)
-        .filter(|(b, r)| b.is_none() && !leaders_only(r))
+        .filter(|(b, r)| b.is_none() && !leaders_only(r) && !is_xref_record(r))
         .count();
     let mut blocks = Vec::new();
     let mut block_handles = Vec::new();
@@ -1370,7 +1422,14 @@ fn contents(
                 .iter()
                 .find(|(h, _)| *h == v.common.handle)
                 .and_then(|(_, read)| read.clone()),
-            _ => read_object_in(Some(drawing), dwg_object, &blocks, named_mode, &ps_map),
+            _ => read_object_in(
+                Some(drawing),
+                dwg_object,
+                &blocks,
+                &xrefs,
+                named_mode,
+                &ps_map,
+            ),
         };
         match read {
             Some(object) => {
@@ -1489,6 +1548,7 @@ fn contents(
         dimension_styles,
         dimension_styles_not_read,
         blocks,
+        xrefs,
         block_handles,
         block_ids_and_names,
         blocks_not_read,
@@ -2194,6 +2254,7 @@ fn read_block(
             Some(drawing),
             dwg_object,
             blocks,
+            &[],
             named_mode,
             ps_map,
         )?);
@@ -2277,6 +2338,7 @@ pub(super) fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<O
         None,
         dwg_object,
         blocks,
+        &[],
         false,
         &std::collections::HashMap::new(),
     )
@@ -2286,6 +2348,7 @@ fn read_object_in(
     drawing: Option<&CadDocument>,
     dwg_object: &EntityType,
     blocks: &[Block],
+    xrefs: &[Xref],
     named_mode: bool,
     ps_map: &std::collections::HashMap<acadrust::types::Handle, String>,
 ) -> Option<Object> {
@@ -2386,9 +2449,9 @@ fn read_object_in(
         EntityType::AttributeDefinition(definition) => {
             Object::AttributeDefinition(block::read_attribute_definition(definition, layer)?)
         }
-        EntityType::Insert(insert) => {
-            Object::Insert(block::read_insert_in(drawing, insert, layer, blocks)?)
-        }
+        EntityType::Insert(insert) => Object::Insert(block::read_insert_in(
+            drawing, insert, layer, blocks, xrefs,
+        )?),
         _ => return None,
     };
     let mut object = object;
@@ -3497,6 +3560,8 @@ mod tests {
             mleader_styles: Vec::new(),
             dimension_styles: Vec::new(),
             blocks: Vec::new(),
+            xrefs: Vec::new(),
+            resolved_xrefs: Vec::new(),
             objects: Vec::new(),
             paper: None,
             page_setup: None,

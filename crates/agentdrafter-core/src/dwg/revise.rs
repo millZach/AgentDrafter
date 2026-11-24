@@ -157,6 +157,7 @@ struct BlockRecordDigest {
     handle: u64,
     name: String,
     flags: String,
+    xref_path: String,
     layout_handle: u64,
     entity_handles: Vec<u64>,
 }
@@ -198,7 +199,11 @@ pub(crate) struct RevisionSession {
     expected_spaces_mutated: HashSet<u64>,
     expected_layers_added: HashSet<String>,
     expected_layers_changed: HashSet<String>,
+    expected_linetypes_added: HashSet<String>,
+    expected_text_styles_added: HashSet<String>,
     expected_block_records_added: HashSet<String>,
+    expected_block_records_changed: HashSet<String>,
+    expected_block_records_removed: HashSet<String>,
     expected_non_graphical_changed: HashSet<u64>,
     expected_non_graphical_added: HashSet<u64>,
     expected_non_graphical_removed: HashSet<u64>,
@@ -262,7 +267,11 @@ impl RevisionSession {
             expected_spaces_mutated: HashSet::new(),
             expected_layers_added: HashSet::new(),
             expected_layers_changed: HashSet::new(),
+            expected_linetypes_added: HashSet::new(),
+            expected_text_styles_added: HashSet::new(),
             expected_block_records_added: HashSet::new(),
+            expected_block_records_changed: HashSet::new(),
+            expected_block_records_removed: HashSet::new(),
             expected_non_graphical_changed: HashSet::new(),
             expected_non_graphical_added: HashSet::new(),
             expected_non_graphical_removed: HashSet::new(),
@@ -1996,6 +2005,456 @@ impl RevisionSession {
         })
     }
 
+    /// Attaches or overlays an external reference (`XATTACH` / `XREF`) and
+    /// places an `INSERT` of it in `space`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn attach_xref(
+        &mut self,
+        xref: &crate::model::Xref,
+        insert: &crate::model::Insert,
+        space: &TargetSpace,
+        sheet_name: &str,
+        explicit_id: Option<&str>,
+        explicit_name: Option<&str>,
+    ) -> Result<(String, MutationHandles), Error> {
+        let mut record = MutationHandles::default();
+        let existing = self
+            .drawing
+            .block_records
+            .iter()
+            .find(|r| r.name.eq_ignore_ascii_case(&xref.name));
+        if let Some(br) = existing {
+            let is_xref = br.flags.is_xref || br.flags.is_xref_overlay || !br.xref_path.is_empty();
+            if !is_xref {
+                return Err(Error::new(
+                    ErrorCode::DuplicateName,
+                    format!(
+                        "the drawing already has a local block named `{}`; choose a different \
+                         external reference name",
+                        br.name
+                    ),
+                ));
+            }
+            let existing_kind = if br.flags.is_xref_overlay {
+                crate::model::XrefKind::Overlay
+            } else {
+                crate::model::XrefKind::Attach
+            };
+            if br.xref_path != xref.path
+                || existing_kind != xref.kind
+                || br.flags.is_xref_unloaded != xref.unloaded
+            {
+                return Err(Error::new(
+                    ErrorCode::DuplicateName,
+                    format!(
+                        "the drawing already has an external reference named `{}` pointing to `{}`",
+                        br.name, br.xref_path
+                    ),
+                ));
+            }
+        } else {
+            let units = self.drawing.header.insertion_units;
+            block::add_xref_record(&mut self.drawing, xref, units)?;
+            self.expected_block_records_added
+                .insert(xref.name.to_lowercase());
+        }
+        let mut dwg_ins = block::dwg_xref_insert(insert);
+        insert.layer.clone_into(&mut dwg_ins.common.layer);
+        set_properties(&mut dwg_ins.common, &insert.properties);
+        match (explicit_id, explicit_name) {
+            (Some(id_part), name_part) => {
+                self.ensure_application_registered()?;
+                ids::write_id_and_name(&mut dwg_ins.common, sheet_name, id_part, name_part);
+            }
+            (None, Some(name_part)) => {
+                self.ensure_application_registered()?;
+                ids::write_name_only(&mut dwg_ins.common, name_part);
+            }
+            (None, None) => {}
+        }
+        let handle = self.insert_into_space(EntityType::Insert(dwg_ins), space)?;
+        let hex = handle_text(handle);
+        self.expected_added.insert(handle.value());
+        record.added.push(hex.clone());
+        if let Some(owner) = self
+            .drawing
+            .get_entity(handle)
+            .map(|e| e.common().owner_handle.value())
+        {
+            if owner != 0 {
+                self.expected_spaces_mutated.insert(owner);
+            }
+        }
+        self.assign_child_handles(handle, &mut record);
+        Ok((hex, record))
+    }
+
+    /// Attaches or overlays an external reference record without placing an
+    /// `INSERT` entity.
+    pub(crate) fn attach_xref_record_only(
+        &mut self,
+        xref: &crate::model::Xref,
+    ) -> Result<MutationHandles, Error> {
+        if let Some(br) = self
+            .drawing
+            .block_records
+            .iter()
+            .find(|r| r.name.eq_ignore_ascii_case(&xref.name))
+        {
+            return Err(Error::new(
+                ErrorCode::DuplicateName,
+                format!(
+                    "the drawing already has a block or external reference named `{}`",
+                    br.name
+                ),
+            ));
+        }
+        let units = self.drawing.header.insertion_units;
+        let handle = block::add_xref_record(&mut self.drawing, xref, units)?;
+        self.expected_block_records_added
+            .insert(xref.name.to_lowercase());
+        Ok(MutationHandles {
+            added: vec![handle_text(handle)],
+            ..Default::default()
+        })
+    }
+
+    /// Detaches an external reference from the drawing, deleting all `INSERT`s
+    /// that reference it and removing its `BLOCK_RECORD`.
+    pub(crate) fn detach_xref(&mut self, xref_name: &str) -> Result<MutationHandles, Error> {
+        let Some((canonical_name, is_xref)) = self
+            .drawing
+            .block_records
+            .iter()
+            .find(|r| r.name.eq_ignore_ascii_case(xref_name))
+            .map(|r| {
+                (
+                    r.name.clone(),
+                    r.flags.is_xref || r.flags.is_xref_overlay || !r.xref_path.is_empty(),
+                )
+            })
+        else {
+            return Err(Error::new(
+                ErrorCode::UnknownName,
+                format!("no external reference named `{xref_name}` in the drawing"),
+            ));
+        };
+        if !is_xref {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "`{canonical_name}` is a local block, not an external reference, so it cannot \
+                     be detached"
+                ),
+            ));
+        }
+        let insert_handles: Vec<String> = self
+            .drawing
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::Insert(ins) if ins.block_name.eq_ignore_ascii_case(&canonical_name) => {
+                    Some(handle_text(ins.common.handle))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut combined = MutationHandles::default();
+        for hex in insert_handles {
+            let deleted = self.delete_object(&hex)?;
+            combined.touched.extend(deleted.touched);
+            combined.added.extend(deleted.added);
+            combined.deleted.extend(deleted.deleted);
+        }
+        self.drawing.block_records.remove(&canonical_name);
+        self.expected_block_records_removed
+            .insert(canonical_name.to_lowercase());
+        Ok(combined)
+    }
+
+    /// Binds an external reference into the drawing (`XBIND`), converting its
+    /// `BLOCK_RECORD` into a local block definition holding the referenced
+    /// drawing's model-space objects, importing its dependent linetypes,
+    /// layers, text styles and nested blocks, and keeping all `INSERT`s in place.
+    pub(crate) fn bind_xref(
+        &mut self,
+        xref_name: &str,
+        host_path: &Path,
+        mode: crate::model::XrefBindMode,
+        start_of: &dyn Fn(&TextObject) -> Point3,
+    ) -> Result<MutationHandles, Error> {
+        let Some((canonical_name, br_handle, xref_path, is_xref)) = self
+            .drawing
+            .block_records
+            .iter()
+            .find(|r| r.name.eq_ignore_ascii_case(xref_name))
+            .map(|r| {
+                (
+                    r.name.clone(),
+                    r.handle,
+                    r.xref_path.clone(),
+                    r.flags.is_xref || r.flags.is_xref_overlay || !r.xref_path.is_empty(),
+                )
+            })
+        else {
+            return Err(Error::new(
+                ErrorCode::UnknownName,
+                format!("no external reference named `{xref_name}` in the drawing"),
+            ));
+        };
+        if !is_xref {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!("`{canonical_name}` is already a local block, not an external reference"),
+            ));
+        }
+        let Some(resolved_path) = crate::xref::find_xref_file(host_path, &xref_path) else {
+            return Err(Error::new(
+                ErrorCode::ReadFailed,
+                format!(
+                    "could not bind external reference `{canonical_name}`: referenced file \
+                     `{xref_path}` was not found"
+                ),
+            ));
+        };
+        let referenced = Box::new(super::read(&resolved_path)?);
+        if referenced.objects_not_read > 0 {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "could not bind external reference `{canonical_name}`: `{xref_path}` holds {} \
+                     object(s) the core has no model for yet",
+                    referenced.objects_not_read
+                ),
+            ));
+        }
+        let host_units = unit(self.drawing.header.insertion_units).unwrap_or(Unit::Mm);
+        let xref_units = referenced.units.unwrap_or(host_units);
+        let unit_scale = xref_units.convert(1.0, host_units);
+        let prefix = match mode {
+            crate::model::XrefBindMode::Bind => format!("{canonical_name}$0$"),
+            crate::model::XrefBindMode::Insert => String::new(),
+        };
+        let mut record = MutationHandles::default();
+
+        // 1. Add linetypes from the referenced drawing.
+        for lt in &referenced.linetypes {
+            if crate::xref::is_built_in_linetype(&lt.name) {
+                continue;
+            }
+            let name = format!("{prefix}{}", lt.name);
+            if !self
+                .drawing
+                .line_types
+                .iter()
+                .any(|existing| existing.name.eq_ignore_ascii_case(&name))
+            {
+                let mut dwg_lt = super::dwg_linetype(&Linetype {
+                    name: name.clone(),
+                    description: lt.description.clone(),
+                    pattern: lt.pattern.iter().map(|d| d * unit_scale).collect(),
+                });
+                dwg_lt.set_handle(self.drawing.allocate_handle());
+                let h = dwg_lt.handle;
+                self.drawing.line_types.add(dwg_lt).map_err(|e| {
+                    Error::new(
+                        ErrorCode::DwgWrite,
+                        format!("could not add bound linetype `{name}`: {e}"),
+                    )
+                })?;
+                self.expected_linetypes_added.insert(name.to_lowercase());
+                record.added.push(handle_text(h));
+            }
+        }
+
+        // 2. Add layers from the referenced drawing.
+        for layer in &referenced.layers {
+            if layer.name == LAYER_ZERO {
+                continue;
+            }
+            let name = format!("{prefix}{}", layer.name);
+            if !self
+                .drawing
+                .layers
+                .iter()
+                .any(|existing| existing.name.eq_ignore_ascii_case(&name))
+            {
+                let bound_layer = Layer {
+                    name: name.clone(),
+                    linetype: crate::xref::prefix_linetype_name(&layer.linetype, &prefix),
+                    ..layer.clone()
+                };
+                let added = self.add_layer(&bound_layer)?;
+                record.touched.extend(added.touched);
+                record.added.extend(added.added);
+                record.deleted.extend(added.deleted);
+            }
+        }
+
+        // 3. Add text styles from the referenced drawing.
+        for style in &referenced.text_styles {
+            if style.name.eq_ignore_ascii_case(crate::text::STANDARD) {
+                continue;
+            }
+            let name = format!("{prefix}{}", style.name);
+            if !self
+                .drawing
+                .text_styles
+                .iter()
+                .any(|existing| existing.name.eq_ignore_ascii_case(&name))
+            {
+                let mut dwg_style = acadrust::tables::TextStyle::new(name.clone());
+                dwg_style.font_file = style.font.clone();
+                dwg_style.true_type_font = String::new();
+                dwg_style.width_factor = style.width_factor;
+                dwg_style.set_handle(self.drawing.allocate_handle());
+                let h = dwg_style.handle;
+                self.drawing.text_styles.add(dwg_style).map_err(|e| {
+                    Error::new(
+                        ErrorCode::DwgWrite,
+                        format!("could not add bound text style `{name}`: {e}"),
+                    )
+                })?;
+                self.expected_text_styles_added.insert(name.to_lowercase());
+                record.added.push(handle_text(h));
+            }
+        }
+
+        // 4. Add nested blocks from the referenced drawing.
+        let units_code = self.drawing.header.insertion_units;
+        let block_renames: Vec<(String, String)> = referenced
+            .blocks
+            .iter()
+            .map(|b| (b.name.clone(), format!("{prefix}{}", b.name)))
+            .collect();
+        let mut known_blocks = self.all_insertable_blocks();
+        for mut nested in referenced.blocks.clone() {
+            nested.name = format!("{prefix}{}", nested.name);
+            for obj in &mut nested.objects {
+                crate::xref::prefix_object(obj, &prefix, &block_renames);
+            }
+            if !self
+                .drawing
+                .block_records
+                .iter()
+                .any(|r| r.name.eq_ignore_ascii_case(&nested.name))
+            {
+                let owner = block::add_block_record(&mut self.drawing, &nested, units_code)?;
+                self.expected_block_records_added
+                    .insert(nested.name.to_lowercase());
+                self.expected_spaces_mutated.insert(owner.value());
+                for obj in &nested.objects {
+                    let mut dwg_obj = dwg_object(obj, start_of, &known_blocks)?;
+                    dwg_obj.common_mut().owner_handle = owner;
+                    let h = self.drawing.add_entity(dwg_obj).map_err(|e| {
+                        Error::new(
+                            ErrorCode::DwgWrite,
+                            format!("could not add bound entity to block `{}`: {e}", nested.name),
+                        )
+                    })?;
+                    self.expected_added.insert(h.value());
+                    record.added.push(handle_text(h));
+                    self.assign_child_handles(h, &mut record);
+                }
+                known_blocks.push(nested);
+            }
+        }
+
+        // 5. Convert the xref block record into a normal local block record and
+        //    populate it with the referenced drawing's model-space objects.
+        let mut model_objects: Vec<Object> = crate::xref::model_space_objects_of(&referenced)
+            .into_iter()
+            .filter(|o| !matches!(o, Object::Viewport(_)))
+            .collect();
+        for obj in &mut model_objects {
+            crate::xref::prefix_object(obj, &prefix, &block_renames);
+        }
+
+        // If units differ, place model objects inside an inner scaled block so
+        // every entity scales cleanly without losing fidelity.
+        let top_objects: Vec<Object> =
+            if (unit_scale - 1.0).abs() > 1e-12 && unit_scale.is_finite() && unit_scale > 0.0 {
+                let inner_name = format!("{canonical_name}$0$__model");
+                let inner_block = Block {
+                    name: inner_name.clone(),
+                    base_point: Point3::new(0.0, 0.0, 0.0),
+                    objects: model_objects,
+                    cells: Vec::new(),
+                    parameters: Vec::new(),
+                };
+                let inner_owner =
+                    block::add_block_record(&mut self.drawing, &inner_block, units_code)?;
+                self.expected_block_records_added
+                    .insert(inner_name.to_lowercase());
+                self.expected_spaces_mutated.insert(inner_owner.value());
+                for obj in &inner_block.objects {
+                    let mut dwg_obj = dwg_object(obj, start_of, &known_blocks)?;
+                    dwg_obj.common_mut().owner_handle = inner_owner;
+                    let h = self.drawing.add_entity(dwg_obj).map_err(|e| {
+                        Error::new(
+                            ErrorCode::DwgWrite,
+                            format!("could not add bound entity to block `{inner_name}`: {e}"),
+                        )
+                    })?;
+                    self.expected_added.insert(h.value());
+                    record.added.push(handle_text(h));
+                    self.assign_child_handles(h, &mut record);
+                }
+                known_blocks.push(inner_block);
+                vec![Object::Insert(crate::model::Insert {
+                    block: inner_name,
+                    position: Point3::new(0.0, 0.0, 0.0),
+                    scale: unit_scale,
+                    rotation: 0.0,
+                    mirrored: false,
+                    readable_attributes: false,
+                    attributes: Vec::new(),
+                    state: std::collections::BTreeMap::new(),
+                    evaluated_block: None,
+                    name: None,
+                    layer: LAYER_ZERO.to_owned(),
+                    properties: Properties::default(),
+                })]
+            } else {
+                model_objects
+            };
+
+        if let Some(br) = self.drawing.block_records.get_mut(&canonical_name) {
+            br.flags.is_xref = false;
+            br.flags.is_xref_overlay = false;
+            br.flags.is_xref_unloaded = false;
+            br.xref_path.clear();
+            br.units = units_code;
+        }
+        self.expected_block_records_changed
+            .insert(canonical_name.to_lowercase());
+        self.expected_spaces_mutated.insert(br_handle.value());
+        record.touched.push(handle_text(br_handle));
+
+        for obj in &top_objects {
+            if matches!(obj, Object::RevisionCloud(_)) {
+                self.ensure_revcloud_application_registered()?;
+            }
+            if matches!(obj, Object::Wipeout(_)) {
+                self.ensure_wipeout_variables();
+            }
+            let mut dwg_obj = dwg_object(obj, start_of, &known_blocks)?;
+            dwg_obj.common_mut().owner_handle = br_handle;
+            let h = self.drawing.add_entity(dwg_obj).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!(
+                        "could not add bound {} to block `{canonical_name}`: {e}",
+                        obj.type_name()
+                    ),
+                )
+            })?;
+            self.expected_added.insert(h.value());
+            record.added.push(handle_text(h));
+            self.assign_child_handles(h, &mut record);
+        }
+        Ok(record)
+    }
+
     /// Returns the existing [`Layer`] named `name` (case-insensitively) for
     /// `change_layer`, or an error if it does not exist.
     pub(crate) fn existing_layer(&self, name: &str) -> Result<Layer, Error> {
@@ -2476,16 +2935,18 @@ impl RevisionSession {
                 });
             }
         }
-        diff_named_table(
+        diff_named_table_allowing_added(
             "LTYPE",
             &before.line_types,
             &after.line_types,
+            &self.expected_linetypes_added,
             &mut unexpected,
         );
-        diff_named_table(
+        diff_named_table_allowing_added(
             "STYLE",
             &before.text_styles,
             &after.text_styles,
+            &self.expected_text_styles_added,
             &mut unexpected,
         );
         diff_named_table(
@@ -2507,16 +2968,22 @@ impl RevisionSession {
         diff_named_table("VPORT", &before.vports, &after.vports, &mut unexpected);
         for (key, orig) in &before.block_records {
             match after.block_records.get(key) {
-                None => unexpected.push(UnexpectedChange {
-                    kind: "BLOCK_RECORD".to_owned(),
-                    handle: orig.name.clone(),
-                    change: UnexpectedChangeKind::Removed,
-                    detail: format!("untouched block record `{}` was removed", orig.name),
-                }),
+                None => {
+                    if !self.expected_block_records_removed.contains(key) {
+                        unexpected.push(UnexpectedChange {
+                            kind: "BLOCK_RECORD".to_owned(),
+                            handle: orig.name.clone(),
+                            change: UnexpectedChangeKind::Removed,
+                            detail: format!("untouched block record `{}` was removed", orig.name),
+                        });
+                    }
+                }
                 Some(now) => {
-                    let meta_changed = orig.handle != now.handle
-                        || orig.flags != now.flags
-                        || orig.layout_handle != now.layout_handle;
+                    let meta_changed = !self.expected_block_records_changed.contains(key)
+                        && (orig.handle != now.handle
+                            || orig.flags != now.flags
+                            || orig.xref_path != now.xref_path
+                            || orig.layout_handle != now.layout_handle);
                     let members_changed = !self.expected_spaces_mutated.contains(&orig.handle)
                         && orig.entity_handles != now.entity_handles;
                     if meta_changed || members_changed {
@@ -4114,6 +4581,16 @@ fn diff_named_table(
     after: &BTreeMap<String, String>,
     out: &mut Vec<UnexpectedChange>,
 ) {
+    diff_named_table_allowing_added(kind, before, after, &HashSet::new(), out);
+}
+
+fn diff_named_table_allowing_added(
+    kind: &str,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+    expected_added: &HashSet<String>,
+    out: &mut Vec<UnexpectedChange>,
+) {
     for (key, orig) in before {
         match after.get(key) {
             None => out.push(UnexpectedChange {
@@ -4132,7 +4609,7 @@ fn diff_named_table(
         }
     }
     for key in after.keys() {
-        if !before.contains_key(key) {
+        if !before.contains_key(key) && !expected_added.contains(key) {
             out.push(UnexpectedChange {
                 kind: kind.to_owned(),
                 handle: key.clone(),
@@ -4341,6 +4818,7 @@ fn snapshot_drawing(
                     handle: br.handle.value(),
                     name: br.name.clone(),
                     flags: format!("{:?}", br.flags),
+                    xref_path: br.xref_path.clone(),
                     layout_handle: br.layout.value(),
                     entity_handles: br.entity_handles.iter().map(|h| h.value()).collect(),
                 },

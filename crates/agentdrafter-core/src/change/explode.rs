@@ -1150,6 +1150,8 @@ mod tests {
             mleader_styles: Vec::new(),
             dimension_styles: Vec::new(),
             blocks: Vec::new(),
+            xrefs: Vec::new(),
+            resolved_xrefs: Vec::new(),
             objects: Vec::new(),
             paper: None,
             page_setup: None,

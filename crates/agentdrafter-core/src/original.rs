@@ -38,7 +38,9 @@ use crate::description::{
 };
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
-use crate::model::{DrawingContents, IdAndName, Layout, Object, Paper, RecordsOfKind, Sheet};
+use crate::model::{
+    DrawingContents, IdAndName, Layout, Object, Paper, RecordsOfKind, Sheet, UnresolvedXref, Xref,
+};
 use crate::stamp::fingerprint;
 use crate::units::Unit;
 
@@ -128,6 +130,13 @@ pub struct ReadReport {
     /// The text mirror written; none when none was asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mirror: Option<String>,
+    /// External references (xrefs) declared in the drawing. Left out when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub xrefs: Vec<Xref>,
+    /// External references that could not be found or loaded from disk. Left
+    /// out when every reference resolved cleanly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_xrefs: Vec<UnresolvedXref>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -196,6 +205,7 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
         *objects.entry(object.type_name().to_owned()).or_insert(0) += 1;
     }
     let tables_not_read = tables_not_read(&drawing);
+    let unresolved_xrefs = crate::xref::check_drawing_xrefs(&drawing, source);
     let message = message(source, &drawing, mirror.as_deref());
     Ok(ReadReport {
         source: source.display().to_string(),
@@ -216,6 +226,8 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
         not_read: drawing.not_read,
         tables_not_read,
         mirror: mirror.map(|p| p.display().to_string()),
+        xrefs: drawing.xrefs,
+        unresolved_xrefs,
     })
 }
 
@@ -231,6 +243,8 @@ pub(crate) struct DwgLoaded {
     pub objects_not_read: usize,
     /// Those objects by kind, with the handle of each.
     pub not_read: Vec<RecordsOfKind>,
+    /// External references that could not be found or loaded from disk.
+    pub unresolved_xrefs: Vec<UnresolvedXref>,
 }
 
 /// Reads the DWG at `source` once in strict mode and turns it into a
@@ -330,7 +344,7 @@ pub(crate) fn dwg_loaded_from_drawing(
             in_row: false,
         });
     }
-    let sheet = Sheet {
+    let mut sheet = Sheet {
         units: effective_units,
         block_library: None,
         linetypes: drawing.linetypes,
@@ -340,6 +354,8 @@ pub(crate) fn dwg_loaded_from_drawing(
         mleader_styles: drawing.mleader_styles,
         dimension_styles: drawing.dimension_styles,
         blocks: drawing.blocks,
+        xrefs: drawing.xrefs,
+        resolved_xrefs: Vec::new(),
         objects: drawing.objects,
         paper: drawing.paper.or(built_paper),
         page_setup: drawing.page_setup,
@@ -349,6 +365,7 @@ pub(crate) fn dwg_loaded_from_drawing(
         wipeout_frame: drawing.wipeout_frame,
         custom_properties: drawing.custom_properties,
     };
+    let unresolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source).unresolved;
     let record = SheetRecord {
         name: sheet_name,
         file: source.to_path_buf(),
@@ -369,6 +386,7 @@ pub(crate) fn dwg_loaded_from_drawing(
         units,
         objects_not_read: drawing.objects_not_read,
         not_read: drawing.not_read,
+        unresolved_xrefs,
     }
 }
 
@@ -1827,6 +1845,24 @@ fn mirror_text(source: &Path, bytes: &[u8], sheet: &str, drawing: &DrawingConten
                     out.push_str(&format!("      - {}\n", object_entry(object, first)));
                 }
             }
+        }
+    }
+    if !drawing.xrefs.is_empty() {
+        out.push_str("xrefs:\n");
+        for xref in &drawing.xrefs {
+            let mut map = Map::new();
+            map.insert("path".into(), json!(xref.path));
+            if !xref.kind.is_attach() {
+                map.insert("kind".into(), json!(xref.kind.name()));
+            }
+            if xref.unloaded {
+                map.insert("unloaded".into(), json!(true));
+            }
+            out.push_str(&format!(
+                "  {}: {}\n",
+                scalar(&xref.name),
+                flow(&Value::Object(map))
+            ));
         }
     }
     if drawing.objects.is_empty() {

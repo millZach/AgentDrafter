@@ -287,6 +287,10 @@ pub struct QueryReport {
     /// the handle of each, as `read` names them. Left out when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub not_read: Vec<RecordsOfKind>,
+    /// External references that could not be found or loaded from disk. Left
+    /// out when every reference resolved cleanly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
     /// The drawing set's inconsistent mark, when a change set landed on
     /// some of its sheets and failed on others: the answer reads the
     /// records as they are.
@@ -587,6 +591,7 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
         records,
         objects_not_read,
         not_read,
+        unresolved_xrefs,
     } = load(source, request.sheet.as_deref(), need_set_paper)?;
     let looked_at: Vec<&SheetRecord> = records.iter().collect();
     let looked = LookedAt(&looked_at, request.sheet.is_some());
@@ -625,6 +630,7 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
         answer,
         objects_not_read,
         not_read,
+        unresolved_xrefs,
         inconsistent: if source.is_dir() {
             crate::change::inconsistent(source)
         } else {
@@ -640,6 +646,7 @@ struct Loaded {
     records: Vec<SheetRecord>,
     objects_not_read: usize,
     not_read: Vec<RecordsOfKind>,
+    unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
 }
 
 /// Reads the sheets a query looks at, with the declared unit: every sheet
@@ -659,17 +666,21 @@ fn load(source: &Path, sheet: Option<&str>, need_set_paper: bool) -> Result<Load
                 records: vec![loaded.record],
                 objects_not_read: loaded.objects_not_read,
                 not_read: loaded.not_read,
+                unresolved_xrefs: loaded.unresolved_xrefs,
             });
         }
-        let record = read_sheet_record(source)?;
+        let mut record = read_sheet_record(source)?;
         if !named(&record.name) {
             return Err(no_such_sheet(sheet, &[record.name.as_str()]));
         }
+        let unresolved_xrefs =
+            crate::xref::resolve_sheet_xrefs(&mut record.sheet, source).unresolved;
         return Ok(Loaded {
             units: Some(record.sheet.units),
             records: vec![record],
             objects_not_read: 0,
             not_read: Vec::new(),
+            unresolved_xrefs,
         });
     }
     let set = SavedSet::read(source)?;
@@ -677,24 +688,33 @@ fn load(source: &Path, sheet: Option<&str>, need_set_paper: bool) -> Result<Load
     if looked_at.is_empty() {
         return Err(no_such_sheet(sheet, &set.names()));
     }
+    let mut unresolved_xrefs = Vec::new();
     let records = looked_at
         .into_iter()
         .map(|row| {
-            set.sheet(row).map_err(|e| Error {
+            let mut record = set.sheet(row).map_err(|e| Error {
                 message: format!(
                     "sheet `{}` cannot be read, and a query answers for every sheet it looks \
                      at: {}",
                     row.sheet, e.message
                 ),
                 ..e
-            })
+            })?;
+            let host = record.file.clone();
+            for u in crate::xref::resolve_sheet_xrefs(&mut record.sheet, &host).unresolved {
+                if !unresolved_xrefs.contains(&u) {
+                    unresolved_xrefs.push(u);
+                }
+            }
+            Ok(record)
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<Vec<_>, Error>>()?;
     Ok(Loaded {
         units: Some(set.units),
         records,
         objects_not_read: 0,
         not_read: Vec::new(),
+        unresolved_xrefs,
     })
 }
 
