@@ -227,7 +227,7 @@ pub(crate) struct Resolved {
 
 /// The object types a transform takes: every type a sheet holds but a
 /// viewport, which is a window on the paper.
-const TRANSFORMED_TYPES: [&str; 18] = [
+const TRANSFORMED_TYPES: [&str; 20] = [
     "line",
     "polyline",
     "arc",
@@ -241,6 +241,8 @@ const TRANSFORMED_TYPES: [&str; 18] = [
     "solid",
     "revision_cloud",
     "wipeout",
+    "image",
+    "pdf_underlay",
     "insert",
     "table",
     "mleader",
@@ -278,6 +280,14 @@ impl RecordFile {
             ("viewport", _) => Some(format!(
                 "a viewport is a window on the paper and is not {what}; move it, or change its \
                  view with change_viewport"
+            )),
+            ("image" | "pdf_underlay", How::Mirror(_)) => Some(format!(
+                "a {} stays right-reading and is not mirrored",
+                if kind == "image" {
+                    "raster image"
+                } else {
+                    "PDF underlay"
+                }
             )),
             ("table", How::Rotate(degrees)) if whole_degrees(degrees) != 0.0 => Some(
                 "a table hangs from its top left corner, its rows running down and its columns \
@@ -394,7 +404,7 @@ impl At<'_> {
             let did = match (kind, entry.key.as_str()) {
                 ("line", "from" | "to")
                 | ("arc" | "circle" | "ellipse" | "donut", "center")
-                | ("text" | "mtext" | "insert", "position")
+                | ("text" | "mtext" | "insert" | "image" | "pdf_underlay", "position")
                 | ("dimension", "center" | "point" | "location" | "feature") => {
                     self.point(&mut entry.value, &field)?
                 }
@@ -402,6 +412,7 @@ impl At<'_> {
                 ("spline", "fit_points" | "control_points")
                 | ("solid", "corners")
                 | ("wipeout", "points")
+                | ("image" | "pdf_underlay", "clip")
                 | ("revision_cloud", "polygon")
                 | ("leader" | "dimension", "points") => self.points(&mut entry.value, &field)?,
                 ("revision_cloud", "rectangle") => {
@@ -474,17 +485,23 @@ impl At<'_> {
                 | ("revision_cloud", "arc_length")
                 | ("text" | "mtext", "height")
                 | ("mtext", "width")
+                | ("image", "width" | "height")
                 | ("mleader" | "leader", "arrow_size" | "gap")
                 | ("mleader", "landing")
                     if scaled =>
                 {
                     self.length(&mut entry.value, &field)?
                 }
-                ("insert", "scale") | ("hatch", "scale") if scaled && !solid => {
+                ("insert", "scale") | ("pdf_underlay", "scale") | ("hatch", "scale")
+                    if scaled && !solid =>
+                {
                     self.number(&mut entry.value, &field)?
                 }
                 ("text" | "mtext", "rotation") => {
                     self.angle(&mut entry.value, &field, &|a| t.text_angle(a))?
+                }
+                ("image" | "pdf_underlay", "rotation") => {
+                    self.angle(&mut entry.value, &field, &|a| t.angle(a))?
                 }
                 ("insert", "rotation") => match t.how {
                     How::Mirror(_) => {
@@ -545,6 +562,19 @@ impl At<'_> {
                 if r != 0.0 {
                     keys.push(new_entry("rotation", Node::scalar(number_text(r))));
                     changed.push("rotation".to_owned());
+                }
+            }
+            "image" | "pdf_underlay" => {
+                if !written(keys, "rotation") {
+                    let r = t.angle(0.0);
+                    if r != 0.0 {
+                        keys.push(new_entry("rotation", Node::scalar(number_text(r))));
+                        changed.push("rotation".to_owned());
+                    }
+                }
+                if kind == "pdf_underlay" && scaled && !written(keys, "scale") {
+                    keys.push(new_entry("scale", Node::scalar(number_text(k))));
+                    changed.push("scale".to_owned());
                 }
             }
             "insert" => {

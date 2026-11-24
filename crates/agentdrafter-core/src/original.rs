@@ -137,6 +137,10 @@ pub struct ReadReport {
     /// out when every reference resolved cleanly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_xrefs: Vec<UnresolvedXref>,
+    /// Raster images or PDF underlays that could not be found or decoded from
+    /// disk. Left out when every attachment resolved cleanly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_media: Vec<crate::model::UnresolvedMedia>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -206,6 +210,7 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
     }
     let tables_not_read = tables_not_read(&drawing);
     let unresolved_xrefs = crate::xref::check_drawing_xrefs(&drawing, source);
+    let unresolved_media = check_drawing_media(&drawing, source);
     let message = message(source, &drawing, mirror.as_deref());
     Ok(ReadReport {
         source: source.display().to_string(),
@@ -228,7 +233,39 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
         mirror: mirror.map(|p| p.display().to_string()),
         xrefs: drawing.xrefs,
         unresolved_xrefs,
+        unresolved_media,
     })
+}
+
+fn check_drawing_media(
+    drawing: &DrawingContents,
+    source: &Path,
+) -> Vec<crate::model::UnresolvedMedia> {
+    let mut sheet = Sheet {
+        units: drawing.units.unwrap_or(crate::units::Unit::Mm),
+        block_library: None,
+        linetypes: Vec::new(),
+        layers: Vec::new(),
+        text_styles: Vec::new(),
+        table_styles: Vec::new(),
+        mleader_styles: Vec::new(),
+        dimension_styles: Vec::new(),
+        blocks: drawing.blocks.clone(),
+        xrefs: Vec::new(),
+        resolved_xrefs: Vec::new(),
+        resolved_media: Vec::new(),
+        objects: drawing.objects.clone(),
+        paper: None,
+        page_setup: None,
+        ltscale: 1.0,
+        layout: None,
+        other_layouts: Vec::new(),
+        wipeout_frame: drawing.wipeout_frame,
+        image_frame: drawing.image_frame,
+        custom_properties: std::collections::BTreeMap::new(),
+    };
+    let dir = source.parent().unwrap_or_else(|| Path::new("."));
+    crate::media::resolve_sheet_media(&mut sheet, &[dir]).unresolved
 }
 
 /// A DWG loaded once for `query` or `check`, strictly (refusing damaged files)
@@ -245,6 +282,8 @@ pub(crate) struct DwgLoaded {
     pub not_read: Vec<RecordsOfKind>,
     /// External references that could not be found or loaded from disk.
     pub unresolved_xrefs: Vec<UnresolvedXref>,
+    /// Raster images or PDF underlays that could not be found or decoded from disk.
+    pub unresolved_media: Vec<crate::model::UnresolvedMedia>,
 }
 
 /// Reads the DWG at `source` once in strict mode and turns it into a
@@ -356,6 +395,7 @@ pub(crate) fn dwg_loaded_from_drawing(
         blocks: drawing.blocks,
         xrefs: drawing.xrefs,
         resolved_xrefs: Vec::new(),
+        resolved_media: Vec::new(),
         objects: drawing.objects,
         paper: drawing.paper.or(built_paper),
         page_setup: drawing.page_setup,
@@ -363,9 +403,12 @@ pub(crate) fn dwg_loaded_from_drawing(
         layout: drawing.layout,
         other_layouts: drawing.other_layouts,
         wipeout_frame: drawing.wipeout_frame,
+        image_frame: drawing.image_frame,
         custom_properties: drawing.custom_properties,
     };
     let unresolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source).unresolved;
+    let dir = source.parent().unwrap_or_else(|| Path::new("."));
+    let unresolved_media = crate::media::resolve_sheet_media(&mut sheet, &[dir]).unresolved;
     let record = SheetRecord {
         name: sheet_name,
         file: source.to_path_buf(),
@@ -387,6 +430,7 @@ pub(crate) fn dwg_loaded_from_drawing(
         objects_not_read: drawing.objects_not_read,
         not_read: drawing.not_read,
         unresolved_xrefs,
+        unresolved_media,
     }
 }
 

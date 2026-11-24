@@ -294,6 +294,8 @@ impl Spec {
             Kind::Stretch => &["S"],
             Kind::Explode => &["X"],
             Kind::AttachXref => &["XREF"],
+            Kind::Add("image", None) => &["IMAGE"],
+            Kind::Add("pdf_underlay", None) => &["PDFUNDERLAY"],
             _ => &[],
         }
     }
@@ -345,7 +347,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 85] = [
+pub(crate) const SPECS: [Spec; 87] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -359,6 +361,8 @@ pub(crate) const SPECS: [Spec; 85] = [
     add("add_solid", "SOLID", "solid"),
     add("add_revision_cloud", "REVCLOUD", "revision_cloud"),
     add("add_wipeout", "WIPEOUT", "wipeout"),
+    add("add_image", "IMAGEATTACH", "image"),
+    add("add_pdf_underlay", "PDFATTACH", "pdf_underlay"),
     add("insert_block", "INSERT", "insert"),
     add("add_table", "TABLE", "table"),
     add("add_mleader", "MLEADER", "mleader"),

@@ -1812,6 +1812,7 @@ fn revise_bind_xref(
         blocks: Vec::new(),
         xrefs: Vec::new(),
         resolved_xrefs: Vec::new(),
+        resolved_media: Vec::new(),
         objects: Vec::new(),
         paper: None,
         page_setup: None,
@@ -1819,6 +1820,7 @@ fn revise_bind_xref(
         layout: None,
         other_layouts: Vec::new(),
         wipeout_frame: crate::model::WipeoutFrame::Off,
+        image_frame: crate::model::WipeoutFrame::Off,
         custom_properties: std::collections::BTreeMap::new(),
     };
     let fonts = SheetFonts::find(&style_sheet, settings);
@@ -1886,6 +1888,8 @@ fn apply_revision_op(
                             | "solid"
                             | "revision_cloud"
                             | "wipeout"
+                            | "image"
+                            | "pdf_underlay"
                             | "insert"
                     ) =>
                 {

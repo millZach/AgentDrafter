@@ -339,6 +339,41 @@ fn place_object(
             layer,
             properties,
         })),
+        Object::RasterImage(img) => {
+            let mut out = img.clone();
+            out.position = placement.point(img.position);
+            out.width *= scale;
+            out.height = img.height.map(|h| h * scale);
+            out.rotation = (img.rotation + insert_rotation).rem_euclid(360.0);
+            out.clip = img.clip.as_ref().map(|pts| {
+                pts.iter()
+                    .map(|&p| {
+                        let q = placement.point(Point3::new(p[0], p[1], img.position.z));
+                        [q.x, q.y]
+                    })
+                    .collect()
+            });
+            out.layer = layer;
+            out.properties = properties;
+            Some(Object::RasterImage(out))
+        }
+        Object::PdfUnderlay(pdf) => {
+            let mut out = pdf.clone();
+            out.position = placement.point(pdf.position);
+            out.scale *= scale;
+            out.rotation = (pdf.rotation + insert_rotation).rem_euclid(360.0);
+            out.clip = pdf.clip.as_ref().map(|pts| {
+                pts.iter()
+                    .map(|&p| {
+                        let q = placement.point(Point3::new(p[0], p[1], pdf.position.z));
+                        [q.x, q.y]
+                    })
+                    .collect()
+            });
+            out.layer = layer;
+            out.properties = properties;
+            Some(Object::PdfUnderlay(out))
+        }
         Object::RevisionCloud(rc) => {
             let boundary = match &rc.boundary {
                 RevisionCloudBoundary::Rectangle { from, to }
@@ -1152,6 +1187,7 @@ mod tests {
             blocks: Vec::new(),
             xrefs: Vec::new(),
             resolved_xrefs: Vec::new(),
+            resolved_media: Vec::new(),
             objects: Vec::new(),
             paper: None,
             page_setup: None,
@@ -1159,6 +1195,7 @@ mod tests {
             layout: None,
             other_layouts: Vec::new(),
             wipeout_frame: crate::model::WipeoutFrame::Off,
+            image_frame: crate::model::WipeoutFrame::Off,
             custom_properties: BTreeMap::new(),
         }
     }

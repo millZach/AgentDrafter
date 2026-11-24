@@ -70,7 +70,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
     HtmlCanvasElement, WebGl2RenderingContext as Gl, WebGlBuffer, WebGlProgram, WebGlShader,
-    WebGlUniformLocation, WebGlVertexArrayObject,
+    WebGlTexture, WebGlUniformLocation, WebGlVertexArrayObject,
 };
 
 use agentdrafter_core::{
@@ -84,6 +84,42 @@ use crate::overlay::{crosshair, marker, triangles, Segment};
 use crate::preview::{self, Preview};
 use crate::snapping::{candidates, Candidate};
 use crate::tools::{tool_for, Context, ObjectInfo, SnapRef, Taken, Tools};
+
+const IMAGE_VERTEX: &str = r#"#version 300 es
+precision highp float;
+layout(location = 0) in vec4 a_pos_uv;
+uniform vec2 u_scale;
+uniform vec2 u_offset;
+uniform vec2 u_size;
+uniform vec4 u_clip;
+out vec2 v_uv;
+out vec2 v_at;
+flat out vec4 v_clip;
+void main() {
+  vec2 p = a_pos_uv.xy * u_scale + u_offset;
+  vec2 c0 = u_clip.xy * u_scale + u_offset;
+  vec2 c1 = u_clip.zw * u_scale + u_offset;
+  v_clip = vec4(min(c0, c1), max(c0, c1));
+  v_at = p;
+  v_uv = a_pos_uv.zw;
+  gl_Position = vec4(p.x / u_size.x * 2.0 - 1.0, 1.0 - p.y / u_size.y * 2.0, 0.0, 1.0);
+}
+"#;
+
+const IMAGE_FRAGMENT: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+in vec2 v_at;
+flat in vec4 v_clip;
+uniform sampler2D u_tex;
+out vec4 o_color;
+void main() {
+  if (v_at.x < v_clip.x || v_at.y < v_clip.y || v_at.x > v_clip.z || v_at.y > v_clip.w) discard;
+  vec4 c = texture(u_tex, v_uv);
+  if (c.a <= 0.001) discard;
+  o_color = c;
+}
+"#;
 
 const STROKE_VERTEX: &str = r#"#version 300 es
 precision highp float;
@@ -416,7 +452,17 @@ struct Loaded {
     /// screen: the look picks which the vertex arrays read.
     stroke_colors: [WebGlBuffer; 2],
     fill_colors: [WebGlBuffer; 2],
+    /// Uploaded raster images / PDF underlays: `[paper_tex, screen_tex]` plus
+    /// quad VAO, viewport clip box, and optional own clip stencil.
+    images: Vec<LoadedImage>,
     buffers: Vec<WebGlBuffer>,
+}
+
+struct LoadedImage {
+    textures: [WebGlTexture; 2],
+    vao: WebGlVertexArrayObject,
+    clip_rect: [f32; 4],
+    own_stencil: Option<u32>,
 }
 
 /// The renderer the page draws its canvas with.
@@ -425,6 +471,7 @@ pub struct Viewer {
     gl: Gl,
     stroke: Program,
     fill: Program,
+    image: Program,
     rect: Program,
     backdrop: Program,
     overlay: Program,
@@ -519,6 +566,12 @@ impl Viewer {
             FILL_FRAGMENT,
             &["u_scale", "u_offset", "u_size", "u_items"],
         )?;
+        let image = Program::new(
+            &gl,
+            IMAGE_VERTEX,
+            IMAGE_FRAGMENT,
+            &["u_scale", "u_offset", "u_size", "u_clip", "u_tex"],
+        )?;
         let rect = Program::new(
             &gl,
             RECT_VERTEX,
@@ -563,6 +616,7 @@ impl Viewer {
             gl,
             stroke,
             fill,
+            image,
             rect,
             backdrop,
             overlay,
@@ -619,9 +673,27 @@ impl Viewer {
             if item.clip.is_some() {
                 o.through_viewport = true;
             }
+            let own_image_runs: Vec<Vec<[f64; 2]>>;
             let runs = match &item.shape {
                 Shape::Stroke { runs, .. } => runs,
                 Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
+                Shape::Image {
+                    origin,
+                    u_axis,
+                    v_axis,
+                    clip,
+                    clip_inverted,
+                    ..
+                } => {
+                    own_image_runs = vec![Shape::image_outline(
+                        *origin,
+                        *u_axis,
+                        *v_axis,
+                        clip.as_deref(),
+                        *clip_inverted,
+                    )];
+                    &own_image_runs
+                }
             };
             for p in runs.iter().flatten() {
                 let b = o.bounds.get_or_insert([p[0], p[1], p[0], p[1]]);
@@ -1012,6 +1084,29 @@ impl Viewer {
                     gl.disable(Gl::SAMPLE_ALPHA_TO_COVERAGE);
                 }
             }
+            Kind::Image => {
+                let Some(img) = sheet.images.get(first as usize) else {
+                    return;
+                };
+                let which = usize::from(self.look == Look::Screen);
+                gl.use_program(Some(&self.image.program));
+                gl.uniform2f(self.image.at("u_scale"), scale_xy.0, scale_xy.1);
+                gl.uniform2f(self.image.at("u_offset"), offset.0, offset.1);
+                gl.uniform2f(self.image.at("u_size"), size.0, size.1);
+                gl.uniform4f(
+                    self.image.at("u_clip"),
+                    img.clip_rect[0],
+                    img.clip_rect[1],
+                    img.clip_rect[2],
+                    img.clip_rect[3],
+                );
+                gl.active_texture(Gl::TEXTURE0);
+                gl.bind_texture(Gl::TEXTURE_2D, Some(&img.textures[which]));
+                gl.uniform1i(self.image.at("u_tex"), 0);
+                gl.bind_vertex_array(Some(&img.vao));
+                gl.draw_arrays(Gl::TRIANGLES, 0, 6);
+                gl.bind_texture(Gl::TEXTURE_2D, None);
+            }
         };
         // Sets the stencil inside the clipped viewport's boundary `b`, and
         // lets what is drawn next draw only there; none draws whole.
@@ -1044,9 +1139,18 @@ impl Viewer {
             // across them.
             let mut cut: Option<u32> = None;
             for run in &sheet.runs {
-                if run.clip != cut {
-                    cut_at(run.clip);
-                    cut = run.clip;
+                let effective_cut = if run.kind == Kind::Image {
+                    sheet
+                        .images
+                        .get(run.first as usize)
+                        .and_then(|img| img.own_stencil)
+                        .or(run.clip)
+                } else {
+                    run.clip
+                };
+                if effective_cut != cut {
+                    cut_at(effective_cut);
+                    cut = effective_cut;
                 }
                 draw(run.kind, run.first, run.count);
             }
@@ -1556,9 +1660,31 @@ impl Viewer {
                     .iter()
                     .filter(|i| picked.contains(&i.object))
                 {
+                    let own_runs: Vec<Vec<[f64; 2]>>;
                     let runs = match &item.shape {
                         Shape::Stroke { runs, .. } => runs,
                         Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
+                        Shape::Image {
+                            origin,
+                            u_axis,
+                            v_axis,
+                            clip,
+                            clip_inverted,
+                            ..
+                        } => {
+                            let mut ring = Shape::image_outline(
+                                *origin,
+                                *u_axis,
+                                *v_axis,
+                                clip.as_deref(),
+                                *clip_inverted,
+                            );
+                            if let Some(&first) = ring.first() {
+                                ring.push(first);
+                            }
+                            own_runs = vec![ring];
+                            &own_runs
+                        }
                     };
                     for run in runs {
                         let pieces: Vec<Segment> = run
@@ -1615,9 +1741,31 @@ impl Viewer {
                     .iter()
                     .filter(|i| picked.contains(&i.object))
                 {
+                    let own_shape: Vec<Vec<[f64; 2]>>;
                     let shape = match &item.shape {
                         Shape::Stroke { runs, .. } => runs,
                         Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
+                        Shape::Image {
+                            origin,
+                            u_axis,
+                            v_axis,
+                            clip,
+                            clip_inverted,
+                            ..
+                        } => {
+                            let mut ring = Shape::image_outline(
+                                *origin,
+                                *u_axis,
+                                *v_axis,
+                                clip.as_deref(),
+                                *clip_inverted,
+                            );
+                            if let Some(&first) = ring.first() {
+                                ring.push(first);
+                            }
+                            own_shape = vec![ring];
+                            &own_shape
+                        }
                     };
                     for run in shape {
                         let pieces: Vec<Segment> = run
@@ -2046,6 +2194,79 @@ impl Viewer {
         buffer(Gl::ELEMENT_ARRAY_BUFFER, &corners)?;
         gl.bind_vertex_array(None);
 
+        let upload_texture = |w: u32, h: u32, pixels: &[u8]| -> Result<WebGlTexture, JsError> {
+            let tex = gl
+                .create_texture()
+                .ok_or_else(|| JsError::new("the GPU gave no texture"))?;
+            gl.bind_texture(Gl::TEXTURE_2D, Some(&tex));
+            gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MIN_FILTER, Gl::LINEAR as i32);
+            gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::LINEAR as i32);
+            gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_S, Gl::CLAMP_TO_EDGE as i32);
+            gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_T, Gl::CLAMP_TO_EDGE as i32);
+            gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                Gl::TEXTURE_2D,
+                0,
+                Gl::RGBA as i32,
+                w as i32,
+                h as i32,
+                0,
+                Gl::RGBA,
+                Gl::UNSIGNED_BYTE,
+                Some(pixels),
+            )
+            .map_err(|_| JsError::new("could not upload image texture"))?;
+            gl.bind_texture(Gl::TEXTURE_2D, None);
+            Ok(tex)
+        };
+
+        let mut loaded_images = Vec::with_capacity(mesh.images.len());
+        for img in &mesh.images {
+            let decoded = list
+                .images
+                .get(img.image)
+                .and_then(|e| agentdrafter_core::decode_base64(&e.png_base64))
+                .and_then(|bytes| agentdrafter_core::decode_png_rgba(&bytes));
+            let (w, h, base_rgba) = decoded.unwrap_or((1, 1, vec![0, 0, 0, 0]));
+            let mut paper_rgba = base_rgba.clone();
+            agentdrafter_core::apply_image_adjustments(
+                &mut paper_rgba,
+                img.brightness,
+                img.contrast,
+                img.contrast_neutral,
+                img.fade,
+                img.monochrome,
+                img.transparent,
+                img.opacity_scale,
+                [255, 255, 255],
+            );
+            let mut screen_rgba = base_rgba;
+            agentdrafter_core::apply_image_adjustments(
+                &mut screen_rgba,
+                img.brightness,
+                img.contrast,
+                img.contrast_neutral,
+                img.fade,
+                img.monochrome,
+                img.transparent,
+                img.opacity_scale,
+                [0x21, 0x28, 0x30],
+            );
+            let paper_tex = upload_texture(w, h, &paper_rgba)?;
+            let screen_tex = upload_texture(w, h, &screen_rgba)?;
+            let vao = vertex_array()?;
+            gl.bind_vertex_array(Some(&vao));
+            buffer(Gl::ARRAY_BUFFER, &floats(img.quad.as_flattened()))?;
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_with_i32(0, 4, Gl::FLOAT, false, 0, 0);
+            gl.bind_vertex_array(None);
+            loaded_images.push(LoadedImage {
+                textures: [paper_tex, screen_tex],
+                vao,
+                clip_rect: img.clip_rect,
+                own_stencil: img.own_stencil,
+            });
+        }
+
         Ok(Loaded {
             list,
             snaps: Vec::new(),
@@ -2063,6 +2284,7 @@ impl Viewer {
             fills,
             stroke_colors: [stroke_paper, stroke_screen],
             fill_colors: [fill_paper, fill_screen],
+            images: loaded_images,
             buffers,
         })
     }
@@ -2073,6 +2295,11 @@ impl Viewer {
             let gl = &self.gl;
             gl.delete_vertex_array(Some(&sheet.strokes));
             gl.delete_vertex_array(Some(&sheet.fills));
+            for img in &sheet.images {
+                gl.delete_vertex_array(Some(&img.vao));
+                gl.delete_texture(Some(&img.textures[0]));
+                gl.delete_texture(Some(&img.textures[1]));
+            }
             for buffer in &sheet.buffers {
                 gl.delete_buffer(Some(buffer));
             }

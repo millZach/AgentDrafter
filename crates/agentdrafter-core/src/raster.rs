@@ -6,8 +6,8 @@
 //! list, this is plain computation: no window, GPU, file system or thread.
 
 use tiny_skia::{
-    FillRule as SkiaFillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, Stroke,
-    Transform,
+    BlendMode, FillRule as SkiaFillRule, FilterQuality, LineCap, LineJoin, Mask, Paint,
+    PathBuilder, Pixmap, PixmapPaint, Stroke, Transform,
 };
 
 use crate::draw::{Bounds, DisplayList, FillRule, Point2, Shape};
@@ -283,6 +283,130 @@ pub(crate) fn rasterize(
                         mask,
                     );
                 }
+            }
+            Shape::Image {
+                image,
+                origin,
+                u_axis,
+                v_axis,
+                clip,
+                clip_inverted,
+                brightness,
+                contrast,
+                contrast_neutral,
+                fade,
+                monochrome,
+                transparent,
+            } => {
+                let Some(entry) = list.images.get(*image) else {
+                    continue;
+                };
+                let Some(png_bytes) = crate::media::decode_base64(&entry.png_base64) else {
+                    continue;
+                };
+                let Some((w, h, mut rgba)) = crate::media::decode_png_rgba(&png_bytes) else {
+                    continue;
+                };
+                let opacity_scale = if plot_transparency && item.transparency > 0 {
+                    (100.0 - f32::from(item.transparency)) / 100.0
+                } else {
+                    1.0
+                };
+                crate::media::apply_image_adjustments(
+                    &mut rgba,
+                    *brightness,
+                    *contrast,
+                    *contrast_neutral,
+                    *fade,
+                    *monochrome,
+                    *transparent,
+                    opacity_scale,
+                    [255, 255, 255],
+                );
+                // Convert straight RGBA8 into tiny-skia's premultiplied RGBA8.
+                for px in rgba.as_chunks_mut::<4>().0 {
+                    let a = u16::from(px[3]);
+                    if a < 255 {
+                        px[0] = ((u16::from(px[0]) * a + 127) / 255) as u8;
+                        px[1] = ((u16::from(px[1]) * a + 127) / 255) as u8;
+                        px[2] = ((u16::from(px[2]) * a + 127) / 255) as u8;
+                    }
+                }
+                let Some(size) = tiny_skia::IntSize::from_wh(w, h) else {
+                    continue;
+                };
+                let Some(src_pixmap) = Pixmap::from_vec(rgba, size) else {
+                    continue;
+                };
+                let tl = view.pixel([origin[0] + v_axis[0], origin[1] + v_axis[1]]);
+                let tr = view.pixel([
+                    origin[0] + u_axis[0] + v_axis[0],
+                    origin[1] + u_axis[1] + v_axis[1],
+                ]);
+                let bl = view.pixel(*origin);
+                let wf = w as f32;
+                let hf = h as f32;
+                let transform = Transform::from_row(
+                    (tr.0 - tl.0) / wf,
+                    (tr.1 - tl.1) / wf,
+                    (bl.0 - tl.0) / hf,
+                    (bl.1 - tl.1) / hf,
+                    tl.0,
+                    tl.1,
+                );
+                let image_mask = clip.as_ref().and_then(|poly| {
+                    if poly.len() < 3 {
+                        return None;
+                    }
+                    let mut pb = PathBuilder::new();
+                    if *clip_inverted {
+                        let corners = Shape::image_outline(*origin, *u_axis, *v_axis, None, false);
+                        for ring in [corners.as_slice(), poly.as_slice()] {
+                            let Some((first, rest)) = ring.split_first() else {
+                                continue;
+                            };
+                            let (x, y) = view.pixel(*first);
+                            pb.move_to(x, y);
+                            for &p in rest {
+                                let (x, y) = view.pixel(p);
+                                pb.line_to(x, y);
+                            }
+                            pb.close();
+                        }
+                    } else {
+                        let (first, rest) = poly.split_first()?;
+                        let (x, y) = view.pixel(*first);
+                        pb.move_to(x, y);
+                        for &p in rest {
+                            let (x, y) = view.pixel(p);
+                            pb.line_to(x, y);
+                        }
+                        pb.close();
+                    }
+                    let path = pb.finish()?;
+                    let mut m = Mask::new(view.width, view.height)?;
+                    m.fill_path(&path, SkiaFillRule::EvenOdd, true, Transform::identity());
+                    if let Some(vp_mask) = mask {
+                        for (a, b) in m.data_mut().iter_mut().zip(vp_mask.data().iter()) {
+                            *a = ((u16::from(*a) * u16::from(*b) + 127) / 255) as u8;
+                        }
+                    }
+                    Some(m)
+                });
+                let effective_mask = image_mask.as_ref().or(mask);
+                let img_paint = PixmapPaint {
+                    opacity: 1.0,
+                    blend_mode: BlendMode::SourceOver,
+                    quality: FilterQuality::Bilinear,
+                };
+                pixmap.draw_pixmap(
+                    0,
+                    0,
+                    src_pixmap.as_ref(),
+                    &img_paint,
+                    transform,
+                    effective_mask,
+                );
             }
         }
     }

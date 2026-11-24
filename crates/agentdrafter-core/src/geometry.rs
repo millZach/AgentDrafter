@@ -305,6 +305,34 @@ impl<'a> Reader<'a> {
                 let corners: Vec<P3> = wipeout.points.iter().map(|&p| p3(p)).collect();
                 outline(&corners)
             }
+            Object::RasterImage(image) => {
+                let natural_px = self
+                    .sheet
+                    .resolved_media_for(crate::model::MediaKind::Image, &image.path, None)
+                    .map(|m| (m.width_px, m.height_px));
+                let corners: Vec<P3> = image
+                    .effective_outline(natural_px)
+                    .into_iter()
+                    .map(|p| [p[0], p[1], image.position.z])
+                    .collect();
+                outline(&corners)
+            }
+            Object::PdfUnderlay(underlay) => {
+                let page_pt = self
+                    .sheet
+                    .resolved_media_for(
+                        crate::model::MediaKind::PdfUnderlay,
+                        &underlay.path,
+                        Some(underlay.page.as_str()),
+                    )
+                    .and_then(|m| m.page_pt);
+                let corners: Vec<P3> = underlay
+                    .effective_outline(self.sheet.units, page_pt)
+                    .into_iter()
+                    .map(|p| [p[0], p[1], underlay.position.z])
+                    .collect();
+                outline(&corners)
+            }
             Object::Solid(solid) => {
                 let corners: Vec<P3> = solid.corners.iter().map(|&p| p3(p)).collect();
                 outline(&corners)
@@ -585,6 +613,58 @@ impl<'a> Reader<'a> {
                 let corners: Vec<P3> = wipeout.points.iter().map(|&p| p3(p)).collect();
                 for (place, curve) in outline(&corners) {
                     out.push((Midpoint, place, curve.point(curve.middle())));
+                }
+            }
+            Object::RasterImage(image) => {
+                out.push((Insertion, String::new(), p3(image.position)));
+                let natural_px = self
+                    .sheet
+                    .resolved_media_for(crate::model::MediaKind::Image, &image.path, None)
+                    .map(|m| (m.width_px, m.height_px));
+                let corners: Vec<P3> = image
+                    .effective_outline(natural_px)
+                    .into_iter()
+                    .map(|p| [p[0], p[1], image.position.z])
+                    .collect();
+                for (i, &p) in corners.iter().enumerate() {
+                    out.push((Endpoint, format!("corners[{i}]"), p));
+                }
+                for (place, curve) in outline(&corners) {
+                    out.push((Midpoint, place, curve.point(curve.middle())));
+                }
+                if !corners.is_empty() {
+                    let n = corners.len() as f64;
+                    let cx = corners.iter().map(|p| p[0]).sum::<f64>() / n;
+                    let cy = corners.iter().map(|p| p[1]).sum::<f64>() / n;
+                    out.push((Center, String::new(), [cx, cy, image.position.z]));
+                }
+            }
+            Object::PdfUnderlay(underlay) => {
+                out.push((Insertion, String::new(), p3(underlay.position)));
+                let page_pt = self
+                    .sheet
+                    .resolved_media_for(
+                        crate::model::MediaKind::PdfUnderlay,
+                        &underlay.path,
+                        Some(underlay.page.as_str()),
+                    )
+                    .and_then(|m| m.page_pt);
+                let corners: Vec<P3> = underlay
+                    .effective_outline(self.sheet.units, page_pt)
+                    .into_iter()
+                    .map(|p| [p[0], p[1], underlay.position.z])
+                    .collect();
+                for (i, &p) in corners.iter().enumerate() {
+                    out.push((Endpoint, format!("corners[{i}]"), p));
+                }
+                for (place, curve) in outline(&corners) {
+                    out.push((Midpoint, place, curve.point(curve.middle())));
+                }
+                if !corners.is_empty() {
+                    let n = corners.len() as f64;
+                    let cx = corners.iter().map(|p| p[0]).sum::<f64>() / n;
+                    let cy = corners.iter().map(|p| p[1]).sum::<f64>() / n;
+                    out.push((Center, String::new(), [cx, cy, underlay.position.z]));
                 }
             }
             Object::Arc(_) => {

@@ -298,6 +298,22 @@ impl Outline {
                     }
                     crossed(pieces, true)
                 }
+                Object::RasterImage(img) => {
+                    let pts = img.effective_outline(None);
+                    let mut pieces = Vec::new();
+                    for i in 0..pts.len() {
+                        pieces.push(Piece::Segment(pts[i], pts[(i + 1) % pts.len()]));
+                    }
+                    crossed(pieces, true)
+                }
+                Object::PdfUnderlay(pdf) => {
+                    let pts = pdf.effective_outline(crate::units::Unit::Mm, None);
+                    let mut pieces = Vec::new();
+                    for i in 0..pts.len() {
+                        pieces.push(Piece::Segment(pts[i], pts[(i + 1) % pts.len()]));
+                    }
+                    crossed(pieces, true)
+                }
                 Object::Arc(a) => crossed(
                     vec![degrees_arc(a.center, a.radius, a.start_angle, a.end_angle)],
                     true,

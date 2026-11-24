@@ -33,6 +33,7 @@ pub(crate) use layout::clip_from;
 mod leader;
 mod leader_schema;
 mod mark;
+pub(crate) mod media;
 mod objects;
 pub(crate) mod page_setup;
 pub(crate) mod paper;
@@ -89,11 +90,12 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 18] = [
+pub(crate) const SHEET_KEYS: [&str; 19] = [
     "units",
     "block_library",
     "ltscale",
     "wipeout_frame",
+    media::IMAGE_FRAME_KEY,
     field::CUSTOM_PROPERTIES_KEY,
     "linetypes",
     "layers",
@@ -428,6 +430,10 @@ fn sheet_and_records(
         Some(node) => wipeout::wipeout_frame(node, "wipeout_frame")?,
         None => crate::model::WipeoutFrame::Off,
     };
+    let image_frame = match fields.get(media::IMAGE_FRAME_KEY) {
+        Some(node) => media::image_frame(node, media::IMAGE_FRAME_KEY)?,
+        None => crate::model::WipeoutFrame::Off,
+    };
     let custom_properties = match fields.get(field::CUSTOM_PROPERTIES_KEY) {
         Some(node) => field::custom_properties(node)?,
         None => std::collections::BTreeMap::new(),
@@ -558,6 +564,7 @@ fn sheet_and_records(
         blocks: Vec::new(),
         xrefs,
         resolved_xrefs: Vec::new(),
+        resolved_media: Vec::new(),
         objects,
         // A sheet drawn in layouts is on its first layout's paper.
         paper: layout.as_ref().and_then(|l| l.paper.clone()).or(paper),
@@ -566,6 +573,7 @@ fn sheet_and_records(
         layout,
         other_layouts,
         wipeout_frame,
+        image_frame,
         custom_properties,
     };
     if let Some(library) = &library {

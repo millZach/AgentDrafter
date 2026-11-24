@@ -194,6 +194,10 @@ pub struct PlotReport {
     /// every reference resolved cleanly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
+    /// Raster images or PDF underlays that could not be found or decoded. Left
+    /// out when every attachment resolved cleanly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_media: Vec<crate::model::UnresolvedMedia>,
     /// The stamp written into the PDF.
     pub stamp: Stamp,
     /// On a sheet drawn in several layouts, each layout's page, in the
@@ -394,6 +398,9 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
                 }
                 let resolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, &template);
                 files.extend(resolved_xrefs.files);
+                let resolved_media =
+                    crate::media::resolve_sheet_media_for_host(&mut sheet, &template);
+                files.extend(resolved_media.files);
                 let record = Record {
                     units: Some(sheet.units),
                     sheet,
@@ -402,6 +409,7 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
                     ids: Vec::new(),
                     files,
                     unresolved_xrefs: resolved_xrefs.unresolved,
+                    unresolved_media: resolved_media.unresolved,
                 };
                 plot_record(
                     &record,
@@ -605,6 +613,7 @@ pub(crate) fn plot_dwg_bytes(
         blocks: drawing.blocks,
         xrefs: drawing.xrefs,
         resolved_xrefs: Vec::new(),
+        resolved_media: Vec::new(),
         objects: drawing.objects,
         paper: drawing.paper,
         page_setup: drawing.page_setup,
@@ -612,11 +621,14 @@ pub(crate) fn plot_dwg_bytes(
         layout: drawing.layout,
         other_layouts: drawing.other_layouts,
         wipeout_frame: drawing.wipeout_frame,
+        image_frame: drawing.image_frame,
         custom_properties: drawing.custom_properties,
     };
     let resolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source);
     let mut files = vec![(SourceKind::of(source), source.to_path_buf(), bytes.to_vec())];
     files.extend(resolved_xrefs.files);
+    let resolved_media = crate::media::resolve_sheet_media_for_host(&mut sheet, source);
+    files.extend(resolved_media.files);
     let record = Record {
         sheet,
         units: drawing.units,
@@ -625,6 +637,7 @@ pub(crate) fn plot_dwg_bytes(
         ids: Vec::new(),
         files,
         unresolved_xrefs: resolved_xrefs.unresolved,
+        unresolved_media: resolved_media.unresolved,
     };
     let title = source
         .file_stem()
@@ -734,6 +747,7 @@ fn render_pdf_record(
             },
         ),
         unresolved_xrefs: record.unresolved_xrefs.clone(),
+        unresolved_media: record.unresolved_media.clone(),
         stamp,
         layouts,
     };

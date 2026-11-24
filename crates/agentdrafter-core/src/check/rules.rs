@@ -731,6 +731,8 @@ impl Sheet<'_> {
             | Object::Solid(_)
             | Object::Donut(_)
             | Object::Wipeout(_)
+            | Object::RasterImage(_)
+            | Object::PdfUnderlay(_)
             | Object::Insert(_) => Drawn::Fill,
             // A table's borders are lines; its cells' text, letters. A
             // leader's lines, landing and arrowhead are lines; its text,

@@ -212,6 +212,10 @@ pub struct RenderReport {
     /// every reference resolved cleanly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_xrefs: Vec<crate::model::UnresolvedXref>,
+    /// Raster images or PDF underlays that could not be found or decoded. Left
+    /// out when every attachment resolved cleanly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_media: Vec<crate::model::UnresolvedMedia>,
     /// The stamp written into the PNG.
     pub stamp: Stamp,
     /// On a sheet drawn in several layouts, what the render wrote for each
@@ -475,6 +479,7 @@ fn render_page(
         font_substitutions: fonts.substitutions(),
         hatches_cut_short: list.hatches_cut_short.clone(),
         unresolved_xrefs: record.unresolved_xrefs.clone(),
+        unresolved_media: record.unresolved_media.clone(),
         stamp,
         other_layouts: Vec::new(),
     })

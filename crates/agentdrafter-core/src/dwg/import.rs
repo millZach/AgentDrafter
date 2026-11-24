@@ -124,7 +124,7 @@ pub(crate) fn read_blocks(path: &Path, dxf: bool) -> Result<DrawingBlocks, Error
                 continue;
             }
             // A donut comes back as the polyline it is written as.
-            let object = read_object(dwg_object, known)
+            let object = read_object(Some(&drawing), dwg_object, known)
                 .map(as_donut)
                 .filter(|o| carries(o, &linetypes, &layers, &text_styles));
             match object {

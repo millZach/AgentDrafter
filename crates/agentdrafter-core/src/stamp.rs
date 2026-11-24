@@ -83,6 +83,10 @@ pub enum SourceKind {
     Rows,
     /// An external reference (DWG or DXF) attached or overlaid onto the drawing.
     Xref,
+    /// A raster image file attached onto the drawing.
+    Image,
+    /// A PDF underlay file attached onto the drawing.
+    PdfUnderlay,
 }
 
 impl SourceKind {
@@ -114,6 +118,8 @@ impl SourceKind {
             SourceKind::Template => "template",
             SourceKind::Rows => "rows file",
             SourceKind::Xref => "external reference",
+            SourceKind::Image => "raster image",
+            SourceKind::PdfUnderlay => "PDF underlay",
         }
     }
 }

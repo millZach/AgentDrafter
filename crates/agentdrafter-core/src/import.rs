@@ -1458,6 +1458,74 @@ fn object_value(object: &Object, names: &Names) -> Value {
             let points: Vec<Value> = wipeout.points.iter().map(|&p| point_value(p)).collect();
             put("points", Value::Array(points));
         }
+        Object::RasterImage(image) => {
+            put("path", json!(image.path));
+            put("position", point_value(image.position));
+            put("width", json!(image.width));
+            if let Some(h) = image.height {
+                put("height", json!(h));
+            }
+            if degrees(image.rotation) != 0.0 {
+                put("rotation", json!(degrees(image.rotation)));
+            }
+            if let Some(clip) = &image.clip {
+                let pts: Vec<Value> = clip.iter().map(|&p| json!([p[0], p[1], 0.0])).collect();
+                put("clip", Value::Array(pts));
+            }
+            if image.clip_inverted {
+                put("clip_inverted", json!(true));
+            }
+            if !image.show {
+                put("show", json!(false));
+            }
+            if image.brightness != 50 {
+                put("brightness", json!(image.brightness));
+            }
+            if image.contrast != 50 {
+                put("contrast", json!(image.contrast));
+            }
+            if image.fade != 0 {
+                put("fade", json!(image.fade));
+            }
+            if !image.transparent {
+                put("transparent", json!(false));
+            }
+        }
+        Object::PdfUnderlay(pdf) => {
+            put("path", json!(pdf.path));
+            if pdf.page != "1" {
+                put("page", json!(pdf.page));
+            }
+            put("position", point_value(pdf.position));
+            if (pdf.scale - 1.0).abs() > 1e-12 {
+                put("scale", json!(pdf.scale));
+            }
+            if degrees(pdf.rotation) != 0.0 {
+                put("rotation", json!(degrees(pdf.rotation)));
+            }
+            if let Some(clip) = &pdf.clip {
+                let pts: Vec<Value> = clip.iter().map(|&p| json!([p[0], p[1], 0.0])).collect();
+                put("clip", Value::Array(pts));
+            }
+            if pdf.clip_inverted {
+                put("clip_inverted", json!(true));
+            }
+            if !pdf.show {
+                put("show", json!(false));
+            }
+            if pdf.unloaded {
+                put("unloaded", json!(true));
+            }
+            if pdf.monochrome {
+                put("monochrome", json!(true));
+            }
+            if pdf.contrast != 100 {
+                put("contrast", json!(pdf.contrast));
+            }
+            if pdf.fade != 0 {
+                put("fade", json!(pdf.fade));
+            }
+        }
         Object::RevisionCloud(cloud) => {
             match &cloud.boundary {
                 crate::model::RevisionCloudBoundary::Rectangle { from, to } => {

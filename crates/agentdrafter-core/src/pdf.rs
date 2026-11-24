@@ -156,6 +156,92 @@ pub(crate) fn pdf_pages(
     transparencies.sort_unstable();
     let gs_refs: Vec<(u8, Ref)> = transparencies.iter().map(|&t| (t, next())).collect();
 
+    // Collect raster images and PDF underlays across all pages so each unique
+    // `(image_bytes_key, adjustments)` is embedded once as a lossless PDF Image
+    // XObject (plus optional `/SMask` for alpha). Pages without images emit no
+    // XObjects, keeping existing PDFs byte-for-byte identical.
+    struct PdfImageObj {
+        img_ref: Ref,
+        smask_ref: Option<Ref>,
+        width: u32,
+        height: u32,
+        rgb: Vec<u8>,
+        alpha: Option<Vec<u8>>,
+    }
+    let mut pdf_images: Vec<PdfImageObj> = Vec::new();
+    let mut page_item_xobjects: Vec<Vec<Option<usize>>> = Vec::with_capacity(sheets.len());
+    for (list, page) in sheets {
+        let mut per_item: Vec<Option<usize>> = Vec::with_capacity(list.items.len());
+        for item in &list.items {
+            if let Shape::Image {
+                image,
+                brightness,
+                contrast,
+                contrast_neutral,
+                fade,
+                monochrome,
+                transparent,
+                ..
+            } = &item.shape
+            {
+                let Some(entry) = list.images.get(*image) else {
+                    per_item.push(None);
+                    continue;
+                };
+                let Some(png_bytes) = crate::media::decode_base64(&entry.png_base64) else {
+                    per_item.push(None);
+                    continue;
+                };
+                let Some((w, h, mut rgba)) = crate::media::decode_png_rgba(&png_bytes) else {
+                    per_item.push(None);
+                    continue;
+                };
+                let opacity_scale = if page.plot_transparency && item.transparency > 0 {
+                    (100.0 - f32::from(item.transparency)) / 100.0
+                } else {
+                    1.0
+                };
+                crate::media::apply_image_adjustments(
+                    &mut rgba,
+                    *brightness,
+                    *contrast,
+                    *contrast_neutral,
+                    *fade,
+                    *monochrome,
+                    *transparent,
+                    opacity_scale,
+                    [255, 255, 255],
+                );
+                let pixel_count = (w as usize) * (h as usize);
+                let mut rgb = Vec::with_capacity(pixel_count * 3);
+                let mut alpha = Vec::with_capacity(pixel_count);
+                let mut has_alpha = false;
+                for px in rgba.as_chunks::<4>().0 {
+                    rgb.extend_from_slice(&[px[0], px[1], px[2]]);
+                    alpha.push(px[3]);
+                    if px[3] < 255 {
+                        has_alpha = true;
+                    }
+                }
+                let img_ref = next();
+                let smask_ref = has_alpha.then(&mut next);
+                let idx = pdf_images.len();
+                pdf_images.push(PdfImageObj {
+                    img_ref,
+                    smask_ref,
+                    width: w,
+                    height: h,
+                    rgb,
+                    alpha: has_alpha.then_some(alpha),
+                });
+                per_item.push(Some(idx));
+            } else {
+                per_item.push(None);
+            }
+        }
+        page_item_xobjects.push(per_item);
+    }
+
     let mut writer = Pdf::new();
     writer.catalog(catalog).pages(pages);
     let count = i32::try_from(sheets.len()).expect("a PDF of few pages");
@@ -163,9 +249,11 @@ pub(crate) fn pdf_pages(
         .pages(pages)
         .kids(ids.iter().map(|(page_id, _)| *page_id))
         .count(count);
-    for ((list, page), (page_id, content_id)) in sheets.iter().zip(&ids) {
+    for (page_idx, ((list, page), (page_id, content_id))) in sheets.iter().zip(&ids).enumerate() {
         let page_has_transparency =
             page.plot_transparency && list.items.iter().any(|i| i.transparency > 0);
+        let item_xobjects = &page_item_xobjects[page_idx];
+        let page_has_images = item_xobjects.iter().any(Option::is_some);
         {
             let mut sheet = writer.page(*page_id);
             sheet
@@ -185,11 +273,49 @@ pub(crate) fn pdf_pages(
                     states.pair(Name(format!("GS{t}").as_bytes()), gs_ref);
                 }
             }
+            if page_has_images {
+                let mut xobjects = resources.x_objects();
+                for idx in item_xobjects.iter().flatten() {
+                    xobjects.pair(
+                        Name(format!("Im{idx}").as_bytes()),
+                        pdf_images[*idx].img_ref,
+                    );
+                }
+            }
         }
-        let content = drawing(list, page, style, &codes, page_has_transparency);
+        let content = drawing(
+            list,
+            page,
+            style,
+            &codes,
+            page_has_transparency,
+            item_xobjects,
+        );
         writer
             .stream(*content_id, &pack(&content))
             .filter(Filter::FlateDecode);
+    }
+    for obj in &pdf_images {
+        let compressed_rgb = pack(&obj.rgb);
+        let mut img = writer.image_xobject(obj.img_ref, &compressed_rgb);
+        img.width(obj.width as i32)
+            .height(obj.height as i32)
+            .color_space()
+            .device_rgb();
+        img.bits_per_component(8).filter(Filter::FlateDecode);
+        if let Some(mask_ref) = obj.smask_ref {
+            img.s_mask(mask_ref);
+        }
+        drop(img);
+        if let (Some(mask_ref), Some(alpha)) = (obj.smask_ref, &obj.alpha) {
+            let compressed_alpha = pack(alpha);
+            let mut mask = writer.image_xobject(mask_ref, &compressed_alpha);
+            mask.width(obj.width as i32)
+                .height(obj.height as i32)
+                .color_space()
+                .device_gray();
+            mask.bits_per_component(8).filter(Filter::FlateDecode);
+        }
     }
     for &(t, gs_ref) in &gs_refs {
         let alpha = (100.0 - f32::from(t)) / 100.0;
@@ -266,6 +392,7 @@ fn drawing(
     style: &PlotStyle,
     codes: &Codes,
     use_transparency: bool,
+    item_xobjects: &[Option<usize>],
 ) -> Vec<u8> {
     let mut content = Content::new();
     if let Some(win) = page.clip_window {
@@ -291,7 +418,7 @@ fn drawing(
     // A clipped viewport's items are cut at its boundary instead, as
     // AutoCAD 2026's plot cut them.
     let mut clipped: Option<(Bounds, Option<usize>)> = None;
-    for item in &list.items {
+    for (item_idx, item) in list.items.iter().enumerate() {
         let cut = item.clip.map(|clip| (clip, item.clip_boundary));
         if cut != clipped {
             if clipped.is_some() {
@@ -331,7 +458,7 @@ fn drawing(
         }
         if use_transparency {
             let target_t = match &item.shape {
-                Shape::Mask { .. } => 0,
+                Shape::Mask { .. } | Shape::Image { .. } => 0,
                 _ => item.transparency,
             };
             if gs_transparency != Some(target_t) {
@@ -434,6 +561,54 @@ fn drawing(
                 if drawn {
                     content.fill_even_odd();
                 }
+            }
+            Shape::Image {
+                origin,
+                u_axis,
+                v_axis,
+                clip,
+                clip_inverted,
+                ..
+            } => {
+                let Some(xobj_idx) = item_xobjects.get(item_idx).copied().flatten() else {
+                    continue;
+                };
+                content.save_state();
+                if let Some(poly) = clip {
+                    if poly.len() >= 3 {
+                        if *clip_inverted {
+                            let corners =
+                                Shape::image_outline(*origin, *u_axis, *v_axis, None, false);
+                            for ring in [corners.as_slice(), poly.as_slice()] {
+                                let mut pts = ring.iter().map(|&p| page.at(p));
+                                if let Some(first) = pts.next() {
+                                    content.move_to(first.0, first.1);
+                                    for (x, y) in pts {
+                                        content.line_to(x, y);
+                                    }
+                                    content.close_path();
+                                }
+                            }
+                            content.clip_even_odd().end_path();
+                        } else {
+                            let mut pts = poly.iter().map(|&p| page.at(p));
+                            if let Some(first) = pts.next() {
+                                content.move_to(first.0, first.1);
+                                for (x, y) in pts {
+                                    content.line_to(x, y);
+                                }
+                                content.close_path();
+                            }
+                            content.clip_nonzero().end_path();
+                        }
+                    }
+                }
+                let (ox, oy) = page.at(*origin);
+                let u = page.vector(*u_axis);
+                let v = page.vector(*v_axis);
+                content.transform([u[0] as f32, u[1] as f32, v[0] as f32, v[1] as f32, ox, oy]);
+                content.x_object(Name(format!("Im{xobj_idx}").as_bytes()));
+                content.restore_state();
             }
         }
     }

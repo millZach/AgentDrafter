@@ -258,7 +258,7 @@ fn the_pipeline_draws_arrowheads_landings_and_text_where_autocad_lays_them_out()
         .filter(|i| i.object == 1)
         .filter_map(|i| match &i.shape {
             Shape::Fill { contours, .. } => Some(contours),
-            Shape::Stroke { .. } | Shape::Mask { .. } => None,
+            Shape::Stroke { .. } | Shape::Mask { .. } | Shape::Image { .. } => None,
         })
         .collect();
     assert_eq!(fills.len(), 1);
@@ -277,7 +277,7 @@ fn the_pipeline_draws_arrowheads_landings_and_text_where_autocad_lays_them_out()
         .filter(|i| i.object == 1 && i.part.is_none())
         .flat_map(|i| match &i.shape {
             Shape::Stroke { runs, .. } => runs.iter().map(|r| r[0]).collect(),
-            Shape::Fill { .. } | Shape::Mask { .. } => Vec::new(),
+            Shape::Fill { .. } | Shape::Mask { .. } | Shape::Image { .. } => Vec::new(),
         })
         .collect();
     assert!(
@@ -312,7 +312,7 @@ fn the_pipeline_draws_arrowheads_landings_and_text_where_autocad_lays_them_out()
         .filter(|i| i.object == 2)
         .filter_map(|i| match &i.shape {
             Shape::Fill { contours, .. } => Some(contours[0].clone()),
-            Shape::Stroke { .. } | Shape::Mask { .. } => None,
+            Shape::Stroke { .. } | Shape::Mask { .. } | Shape::Image { .. } => None,
         })
         .next()
         .unwrap();
@@ -333,7 +333,7 @@ fn the_pipeline_draws_arrowheads_landings_and_text_where_autocad_lays_them_out()
         .filter(|i| i.object == 4 && i.part.is_none())
         .flat_map(|i| match &i.shape {
             Shape::Stroke { runs, .. } => runs.clone(),
-            Shape::Fill { .. } | Shape::Mask { .. } => Vec::new(),
+            Shape::Fill { .. } | Shape::Mask { .. } | Shape::Image { .. } => Vec::new(),
         })
         .collect();
     assert!(
@@ -670,7 +670,7 @@ objects:
             .filter(|i| i.object == object && i.part.is_none())
             .flat_map(|i| match &i.shape {
                 Shape::Stroke { runs, .. } => runs.clone(),
-                Shape::Fill { .. } | Shape::Mask { .. } => Vec::new(),
+                Shape::Fill { .. } | Shape::Mask { .. } | Shape::Image { .. } => Vec::new(),
             })
             .collect();
         // Nothing strokes the first segment: the line starts where the

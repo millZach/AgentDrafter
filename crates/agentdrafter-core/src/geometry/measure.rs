@@ -337,7 +337,7 @@ impl Reader<'_> {
                 m.extents = band_extents(&polyline).or_else(|| polyline_extents(&polyline));
                 m.area = Some(enclosed(&curves));
             }
-            Object::Wipeout(_) => {
+            Object::Wipeout(_) | Object::RasterImage(_) | Object::PdfUnderlay(_) => {
                 m.length = length();
                 m.extents = extents();
                 m.area = Some(enclosed(&curves));

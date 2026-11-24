@@ -239,7 +239,7 @@ fn the_pipeline_draws_the_borders_and_each_cells_text_in_its_margins() {
                 assert_eq!(*lineweight, 0.35);
                 runs.iter().collect::<Vec<_>>()
             }
-            Shape::Fill { .. } | Shape::Mask { .. } => Vec::new(),
+            Shape::Fill { .. } | Shape::Mask { .. } | Shape::Image { .. } => Vec::new(),
         })
         .collect();
     assert_eq!(borders.len(), 5 + 5);

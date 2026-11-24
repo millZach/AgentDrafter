@@ -220,9 +220,27 @@ pub fn moved(old: Bounds, new: Bounds) -> Option<Line> {
 /// The lines an item draws through, in drawing units: each run of a
 /// stroke, and each contour of a fill, closed.
 pub fn outline(item: &Item) -> Vec<Line> {
+    let owned_image: Vec<Vec<[f64; 2]>>;
     let (lists, closed) = match &item.shape {
         Shape::Stroke { runs, .. } => (runs, false),
         Shape::Fill { contours, .. } | Shape::Mask { contours } => (contours, true),
+        Shape::Image {
+            origin,
+            u_axis,
+            v_axis,
+            clip,
+            clip_inverted,
+            ..
+        } => {
+            owned_image = vec![Shape::image_outline(
+                *origin,
+                *u_axis,
+                *v_axis,
+                clip.as_deref(),
+                *clip_inverted,
+            )];
+            (&owned_image, true)
+        }
     };
     let mut lines = Vec::new();
     for run in lists {
@@ -246,7 +264,7 @@ pub fn outline(item: &Item) -> Vec<Line> {
 pub fn pen(item: &Item) -> Option<f64> {
     match &item.shape {
         Shape::Stroke { lineweight, .. } => Some(*lineweight),
-        Shape::Fill { .. } | Shape::Mask { .. } => None,
+        Shape::Fill { .. } | Shape::Mask { .. } | Shape::Image { .. } => None,
     }
 }
 
