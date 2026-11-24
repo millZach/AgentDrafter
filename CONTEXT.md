@@ -376,6 +376,14 @@ _Avoid_: round (alone), corner arc
 A straight bevel cutting back the corner between two lines or every straight corner of a flat polyline by equal or asymmetric distances or by a length and an angle, as AutoCAD's CHAMFER (`CHA`) draws it; zero distances trim or extend two lines to a sharp corner.
 _Avoid_: bevel (alone), miter (a mitre joins wide polyline edges)
 
+**Break**:
+Splitting a curve at a point (`BREAKATPOINT`), cutting a centered gap around a point, or removing the span between two points (`BREAK` / `BR`): `target`'s ID carries on, and when an open curve splits in two the second piece receives a new ID reported under `split_id`.
+_Avoid_: split (alone), cut (a cut may refer to trimming)
+
+**Join**:
+Merging two or more lines, arcs, or open polylines into a single object (`JOIN` / `J`): collinear lines into one line (including across a gap), co-circular arcs into an arc or circle, and end-to-end curves into a polyline; `targets[0]`'s ID carries on and the absorbed objects' IDs are reported under `deleted`.
+_Avoid_: merge (alone), weld, group (a group is AutoCAD's GROUP object)
+
 **Change set**:
 Operations sent together as one request. Each sheet takes its part of a change set fully or not at all.
 _Avoid_: batch, transaction, commit

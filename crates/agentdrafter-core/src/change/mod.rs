@@ -33,6 +33,7 @@
 mod accept;
 mod apply;
 pub(crate) mod array;
+pub(crate) mod break_join;
 mod commit;
 pub(crate) mod fillet_chamfer;
 mod from_dimension;
@@ -256,10 +257,14 @@ pub struct OperationOutcome {
     /// Each insert attribute a `set_attributes` operation changed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attributes_set: Vec<AttributeUpdated>,
-    /// The ID of the second object created when `trim` (`keep: "ends"`) splits
-    /// an object into two pieces.
+    /// The ID of the second object created when `trim` (`keep: "ends"`) or
+    /// `break` splits an object into two pieces.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split_id: Option<String>,
+    /// The IDs of objects removed by the operation, such as the pieces
+    /// absorbed into `targets[0]` by `join`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deleted: Vec<String>,
     /// Why it did not land.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,

@@ -120,6 +120,8 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
 | `extend` | `EXTEND`, `EX` | Extends an open line, polyline, arc, elliptical arc or spline at its `start`, `end`, or `both` ends to the nearest boundary object. See [Trim and extend](trim-and-extend.md). |
 | `fillet` | `FILLET`, `F` | Rounds the corner between two objects (`first` and `second`: lines, arcs or circles) or every straight corner of a flat polyline (`target`) with an arc of `radius` (or `radius: 0` for a sharp corner). See [Fillet and chamfer](fillet-and-chamfer.md). |
 | `chamfer` | `CHAMFER`, `CHA` | Bevels the corner between two lines (`first` and `second`) or every straight corner of a flat polyline (`target`) by `distance`, `distance1` + `distance2`, or `length` + `angle`. See [Fillet and chamfer](fillet-and-chamfer.md). |
+| `break` | `BREAK`, `BR`, `BREAKATPOINT` | Splits a line, polyline, arc, circle, ellipse or spline at a point `at` (optionally cutting a centered `gap`) or removes the span between `from` and `to`, each point a coordinate or snapped point; `target`'s ID carries on and any second piece's new ID is reported under `split_id`. See [Break and join](break-and-join.md). |
+| `join` | `JOIN`, `J` | Joins two or more lines, arcs, and open polylines into one (collinear lines into a line, co-circular arcs into an arc or circle, end-to-end curves into a polyline); `targets[0]`'s ID carries on and absorbed IDs are reported under `deleted`. See [Break and join](break-and-join.md). |
 | `set_cell` | `TABLEDIT` | Sets keys of a table's cell: its text, style, height, justification or merge. |
 | `add_row` | none | Adds a row to a table. |
 | `delete_row` | none | Deletes a row of a table. |

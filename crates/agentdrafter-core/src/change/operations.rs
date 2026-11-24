@@ -26,6 +26,7 @@ use crate::query::snap::{check_shape, no_kind};
 use crate::query::Selection;
 use crate::units::{parse_length, LengthError, Unit};
 
+use super::break_join::DEFAULT_JOIN_TOLERANCE;
 use super::fillet_chamfer::{ChamferSpec, CornerEnd};
 use super::replace::{TextMatchKind, TextMatcher, TextScope};
 use super::trim_extend::{ExtendEnd, TrimKeep};
@@ -87,6 +88,12 @@ pub(crate) enum Kind {
     /// Bevels the corner between two lines or every corner of a polyline by
     /// distances or length and angle: AutoCAD's CHAMFER.
     Chamfer,
+    /// Cuts a gap in an object or splits it at a point: AutoCAD's BREAK /
+    /// BREAKATPOINT.
+    Break,
+    /// Joins lines, arcs and open polylines end to end (or collinear lines /
+    /// co-circular arcs) into one object: AutoCAD's JOIN.
+    Join,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -260,6 +267,8 @@ impl Spec {
             Kind::Extend => &["EX"],
             Kind::Fillet => &["F"],
             Kind::Chamfer => &["CHA"],
+            Kind::Break => &["BR", "BREAKATPOINT"],
+            Kind::Join => &["J"],
             _ => &[],
         }
     }
@@ -311,7 +320,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 76] = [
+pub(crate) const SPECS: [Spec; 78] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -460,6 +469,16 @@ pub(crate) const SPECS: [Spec; 76] = [
         name: "chamfer",
         alias: "CHAMFER",
         kind: Kind::Chamfer,
+    },
+    Spec {
+        name: "break",
+        alias: "BREAK",
+        kind: Kind::Break,
+    },
+    Spec {
+        name: "join",
+        alias: "JOIN",
+        kind: Kind::Join,
     },
     grid("set_cell", "TABLEDIT", GridOp::SetCell),
     grid("add_row", "", GridOp::Add(Axis::Row)),
@@ -1065,6 +1084,20 @@ fn does(spec: &Spec) -> String {
                           degrees; zero distances bring two lines to a sharp corner). Supports \
                           `trim` (true by default), `first_end`/`second_end` (`start`/`end`), \
                           `new_id` and `layer` in two-object mode. AutoCAD's CHAMFER (CHA)."
+            .to_owned(),
+        Kind::Break => "Splits `target` (a line, polyline, arc, circle, ellipse or spline) at a \
+                        point `at` (optionally cutting a centered `gap`), or removes the span \
+                        between `from` and `to`, each point a coordinate or snapped point. \
+                        `target`'s ID carries on on the first piece; when an open curve splits \
+                        in two, the second piece's new ID (`new_id` or assigned) is reported \
+                        under `split_id`. AutoCAD's BREAK (BR) and BREAKATPOINT."
+            .to_owned(),
+        Kind::Join => "Joins two or more objects under `targets` (lines, arcs, and open \
+                       polylines) into one: collinear lines merge into a line (even across a \
+                       gap), co-circular arcs merge into an arc or circle, and end-to-end curves \
+                       chain into a polyline (auto-closing if the ends meet). `targets[0]`'s ID \
+                       carries on and the absorbed objects' IDs are reported under `deleted`. \
+                       AutoCAD's JOIN (J)."
             .to_owned(),
     }
 }
@@ -2462,6 +2495,81 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                 },
             },
         }),
+        Kind::Break => json!({
+            "type": "object",
+            "required": ["target"],
+            "additionalProperties": false,
+            "oneOf": [
+                {
+                    "required": ["at"],
+                    "not": {
+                        "anyOf": [
+                            { "required": ["from"] },
+                            { "required": ["to"] },
+                        ],
+                    },
+                },
+                {
+                    "required": ["from", "to"],
+                    "not": {
+                        "anyOf": [
+                            { "required": ["at"] },
+                            { "required": ["gap"] },
+                        ],
+                    },
+                },
+            ],
+            "properties": {
+                "target": target,
+                "at": {
+                    "description": "Point (or snapped point) at which to split `target` \
+                                    (AutoCAD's BREAKATPOINT) or center `gap`.",
+                    "$ref": "#/$defs/snapped_point",
+                },
+                "gap": {
+                    "description": "Optional positive arc-length gap centered at `at` (for \
+                                    example breaking a wire around a crossing wire).",
+                    "$ref": "#/$defs/length",
+                },
+                "from": {
+                    "description": "First break point (or snapped point) for two-point BREAK. \
+                                    Give with `to` instead of `at`.",
+                    "$ref": "#/$defs/snapped_point",
+                },
+                "to": {
+                    "description": "Second break point (or snapped point) for two-point BREAK. \
+                                    On closed curves, removes the anticlockwise span from `from` \
+                                    to `to`.",
+                    "$ref": "#/$defs/snapped_point",
+                },
+                "new_id": {
+                    "description": "Optional ID for the second object created when `break` \
+                                    splits an open curve into two pieces.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+            },
+        }),
+        Kind::Join => json!({
+            "type": "object",
+            "required": ["targets"],
+            "additionalProperties": false,
+            "properties": {
+                "targets": {
+                    "description": "Two or more objects (`line`, `arc`, or open `polyline`) to \
+                                    join into one. `targets[0]`'s ID, layer and properties carry \
+                                    on; the rest are absorbed and reported under `deleted`.",
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/target" },
+                    "minItems": 2,
+                },
+                "tolerance": {
+                    "description": "Optional non-negative endpoint-matching fuzz distance in the \
+                                    declared unit (or carrying its own unit). Defaults to 0.0001.",
+                    "$ref": "#/$defs/length",
+                },
+            },
+        }),
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
@@ -3755,6 +3863,18 @@ pub(crate) enum Body {
         mode: CornerMode,
         spec: ChamferSpec,
     },
+    /// Cuts a gap in `target` or splits it at a point: AutoCAD's BREAK /
+    /// BREAKATPOINT.
+    Break {
+        target: Target,
+        by: OpBreakBy,
+        new_id: Option<String>,
+    },
+    /// Joins lines, arcs, and open polylines into one object: AutoCAD's JOIN.
+    Join {
+        targets: Vec<(Target, String)>,
+        tolerance: f64,
+    },
     /// A table operation: on the entry `name` of the template `to` names,
     /// with the keys it adds or sets, and the new name a rename gives.
     Table {
@@ -3807,6 +3927,20 @@ pub(crate) enum Body {
         objects: Option<Vec<Value>>,
         /// What an import_blocks imports.
         import: Option<Import>,
+    },
+}
+
+/// How a `break` operation specifies its cut points, as parsed (may hold
+/// snapped points).
+#[derive(Clone, Debug)]
+pub(crate) enum OpBreakBy {
+    AtPoint {
+        at: Box<OpPoint>,
+        gap: Option<f64>,
+    },
+    Between {
+        from: Box<OpPoint>,
+        to: Box<OpPoint>,
     },
 }
 
@@ -5704,6 +5838,169 @@ fn operation(
             let spec = read_chamfer_spec(map, units)
                 .map_err(|(code, msg, field)| fail(code, msg, &field))?;
             Body::Chamfer { mode, spec }
+        }
+        Kind::Break => {
+            keys(&["target", "at", "gap", "from", "to", "new_id"])?;
+            let target = target()?;
+            let has_at = map.contains_key("at");
+            let has_gap = map.contains_key("gap");
+            let has_from = map.contains_key("from");
+            let has_to = map.contains_key("to");
+            let by = match (has_at, has_from || has_to) {
+                (true, false) => {
+                    let at = op_point(map.get("at").unwrap(), units, "at")
+                        .map_err(|(code, msg, field)| fail(code, msg, &field))?;
+                    let gap = match map.get("gap") {
+                        None => None,
+                        Some(v) => {
+                            let g = length(v, units)
+                                .map_err(|msg| fail(ErrorCode::BadValue, msg, "gap"))?;
+                            if !g.is_finite() || g <= 0.0 {
+                                return Err(fail(
+                                    ErrorCode::BadValue,
+                                    "`gap` must be a positive length".to_owned(),
+                                    "gap",
+                                ));
+                            }
+                            Some(g)
+                        }
+                    };
+                    OpBreakBy::AtPoint {
+                        at: Box::new(at),
+                        gap,
+                    }
+                }
+                (false, true) => {
+                    if has_gap {
+                        return Err(fail(
+                            ErrorCode::Usage,
+                            "`gap` is used with `at`, not with `from` and `to`".to_owned(),
+                            "gap",
+                        ));
+                    }
+                    if !has_from {
+                        return Err(fail(
+                            ErrorCode::MissingKey,
+                            "missing key `from` to go with `to`".to_owned(),
+                            "from",
+                        ));
+                    }
+                    if !has_to {
+                        return Err(fail(
+                            ErrorCode::MissingKey,
+                            "missing key `to` to go with `from`".to_owned(),
+                            "to",
+                        ));
+                    }
+                    let from = op_point(map.get("from").unwrap(), units, "from")
+                        .map_err(|(code, msg, field)| fail(code, msg, &field))?;
+                    let to = op_point(map.get("to").unwrap(), units, "to")
+                        .map_err(|(code, msg, field)| fail(code, msg, &field))?;
+                    OpBreakBy::Between {
+                        from: Box::new(from),
+                        to: Box::new(to),
+                    }
+                }
+                (true, true) => {
+                    return Err(fail(
+                        ErrorCode::Usage,
+                        "give `at` (with optional `gap`) or `from` and `to`, not both".to_owned(),
+                        "from",
+                    ));
+                }
+                (false, false) => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing `at` (or `from` and `to`), where to break `target`".to_owned(),
+                        "at",
+                    ));
+                }
+            };
+            let new_id = match map.get("new_id") {
+                None => None,
+                Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`new_id` cannot be empty".to_owned(),
+                        "new_id",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `new_id`, a string".to_owned(),
+                        "new_id",
+                    ))
+                }
+            };
+            Body::Break { target, by, new_id }
+        }
+        Kind::Join => {
+            keys(&["targets", "tolerance"])?;
+            let targets = match map.get("targets") {
+                Some(Value::Array(items)) if items.len() >= 2 => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for (i, item) in items.iter().enumerate() {
+                        let field = format!("targets[{i}]");
+                        let mut t = read_target(item).map_err(|(code, msg, sub)| {
+                            let f = if sub.is_empty() {
+                                field.clone()
+                            } else {
+                                format!("{field}.{sub}")
+                            };
+                            fail(code, msg, &f)
+                        })?;
+                        if let Some(sheet) = default_sheet {
+                            if let Target::Name {
+                                sheet: slot @ None, ..
+                            } = &mut t
+                            {
+                                *slot = Some(sheet.to_owned());
+                            }
+                        }
+                        out.push((t, field));
+                    }
+                    out
+                }
+                Some(Value::Array(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`targets` must name at least two objects to join".to_owned(),
+                        "targets",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `targets`, a list of at least two objects to join".to_owned(),
+                        "targets",
+                    ))
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `targets`, the objects to join".to_owned(),
+                        "targets",
+                    ))
+                }
+            };
+            let tolerance = match map.get("tolerance") {
+                None => DEFAULT_JOIN_TOLERANCE,
+                Some(v) => {
+                    let d = length(v, units)
+                        .map_err(|msg| fail(ErrorCode::BadValue, msg, "tolerance"))?;
+                    if !d.is_finite() || d < 0.0 {
+                        return Err(fail(
+                            ErrorCode::BadValue,
+                            "`tolerance` must be a non-negative length".to_owned(),
+                            "tolerance",
+                        ));
+                    }
+                    d
+                }
+            };
+            Body::Join { targets, tolerance }
         }
         Kind::Grid(grid_op) => {
             let allowed: Vec<&str> = match grid_op {
