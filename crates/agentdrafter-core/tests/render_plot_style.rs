@@ -55,9 +55,9 @@ const LINES: [f64; 4] = [0.0, 10.0, 20.0, 30.0];
 const DPI: f64 = 254.0;
 
 /// A made-up CTB: pen 1 plots blue at 1 mm, pen 2 its object's own colour
-/// and lineweight, pen 3 dark green at 0.5 mm and screened to 50%, which
-/// neither the PDF nor the PNG follows yet; every other pen black at its
-/// object's own lineweight.
+/// and lineweight, pen 3 dark green at 0.5 mm screened to 50% (which both
+/// PDF and PNG follow) with a custom line end style (which neither follows
+/// yet); every other pen black at its object's own lineweight.
 fn made_up_ctb(folder: &Path) {
     let text = ctb::made_up_ctb_text(
         &[
@@ -74,6 +74,12 @@ fn made_up_ctb(folder: &Path) {
         "{}screen=50{}",
         &text[..screen],
         &text[screen + "screen=100".len()..]
+    );
+    let end_style = at + text[at..].find("end_style=4").unwrap();
+    let text = format!(
+        "{}end_style=1{}",
+        &text[..end_style],
+        &text[end_style + "end_style=4".len()..]
     );
     fs::write(folder.join("Made-Up.ctb"), ctb::ctb_file(&text)).unwrap();
 }
@@ -235,21 +241,21 @@ fn a_png_through_a_ctb_draws_each_pen_as_the_pdf_through_it_does() {
     let (report, pdf) = plot(&source, &settings, Some("made-up.ctb"));
     assert_same_pens(&image, &report, &pdf);
     // Blue at 1 mm, the object's own yellow at 0.5 mm, and dark green at
-    // 0.5 mm at full strength: the screening is followed by neither.
+    // 0.5 mm screened to 50% toward white ([128, 192, 128]).
     let pens: Vec<_> = LINES[..3].iter().map(|&y| image.pen(y).unwrap()).collect();
     assert_eq!(
         pens.iter().map(|p| p.0).collect::<Vec<_>>(),
-        [[0, 0, 255], [255, 255, 0], [0, 128, 0]]
+        [[0, 0, 255], [255, 255, 0], [128, 192, 128]]
     );
-    // The reply names the plot style, the file and the screening it does
-    // not follow, as the plot's does.
+    // The reply names the plot style, the file and the unfollowed setting,
+    // as the plot's does.
     let DrawnThrough::PlotStyle(used) = &image.report.drawn_through else {
         panic!("{:?}", image.report.drawn_through);
     };
     assert_eq!(used, &report.plot_style);
     assert_eq!(used.name, "made-up.ctb");
     assert_eq!(used.not_followed.len(), 1, "{:?}", used.not_followed);
-    assert_eq!(used.not_followed[0].setting, "screen");
+    assert_eq!(used.not_followed[0].setting, "end_style");
     assert_eq!(used.not_followed[0].colors, [3]);
     let reply = serde_json::to_value(&image.report).unwrap();
     assert_eq!(
