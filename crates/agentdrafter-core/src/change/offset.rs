@@ -1411,7 +1411,50 @@ pub(crate) fn object_to_record_keys(
             push_common_keys(&mut keys, &s.layer, &s.properties, id, name, space);
             ("spline", keys)
         }
-        _ => unreachable!("offset only produces line, circle, arc, polyline, ellipse or spline"),
+        Object::Solid(s) => {
+            keys.insert(
+                "corners".to_owned(),
+                Value::Array(s.corners.iter().map(|&p| pt_json(p)).collect()),
+            );
+            push_common_keys(&mut keys, &s.layer, &s.properties, id, name, space);
+            ("solid", keys)
+        }
+        Object::Wipeout(w) => {
+            keys.insert(
+                "points".to_owned(),
+                Value::Array(w.points.iter().map(|&p| pt_json(p)).collect()),
+            );
+            push_common_keys(&mut keys, &w.layer, &w.properties, id, name, space);
+            ("wipeout", keys)
+        }
+        Object::RevisionCloud(rc) => {
+            match &rc.boundary {
+                crate::model::RevisionCloudBoundary::Rectangle { from, to } => {
+                    keys.insert(
+                        "rectangle".to_owned(),
+                        json!({ "from": pt_json(*from), "to": pt_json(*to) }),
+                    );
+                }
+                crate::model::RevisionCloudBoundary::Polygon(points) => {
+                    keys.insert(
+                        "polygon".to_owned(),
+                        Value::Array(points.iter().map(|&p| pt_json(p)).collect()),
+                    );
+                }
+            }
+            keys.insert("arc_length".to_owned(), json!(rc.arc_length));
+            if rc.style != crate::model::RevisionCloudStyle::Normal {
+                keys.insert("style".to_owned(), json!("calligraphy"));
+            }
+            if rc.reverse {
+                keys.insert("reverse".to_owned(), Value::Bool(true));
+            }
+            push_common_keys(&mut keys, &rc.layer, &rc.properties, id, name, space);
+            ("revision_cloud", keys)
+        }
+        _ => unreachable!(
+            "object_to_record_keys only produces curve, solid, wipeout or revision_cloud objects"
+        ),
     }
 }
 

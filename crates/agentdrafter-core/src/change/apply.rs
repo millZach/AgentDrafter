@@ -38,6 +38,7 @@ use super::operations::{
     Table, TableOp, Target, TextToFrontWhich, TransformBy, ROW_VALUE_KEY,
 };
 use super::replace::{TextMatchKind, TextMatcher, TextScope};
+use super::stretch::{compute_stretch, StretchAction, StretchBox};
 use super::trim_extend::{compute_extend, compute_trim, ExtendEnd, TrimKeep};
 use super::MARK_FILE;
 use super::{
@@ -1210,6 +1211,10 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::TextToFront {
                 to: AddTo::Template(written),
                 ..
+            }
+            | Body::Stretch {
+                to: AddTo::Template(written),
+                ..
             } => {
                 if files.template(written).is_none() {
                     let templates: Vec<&str> =
@@ -1233,6 +1238,10 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 ..
             }
             | Body::TextToFront {
+                to: AddTo::Sheet(sheet),
+                ..
+            }
+            | Body::Stretch {
                 to: AddTo::Sheet(sheet),
                 ..
             }
@@ -1737,6 +1746,26 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         return apply_join(at, op, targets, *tolerance);
     }
 
+    if let Body::Stretch {
+        to,
+        space,
+        targets,
+        corners,
+        motion,
+    } = &op.body
+    {
+        return apply_stretch(
+            at,
+            op,
+            to,
+            space.as_deref(),
+            targets.as_deref(),
+            corners,
+            motion,
+            settings,
+        );
+    }
+
     if let Body::Table {
         op: table_op,
         table,
@@ -1826,6 +1855,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Chamfer { .. }
         | Body::Break { .. }
         | Body::Join { .. }
+        | Body::Stretch { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2250,6 +2280,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Chamfer { .. }
         | Body::Break { .. }
         | Body::Join { .. }
+        | Body::Stretch { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -8063,6 +8094,347 @@ fn apply_join(
     }
 }
 
+/// Moves endpoints, vertices and rigid objects lying inside `corners` by
+/// `motion`, leaving vertices outside the box fixed: AutoCAD's `STRETCH` (`S`).
+#[allow(clippy::too_many_arguments)]
+fn apply_stretch(
+    at: &mut Attempt,
+    op: &Operation,
+    to: &AddTo,
+    space: Option<&str>,
+    targets: Option<&[(Target, String)]>,
+    corners: &[Box<OpPoint>; 2],
+    motion: &Motion,
+    settings: &Settings,
+) -> Applied {
+    let files = at.files;
+    let units = files.units;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+
+    let (primary_row, scope_reach, template_only) = match to {
+        AddTo::Sheet(name) => {
+            let k = files.sheet(name).expect("checked before");
+            (k, vec![k], None)
+        }
+        AddTo::Template(written) => {
+            let t = files.template(written).expect("checked before");
+            let sheets = files.templates[t].sheets.clone();
+            if let Some(refusal) = many_paths(files, FileRef::Template(t), op, "template") {
+                return refusal;
+            }
+            (sheets[0], sheets, Some(t))
+        }
+    };
+
+    let mut snapped: Vec<SnapResolved> = Vec::new();
+    let resolve_pt =
+        |at: &Attempt, p: &OpPoint, snapped: &mut Vec<SnapResolved>| -> Result<[f64; 3], Error> {
+            match p {
+                OpPoint::At(xyz) => Ok(*xyz),
+                OpPoint::Snap(snap) => {
+                    snapped_points(at, op, &scope_reach, &[snap], settings).map(|mut pts| {
+                        let (xyz, res) = pts.remove(0);
+                        snapped.push(res);
+                        xyz
+                    })
+                }
+            }
+        };
+    let c0 = match resolve_pt(at, &corners[0], &mut snapped) {
+        Ok(p) => p,
+        Err(e) => return fail(scope_reach, e),
+    };
+    let c1 = match resolve_pt(at, &corners[1], &mut snapped) {
+        Ok(p) => p,
+        Err(e) => return fail(scope_reach, e),
+    };
+    let stretch_box = match StretchBox::from_corners(c0, c1) {
+        Ok(b) => b,
+        Err(e) => return fail(scope_reach, op_err(e.code, e.message, "box")),
+    };
+    let delta = match motion {
+        Motion::By(d) => *d,
+        Motion::Between { from, to } => {
+            let a = match resolve_pt(at, from, &mut snapped) {
+                Ok(p) => p,
+                Err(e) => return fail(scope_reach, e),
+            };
+            let b = match resolve_pt(at, to, &mut snapped) {
+                Ok(p) => p,
+                Err(e) => return fail(scope_reach, e),
+            };
+            [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+        }
+    };
+
+    let rows = match at.rows_now() {
+        Ok(r) => r,
+        Err(e) => return fail(scope_reach, e),
+    };
+    let record = match sheet_record(at, &rows, primary_row, &mut Vec::new()) {
+        Ok(r) => r,
+        Err(e) => return fail(scope_reach, e),
+    };
+    let wanted_space = space.filter(|s| !s.eq_ignore_ascii_case("model"));
+    if let Some(layout) = wanted_space {
+        let has_layout = record
+            .sheet
+            .layouts()
+            .any(|l| l.name.eq_ignore_ascii_case(layout));
+        if !has_layout {
+            return fail(
+                scope_reach,
+                op_err(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "sheet `{}` has no layout `{layout}`",
+                        files.name(primary_row)
+                    ),
+                    "space",
+                ),
+            );
+        }
+    }
+
+    // Build optional target filter if `targets` was explicitly given.
+    let explicit_filter: Option<Vec<(FileRef, ObjectList, usize)>> = if let Some(ts) = targets {
+        let mut set = Vec::with_capacity(ts.len());
+        for (t, key) in ts {
+            let f = match resolve(at, t, op) {
+                Ok(f) => f,
+                Err(applied) => return keyed(*applied, op, key),
+            };
+            if f.row != primary_row {
+                return fail(
+                    scope_reach,
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{}` is on sheet `{}`, not `{}`",
+                            f.id,
+                            files.name(f.row),
+                            files.name(primary_row)
+                        ),
+                        key,
+                    ),
+                );
+            }
+            if let Some(layer) =
+                batch_object_locked_layer(at, files, f.row, f.file, f.list, f.index)
+            {
+                return fail(
+                    scope_reach,
+                    op_err(
+                        ErrorCode::Locked,
+                        format!(
+                            "`{}` is on layer `{layer}`, which is locked; unlock it first with \
+                             change_layer, set: {{\"locked\": false}}",
+                            f.id
+                        ),
+                        key,
+                    ),
+                );
+            }
+            set.push((f.file, f.list, f.index));
+        }
+        Some(set)
+    } else {
+        None
+    };
+
+    let objects_k = match at.objects(primary_row) {
+        Ok(o) => o,
+        Err(e) => return fail(scope_reach, e),
+    };
+
+    struct PendingStretch {
+        file: FileRef,
+        list: ObjectList,
+        list_idx: usize,
+        full_id: String,
+        local_id: String,
+        name: Option<String>,
+        space: Option<String>,
+        reach: Vec<usize>,
+        action: StretchAction,
+    }
+
+    let mut pending: Vec<PendingStretch> = Vec::new();
+    let mut locked_skipped = 0usize;
+    let sheet_name = files.name(primary_row).to_owned();
+
+    for (obj_idx, &(file, list, list_idx, ref listed)) in objects_k.iter().enumerate() {
+        if let Some(t_only) = template_only {
+            if file != FileRef::Template(t_only) {
+                continue;
+            }
+        }
+        if let Some(ref filter) = explicit_filter {
+            if !filter.contains(&(file, list, list_idx)) {
+                continue;
+            }
+        }
+        let obj_space = crate::query::space_of(&record.sheet, obj_idx);
+        let in_space = match (wanted_space, obj_space.as_deref()) {
+            (None, None) => true,
+            (Some(w), Some(o)) => w.eq_ignore_ascii_case(o),
+            _ => false,
+        };
+        if !in_space {
+            continue;
+        }
+        let obj = &record.sheet.objects[obj_idx];
+        let action = match compute_stretch(obj, stretch_box, delta) {
+            Ok(a) => a,
+            Err(e) => return fail(scope_reach, op_err(e.code, e.message, "by")),
+        };
+        if matches!(action, StretchAction::Untouched) {
+            continue;
+        }
+        if explicit_filter.is_none()
+            && batch_object_locked_layer(at, files, primary_row, file, list, list_idx).is_some()
+        {
+            locked_skipped += 1;
+            continue;
+        }
+        let full_id = format!("{sheet_name}{ID_SEPARATOR}{}", listed.id);
+        if template_only.is_none() {
+            if let FileRef::Template(t_idx) = file {
+                if files.templates[t_idx].sheets.len() > 1 {
+                    return fail(
+                        scope_reach,
+                        op_err(
+                            ErrorCode::BadValue,
+                            format!(
+                                "`{full_id}` lies inside the stretch box but belongs to shared \
+                                 template `{}`; stretch with `template: \"{}\"` to move it on \
+                                 every sheet, lock its layer, or pass `targets`",
+                                files.templates[t_idx].written, files.templates[t_idx].written
+                            ),
+                            "box",
+                        ),
+                    );
+                }
+            }
+        }
+        if let Some(refusal) = many_paths(files, file, op, "box") {
+            return refusal;
+        }
+        let reach = at.reach(file, primary_row);
+        pending.push(PendingStretch {
+            file,
+            list,
+            list_idx,
+            full_id,
+            local_id: listed.id.clone(),
+            name: record.objects[obj_idx].name.clone(),
+            space: obj_space,
+            reach,
+            action,
+        });
+    }
+
+    let mut transformed: Vec<(String, Vec<usize>)> = Vec::with_capacity(pending.len());
+    let mut all_reach: BTreeSet<usize> = scope_reach.iter().copied().collect();
+    let mut stretched_count = 0usize;
+    let mut moved_count = 0usize;
+    let mut first_record: Option<PathBuf> = None;
+
+    for item in pending {
+        let rec_path = match item.file {
+            FileRef::Rows(f) => files.rows_files[f].path.clone(),
+            FileRef::Template(t) => files.templates[t].path.clone(),
+        };
+        first_record.get_or_insert(rec_path);
+        let rec = match at.file(item.file) {
+            Ok(r) => r,
+            Err(e) => return fail(scope_reach, e),
+        };
+        match item.action {
+            StretchAction::MoveWhole => {
+                if let Err(e) = rec.move_by(item.list, item.list_idx, delta, units, op.index) {
+                    return fail(scope_reach, op_err(e.code, e.message, "by"));
+                }
+                moved_count += 1;
+            }
+            StretchAction::Replace(new_obj) => {
+                let (kind, keys) = object_to_record_keys(
+                    &new_obj,
+                    &item.local_id,
+                    item.name.as_deref(),
+                    item.space.as_deref(),
+                );
+                if let Err(e) = rec.replace_object(item.list, item.list_idx, kind, &keys, op.index)
+                {
+                    return fail(scope_reach, op_err(e.code, e.message, "by"));
+                }
+                stretched_count += 1;
+            }
+            StretchAction::Untouched => unreachable!(),
+        }
+        all_reach.extend(item.reach.iter().copied());
+        transformed.push((item.full_id, item.reach));
+    }
+
+    let total = transformed.len();
+    let locked_note = if locked_skipped > 0 {
+        format!(" ({locked_skipped} on locked layers skipped)")
+    } else {
+        String::new()
+    };
+    let message = if total == 0 {
+        format!(
+            "no unlocked object lies inside the stretch box{locked_note}{}",
+            snapped_words(&snapped)
+        )
+    } else {
+        format!(
+            "stretches {stretched_count} and moves {moved_count} object{} ({total} touched){locked_note}{}",
+            if total == 1 { "" } else { "s" },
+            snapped_words(&snapped)
+        )
+    };
+    let record_path = first_record.unwrap_or_else(|| match to {
+        AddTo::Sheet(_) => files.rows_files[files.rows[primary_row].file_index]
+            .path
+            .clone(),
+        AddTo::Template(w) => files.templates[files.template(w).unwrap()].path.clone(),
+    });
+    Applied {
+        outcome: Ok(Done {
+            record: record_path,
+            id: None,
+            before: None,
+            after: None,
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed,
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
+            split_id: None,
+            deleted: Vec::new(),
+            snapped,
+            message,
+        }),
+        sheets: all_reach.into_iter().collect(),
+        refuse: false,
+    }
+}
+
 /// when `margin` is omitted), and written as a rectangular `revision_cloud`
 /// object in the sheet's row or template.
 #[allow(clippy::too_many_arguments)]
@@ -9209,6 +9581,10 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
             to: AddTo::Sheet(sheet),
             ..
         }
+        | Body::Stretch {
+            to: AddTo::Sheet(sheet),
+            ..
+        }
         | Body::AddRevisionCloud {
             to: Some(AddTo::Sheet(sheet)),
             ..
@@ -9218,6 +9594,10 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
             ..
         }
         | Body::TextToFront {
+            to: AddTo::Template(written),
+            ..
+        }
+        | Body::Stretch {
             to: AddTo::Template(written),
             ..
         }
@@ -9423,6 +9803,7 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
         Body::Chamfer { .. } => "distance".to_owned(),
         Body::Break { .. } => "at".to_owned(),
         Body::Join { .. } => "targets".to_owned(),
+        Body::Stretch { .. } => "box".to_owned(),
     }
 }
 
@@ -9632,6 +10013,10 @@ fn target_words(op: &Operation) -> String {
             to: AddTo::Sheet(s),
             ..
         }
+        | Body::Stretch {
+            to: AddTo::Sheet(s),
+            ..
+        }
         | Body::AddRevisionCloud {
             to: Some(AddTo::Sheet(s)),
             ..
@@ -9643,6 +10028,10 @@ fn target_words(op: &Operation) -> String {
             ..
         }
         | Body::TextToFront {
+            to: AddTo::Template(t),
+            ..
+        }
+        | Body::Stretch {
             to: AddTo::Template(t),
             ..
         }
