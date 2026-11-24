@@ -70,6 +70,9 @@ pub(crate) enum Kind {
     /// Finds and replaces text across texts, mtexts and attribute values:
     /// AutoCAD's FIND.
     ReplaceText,
+    /// Draws a parallel offset of a line, polyline, arc, circle, ellipse or
+    /// spline: AutoCAD's OFFSET.
+    Offset,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -238,6 +241,7 @@ impl Spec {
             Kind::Scale => &["SC"],
             Kind::Mirror => &["MI"],
             Kind::DrawOrder => &["DR"],
+            Kind::Offset => &["O"],
             _ => &[],
         }
     }
@@ -289,7 +293,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 71] = [
+pub(crate) const SPECS: [Spec; 72] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -413,6 +417,11 @@ pub(crate) const SPECS: [Spec; 71] = [
         name: "replace_text",
         alias: "FIND",
         kind: Kind::ReplaceText,
+    },
+    Spec {
+        name: "offset",
+        alias: "OFFSET",
+        kind: Kind::Offset,
     },
     grid("set_cell", "TABLEDIT", GridOp::SetCell),
     grid("add_row", "", GridOp::Add(Axis::Row)),
@@ -983,6 +992,15 @@ fn does(spec: &Spec) -> String {
                               restricts the search with `in` (`text`, `mtext`, `attribute`), \
                               `tag` or `block`. Lists every place changed in the reply, and a \
                               dry run shows them without writing. AutoCAD's FIND."
+            .to_owned(),
+        Kind::Offset => "Draws a parallel offset of a line, polyline (straight or with arc \
+                         segments, corners joined as AutoCAD's OFFSETGAPTYPE 0 joins them), arc, \
+                         circle, ellipse or spline named by `target`, either at `distance` on \
+                         `side` (`left`, `right`, `inside`, `outside`, or a point / snapped \
+                         point) or passing through `through` (a point / snapped point). Written \
+                         in the same record and space as `target`, keeping its properties (with \
+                         optional `layer`, `id`, `name`, and `erase_source`). AutoCAD's OFFSET \
+                         (O)."
             .to_owned(),
     }
 }
@@ -2038,6 +2056,73 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                 },
             },
         }),
+        Kind::Offset => json!({
+            "type": "object",
+            "required": ["target"],
+            "additionalProperties": false,
+            "oneOf": [
+                {
+                    "required": ["distance", "side"],
+                    "not": { "required": ["through"] },
+                },
+                {
+                    "required": ["through"],
+                    "not": {
+                        "anyOf": [
+                            { "required": ["distance"] },
+                            { "required": ["side"] },
+                        ],
+                    },
+                },
+            ],
+            "properties": {
+                "target": target,
+                "distance": {
+                    "description": "Positive offset distance in the set's declared unit, or a \
+                                    length carrying its own unit such as \"12 mm\". Give with \
+                                    `side` (instead of `through`).",
+                    "$ref": "#/$defs/length",
+                },
+                "side": {
+                    "description": "Which side to offset to: `left` or `right` (looking from \
+                                    start to end), `inside` or `outside` (for circles, arcs, \
+                                    closed polylines, ellipses or closed splines), or a point / \
+                                    snapped point on the desired side.",
+                    "oneOf": [
+                        { "enum": ["left", "right", "inside", "outside"] },
+                        { "$ref": "#/$defs/snapped_point" },
+                    ],
+                },
+                "through": {
+                    "description": "A point or snapped point that the offset curve passes \
+                                    through (AutoCAD's OFFSET Through mode). Give instead of \
+                                    `distance` and `side`.",
+                    "$ref": "#/$defs/snapped_point",
+                },
+                "id": {
+                    "description": "ID for the new offset object; assigned automatically when \
+                                    left out.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "name": {
+                    "description": "Optional name for the new offset object.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "layer": {
+                    "description": "Layer for the new offset object; inherits `target`'s layer \
+                                    when left out.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "erase_source": {
+                    "description": "Delete `target` after creating the offset (AutoCAD's OFFSET \
+                                    Erase option). False when left out.",
+                    "type": "boolean",
+                },
+            },
+        }),
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
@@ -2898,6 +2983,23 @@ pub(crate) struct Operation {
     pub sent: Value,
 }
 
+/// The side an `offset` operation offsets to, before snapped points are resolved.
+#[derive(Clone, Debug)]
+pub(crate) enum OpOffsetSide {
+    Left,
+    Right,
+    Inside,
+    Outside,
+    Point(OpPoint),
+}
+
+/// How an `offset` operation gives its distance and side.
+#[derive(Clone, Debug)]
+pub(crate) enum OpOffsetBy {
+    Distance { distance: f64, side: OpOffsetSide },
+    Through(OpPoint),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Body {
     Add {
@@ -2986,6 +3088,15 @@ pub(crate) enum Body {
         scopes: Vec<TextScope>,
         tag: Option<String>,
         block: Option<String>,
+    },
+    /// Draws a parallel offset of a curve object: AutoCAD's OFFSET.
+    Offset {
+        target: Target,
+        by: OpOffsetBy,
+        id: Option<String>,
+        name: Option<String>,
+        layer: Option<String>,
+        erase_source: bool,
     },
     /// A table operation: on the entry `name` of the template `to` names,
     /// with the keys it adds or sets, and the new name a rename gives.
@@ -4603,6 +4714,168 @@ fn operation(
                 scopes,
                 tag,
                 block,
+            }
+        }
+        Kind::Offset => {
+            keys(&[
+                "target",
+                "distance",
+                "side",
+                "through",
+                "id",
+                "name",
+                "layer",
+                "erase_source",
+            ])?;
+            let target = target()?;
+            let has_dist = map.contains_key("distance");
+            let has_side = map.contains_key("side");
+            let has_through = map.contains_key("through");
+            let by =
+                match (has_dist, has_side, has_through) {
+                    (true, true, false) => {
+                        let dist_val = map.get("distance").unwrap();
+                        let d = length(dist_val, units)
+                            .map_err(|msg| fail(ErrorCode::BadValue, msg, "distance"))?;
+                        if !d.is_finite() || d <= 0.0 {
+                            return Err(fail(
+                                ErrorCode::BadValue,
+                                "`distance` must be a positive length".to_owned(),
+                                "distance",
+                            ));
+                        }
+                        let side_val = map.get("side").unwrap();
+                        let side = match side_val {
+                            Value::String(s) => match s.as_str() {
+                                "left" => OpOffsetSide::Left,
+                                "right" => OpOffsetSide::Right,
+                                "inside" => OpOffsetSide::Inside,
+                                "outside" => OpOffsetSide::Outside,
+                                other => {
+                                    return Err(fail(
+                                        ErrorCode::BadValue,
+                                        format!(
+                                            "unknown `side` `{other}`; expected `left`, `right`, \
+                                         `inside`, `outside`, or a point [x, y, z]"
+                                        ),
+                                        "side",
+                                    ))
+                                }
+                            },
+                            other => {
+                                let pt = op_point(other, units, "side")
+                                    .map_err(|(code, msg, field)| fail(code, msg, &field))?;
+                                OpOffsetSide::Point(pt)
+                            }
+                        };
+                        OpOffsetBy::Distance { distance: d, side }
+                    }
+                    (false, false, true) => {
+                        let pt = op_point(map.get("through").unwrap(), units, "through")
+                            .map_err(|(code, msg, field)| fail(code, msg, &field))?;
+                        OpOffsetBy::Through(pt)
+                    }
+                    (_, _, true) => {
+                        return Err(fail(
+                            ErrorCode::Usage,
+                            "give `through` alone, or `distance` and `side`, not both".to_owned(),
+                            "through",
+                        ))
+                    }
+                    (true, false, false) => return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `side` (`left`, `right`, `inside`, `outside`, or a point) \
+                         to go with `distance`"
+                            .to_owned(),
+                        "side",
+                    )),
+                    (false, true, false) => {
+                        return Err(fail(
+                            ErrorCode::MissingKey,
+                            "missing key `distance` to go with `side`".to_owned(),
+                            "distance",
+                        ))
+                    }
+                    (false, false, false) => {
+                        return Err(fail(
+                            ErrorCode::MissingKey,
+                            "give `distance` and `side`, or `through`".to_owned(),
+                            "distance",
+                        ))
+                    }
+                };
+            let id = match map.get("id") {
+                None => None,
+                Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`id` cannot be empty".to_owned(),
+                        "id",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `id`, a string".to_owned(),
+                        "id",
+                    ))
+                }
+            };
+            let name = match map.get("name") {
+                None => None,
+                Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`name` cannot be empty".to_owned(),
+                        "name",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `name`, a string".to_owned(),
+                        "name",
+                    ))
+                }
+            };
+            let layer = match map.get("layer") {
+                None => None,
+                Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`layer` cannot be empty".to_owned(),
+                        "layer",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `layer`, a layer name".to_owned(),
+                        "layer",
+                    ))
+                }
+            };
+            let erase_source = match map.get("erase_source") {
+                None => false,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `erase_source`, true or false".to_owned(),
+                        "erase_source",
+                    ))
+                }
+            };
+            Body::Offset {
+                target,
+                by,
+                id,
+                name,
+                layer,
+                erase_source,
             }
         }
         Kind::Grid(grid_op) => {

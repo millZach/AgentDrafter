@@ -38,6 +38,7 @@ mod from_dimension;
 mod guides;
 mod history;
 mod journal;
+pub(crate) mod offset;
 pub(crate) mod operations;
 pub(crate) mod original_journal;
 mod proposals;
