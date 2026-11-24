@@ -34,6 +34,7 @@ mod accept;
 mod apply;
 pub(crate) mod array;
 mod commit;
+pub(crate) mod fillet_chamfer;
 mod from_dimension;
 mod guides;
 mod history;

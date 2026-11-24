@@ -118,6 +118,8 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
 | `offset` | `OFFSET`, `O` | Draws a parallel offset of a line, polyline (with corners joined per `OFFSETGAPTYPE 0`), arc, circle, ellipse or spline at a distance on a side or through a point. See [Offset](offset.md). |
 | `trim` | `TRIM`, `TR` | Cuts a line, polyline, arc, circle, ellipse or spline back to one or more boundary objects (including block inserts), keeping the named part and reporting `split_id` when `keep: "ends"` splits an open object in two. See [Trim and extend](trim-and-extend.md). |
 | `extend` | `EXTEND`, `EX` | Extends an open line, polyline, arc, elliptical arc or spline at its `start`, `end`, or `both` ends to the nearest boundary object. See [Trim and extend](trim-and-extend.md). |
+| `fillet` | `FILLET`, `F` | Rounds the corner between two objects (`first` and `second`: lines, arcs or circles) or every straight corner of a flat polyline (`target`) with an arc of `radius` (or `radius: 0` for a sharp corner). See [Fillet and chamfer](fillet-and-chamfer.md). |
+| `chamfer` | `CHAMFER`, `CHA` | Bevels the corner between two lines (`first` and `second`) or every straight corner of a flat polyline (`target`) by `distance`, `distance1` + `distance2`, or `length` + `angle`. See [Fillet and chamfer](fillet-and-chamfer.md). |
 | `set_cell` | `TABLEDIT` | Sets keys of a table's cell: its text, style, height, justification or merge. |
 | `add_row` | none | Adds a row to a table. |
 | `delete_row` | none | Deletes a row of a table. |

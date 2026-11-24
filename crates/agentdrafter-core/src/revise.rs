@@ -21,10 +21,14 @@ use crate::build::file_id_of_file;
 use crate::build::is_same_file;
 use crate::build::FileId;
 use crate::change::array::{self, At, Place};
+use crate::change::fillet_chamfer::{
+    compute_chamfer_polyline, compute_chamfer_two, compute_fillet_polyline, compute_fillet_two,
+    ChamferSpec,
+};
 use crate::change::offset::{compute_offset, OffsetBy, OffsetSide};
 use crate::change::operations::{
-    op_error, read_change_set_for_original, AddTo, Body, DrawOrderPlace, Motion, OpOffsetBy,
-    OpOffsetSide, OpPoint, Operation, Pattern, Table, TableOp, Target, TransformBy,
+    op_error, read_change_set_for_original, AddTo, Body, CornerMode, DrawOrderPlace, Motion,
+    OpOffsetBy, OpOffsetSide, OpPoint, Operation, Pattern, Table, TableOp, Target, TransformBy,
 };
 use crate::change::original_journal::OriginalJournal;
 use crate::change::replace::{TextMatcher, TextScope};
@@ -2803,6 +2807,30 @@ fn apply_revision_op(
                 split_id: None,
             })
         }
+        Body::Fillet { mode, radius } => {
+            let loaded = ensure_record(session, cached, source, sheet_name)?;
+            apply_original_corner(
+                session,
+                loaded,
+                sheet_name,
+                op,
+                mode,
+                OriginalCornerOp::Fillet(*radius),
+                settings,
+            )
+        }
+        Body::Chamfer { mode, spec } => {
+            let loaded = ensure_record(session, cached, source, sheet_name)?;
+            apply_original_corner(
+                session,
+                loaded,
+                sheet_name,
+                op,
+                mode,
+                OriginalCornerOp::Chamfer(*spec),
+                settings,
+            )
+        }
         Body::Change {
             target,
             set,
@@ -3645,6 +3673,284 @@ fn revision_message(
         msg.push_str(&format!("; PDF not plotted ({})", err.message));
     }
     msg
+}
+
+#[derive(Clone, Copy)]
+enum OriginalCornerOp {
+    Fillet(f64),
+    Chamfer(ChamferSpec),
+}
+
+impl OriginalCornerOp {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Fillet(_) => "filleted",
+            Self::Chamfer(_) => "chamfered",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Fillet(_) => "fillet",
+            Self::Chamfer(_) => "chamfer",
+        }
+    }
+
+    fn size_field(self) -> &'static str {
+        match self {
+            Self::Fillet(_) => "radius",
+            Self::Chamfer(_) => "distance",
+        }
+    }
+}
+
+fn apply_original_corner(
+    session: &mut RevisionSession,
+    loaded: &DwgLoaded,
+    sheet_name: &str,
+    op: &Operation,
+    mode: &CornerMode,
+    kind: OriginalCornerOp,
+    settings: &Settings,
+) -> Result<RevisionOperationOutcome, Error> {
+    let index = op.index;
+    let op_name = op.spec.name;
+    let fonts = SheetFonts::find(&loaded.record.sheet, settings);
+    let start_of = |t: &crate::text::Text| fonts.start(t);
+
+    match mode {
+        CornerMode::Polyline { target } => {
+            let found = resolve_target(session, loaded, target, sheet_name, op, "target")?;
+            check_unlocked(session, &found.handle, &found.id, op, "target")?;
+            let obj_idx = (0..loaded.record.sheet.objects.len())
+                .find(|&i| loaded.record.handle_of(i) == Some(found.handle.as_str()))
+                .ok_or_else(|| {
+                    op_error(
+                        index,
+                        op_name,
+                        ErrorCode::UnknownName,
+                        format!("could not read `{}` to {} it", found.id, kind.noun()),
+                        "target",
+                    )
+                })?;
+            let base = loaded.record.sheet.objects[obj_idx].clone();
+            let obj_name = loaded.record.objects[obj_idx].name.clone();
+            let res = match kind {
+                OriginalCornerOp::Fillet(r) => compute_fillet_polyline(&base, r),
+                OriginalCornerOp::Chamfer(spec) => compute_chamfer_polyline(&base, spec),
+            }
+            .map_err(|e| op_error(index, op_name, e.code, e.message, kind.size_field()))?;
+
+            let space = session.space_of_handle(&found.handle)?;
+            let local_id = found
+                .id
+                .split_once('/')
+                .map(|(_, l)| l)
+                .filter(|l| !l.starts_with(HANDLE_ID));
+            let del = session.delete_object(&found.handle)?;
+            let (new_hex, added) = session.add_object(
+                &res.polyline,
+                &space,
+                sheet_name,
+                local_id,
+                obj_name.as_deref(),
+                &start_of,
+            )?;
+            let mut handles_touched = del.touched;
+            handles_touched.extend(added.touched);
+            let kept_id = match local_id {
+                Some(explicit) => format!("{sheet_name}/{explicit}"),
+                None => handle_id(sheet_name, &new_hex),
+            };
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message: format!(
+                    "{} {} corner{} of `{}`",
+                    kind.verb(),
+                    res.corners_modified,
+                    if res.corners_modified == 1 { "" } else { "s" },
+                    found.id
+                ),
+                id: Some(kept_id),
+                handle: Some(new_hex),
+                handles_touched,
+                handles_added: added.added,
+                handles_deleted: del.deleted,
+                copies: Vec::new(),
+                snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
+                split_id: None,
+            })
+        }
+        CornerMode::TwoObjects {
+            first,
+            second,
+            trim,
+            first_end,
+            second_end,
+            new_id,
+            layer,
+        } => {
+            let f1 = resolve_target(session, loaded, first, sheet_name, op, "first")?;
+            let f2 = resolve_target(session, loaded, second, sheet_name, op, "second")?;
+            if f1.handle == f2.handle {
+                return Err(op_error(
+                    index,
+                    op_name,
+                    ErrorCode::BadValue,
+                    format!(
+                        "`first` and `second` both name `{}`; to {} a single polyline's \
+                         corners, pass it under `target`",
+                        f1.id,
+                        kind.noun()
+                    ),
+                    "second",
+                ));
+            }
+            if *trim {
+                check_unlocked(session, &f1.handle, &f1.id, op, "first")?;
+                check_unlocked(session, &f2.handle, &f2.id, op, "second")?;
+            }
+            let idx1 = (0..loaded.record.sheet.objects.len())
+                .find(|&i| loaded.record.handle_of(i) == Some(f1.handle.as_str()))
+                .ok_or_else(|| {
+                    op_error(
+                        index,
+                        op_name,
+                        ErrorCode::UnknownName,
+                        format!("could not read `{}`", f1.id),
+                        "first",
+                    )
+                })?;
+            let idx2 = (0..loaded.record.sheet.objects.len())
+                .find(|&i| loaded.record.handle_of(i) == Some(f2.handle.as_str()))
+                .ok_or_else(|| {
+                    op_error(
+                        index,
+                        op_name,
+                        ErrorCode::UnknownName,
+                        format!("could not read `{}`", f2.id),
+                        "second",
+                    )
+                })?;
+            if !loaded.record.sheet.same_space(idx1, idx2) {
+                return Err(op_error(
+                    index,
+                    op_name,
+                    ErrorCode::BadValue,
+                    format!("`{}` is in a different space from `{}`", f2.id, f1.id),
+                    "second",
+                ));
+            }
+            let obj1 = loaded.record.sheet.objects[idx1].clone();
+            let obj2 = loaded.record.sheet.objects[idx2].clone();
+            let name1 = loaded.record.objects[idx1].name.clone();
+            let name2 = loaded.record.objects[idx2].name.clone();
+
+            let res = match kind {
+                OriginalCornerOp::Fillet(r) => compute_fillet_two(
+                    &obj1,
+                    &obj2,
+                    r,
+                    *trim,
+                    *first_end,
+                    *second_end,
+                    layer.as_deref(),
+                ),
+                OriginalCornerOp::Chamfer(spec) => compute_chamfer_two(
+                    &obj1,
+                    &obj2,
+                    spec,
+                    *trim,
+                    *first_end,
+                    *second_end,
+                    layer.as_deref(),
+                ),
+            }
+            .map_err(|e| op_error(index, op_name, e.code, e.message, kind.size_field()))?;
+
+            let space = session.space_of_handle(&f1.handle)?;
+            let mut handles_touched = Vec::new();
+            let mut handles_added = Vec::new();
+            let mut handles_deleted = Vec::new();
+            let mut last_hex = None;
+
+            for (updated_opt, found, obj_name) in
+                [(&res.first, &f1, name1), (&res.second, &f2, name2)]
+            {
+                if let Some(updated) = updated_opt {
+                    let local = found
+                        .id
+                        .split_once('/')
+                        .map(|(_, l)| l)
+                        .filter(|l| !l.starts_with(HANDLE_ID));
+                    let del = session.delete_object(&found.handle)?;
+                    let (hex, added) = session.add_object(
+                        updated,
+                        &space,
+                        sheet_name,
+                        local,
+                        obj_name.as_deref(),
+                        &start_of,
+                    )?;
+                    handles_touched.extend(del.touched);
+                    handles_touched.extend(added.touched);
+                    handles_added.extend(added.added);
+                    handles_deleted.extend(del.deleted);
+                    last_hex = Some(hex);
+                }
+            }
+
+            let mut created_id = None;
+            let mut created_hex = None;
+            if let Some(added_obj) = &res.added {
+                let (ahex, aadd) = session.add_object(
+                    added_obj,
+                    &space,
+                    sheet_name,
+                    new_id.as_deref(),
+                    None,
+                    &start_of,
+                )?;
+                handles_touched.extend(aadd.touched);
+                handles_added.extend(aadd.added);
+                created_id = Some(match new_id {
+                    Some(explicit) => format!("{sheet_name}/{explicit}"),
+                    None => handle_id(sheet_name, &ahex),
+                });
+                created_hex = Some(ahex);
+            }
+
+            let message = match &created_id {
+                Some(cid) => format!("{} `{}` and `{}` with `{cid}`", kind.verb(), f1.id, f2.id),
+                None => format!(
+                    "{} `{}` and `{}` to a sharp corner",
+                    kind.verb(),
+                    f1.id,
+                    f2.id
+                ),
+            };
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message,
+                id: created_id,
+                handle: created_hex.or(last_hex),
+                handles_touched,
+                handles_added,
+                handles_deleted,
+                copies: Vec::new(),
+                snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
+                split_id: None,
+            })
+        }
+    }
 }
 
 #[cfg(test)]
