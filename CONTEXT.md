@@ -368,6 +368,14 @@ _Avoid_: axis, text mirror (a readable rendering of a DWG)
 An insert whose block's X axis is reversed before it is scaled and turned, as AutoCAD's MIRROR leaves one: `mirrored: true`, which a DWG keeps as a negative X scale. What its block draws is mirrored; its attributes read forwards. Mirrored back, it is no longer mirrored, and `readable_attributes: true` keeps its attributes reading forwards.
 _Avoid_: negative scale, flipped block
 
+**Fillet**:
+A tangent arc of a declared radius rounding the corner between two objects (lines, arcs or circles) or every straight corner of a flat polyline, as AutoCAD's FILLET (`F`) draws it; a radius of `0` trims or extends two objects to a sharp corner or squares up existing arc corners on a polyline, and two parallel lines are joined with a semicircular cap.
+_Avoid_: round (alone), corner arc
+
+**Chamfer**:
+A straight bevel cutting back the corner between two lines or every straight corner of a flat polyline by equal or asymmetric distances or by a length and an angle, as AutoCAD's CHAMFER (`CHA`) draws it; zero distances trim or extend two lines to a sharp corner.
+_Avoid_: bevel (alone), miter (a mitre joins wide polyline edges)
+
 **Change set**:
 Operations sent together as one request. Each sheet takes its part of a change set fully or not at all.
 _Avoid_: batch, transaction, commit

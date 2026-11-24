@@ -24,13 +24,17 @@ use serde_json::Value;
 
 use super::array;
 use super::commit::Replacement;
+use super::fillet_chamfer::{
+    compute_chamfer_polyline, compute_chamfer_two, compute_fillet_polyline, compute_fillet_two,
+    ChamferSpec,
+};
 use super::from_dimension::dimension_from;
 use super::journal::{commit_change_set, HowChanged, Keeping, Landing, ObjectChanged, SheetFailed};
 use super::offset::{compute_offset, object_to_record_keys, OffsetBy, OffsetSide};
 use super::operations::{
-    op_error, read_change_set, AddTo, BlockOp, Body, DrawOrderPlace, FromOp, Import, Kind, Motion,
-    OpOffsetBy, OpOffsetSide, OpPoint, Operation, Pattern, PointSnap, Table, TableOp, Target,
-    TextToFrontWhich, TransformBy, ROW_VALUE_KEY,
+    op_error, read_change_set, AddTo, BlockOp, Body, CornerMode, DrawOrderPlace, FromOp, Import,
+    Kind, Motion, OpOffsetBy, OpOffsetSide, OpPoint, Operation, Pattern, PointSnap, Table, TableOp,
+    Target, TextToFrontWhich, TransformBy, ROW_VALUE_KEY,
 };
 use super::replace::{TextMatchKind, TextMatcher, TextScope};
 use super::trim_extend::{compute_extend, compute_trim, ExtendEnd, TrimKeep};
@@ -530,6 +534,20 @@ fn objects_changed(
         let how = match (op.spec.kind, &op.body) {
             (Kind::Delete, _) => HowChanged::Deleted,
             (Kind::Add(..) | Kind::Offset, _) => HowChanged::Added,
+            (
+                Kind::Fillet,
+                Body::Fillet {
+                    mode: CornerMode::TwoObjects { .. },
+                    ..
+                },
+            )
+            | (
+                Kind::Chamfer,
+                Body::Chamfer {
+                    mode: CornerMode::TwoObjects { .. },
+                    ..
+                },
+            ) => HowChanged::Added,
             _ => HowChanged::Changed,
         };
         if let Some(id) = &d.id {
@@ -1298,6 +1316,36 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 }
                 continue;
             }
+            Body::Fillet { mode, .. } | Body::Chamfer { mode, .. } => {
+                let targets: Vec<(&Target, &str)> = match mode {
+                    CornerMode::Polyline { target } => vec![(target, "target")],
+                    CornerMode::TwoObjects { first, second, .. } => {
+                        vec![(first, "first"), (second, "second")]
+                    }
+                };
+                for (t, key) in targets {
+                    let (sheet, field) = match t {
+                        Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
+                        Target::Name {
+                            sheet: Some(sheet), ..
+                        } => (sheet, format!("{key}.sheet")),
+                        Target::Name { sheet: None, .. } => continue,
+                    };
+                    if files.sheet(sheet).is_none() {
+                        return Err(op_error(
+                            op.index,
+                            op.spec.name,
+                            ErrorCode::UnknownName,
+                            format!(
+                                "the set holds no sheet `{sheet}`; its sheets: {}",
+                                files.sheet_names()
+                            ),
+                            &field,
+                        ));
+                    }
+                }
+                continue;
+            }
         };
         if files.sheet(sheet).is_none() {
             return Err(op_error(
@@ -1627,6 +1675,14 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         return apply_extend(at, op, target, boundaries, *end, settings);
     }
 
+    if let Body::Fillet { mode, radius } = &op.body {
+        return apply_corner(at, op, mode, CornerOp::Fillet(*radius));
+    }
+
+    if let Body::Chamfer { mode, spec } = &op.body {
+        return apply_corner(at, op, mode, CornerOp::Chamfer(*spec));
+    }
+
     if let Body::Table {
         op: table_op,
         table,
@@ -1712,6 +1768,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Offset { .. }
         | Body::Trim { .. }
         | Body::Extend { .. }
+        | Body::Fillet { .. }
+        | Body::Chamfer { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2131,6 +2189,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Offset { .. }
         | Body::Trim { .. }
         | Body::Extend { .. }
+        | Body::Fillet { .. }
+        | Body::Chamfer { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -6999,6 +7059,477 @@ fn apply_extend(
     }
 }
 
+#[derive(Clone, Copy)]
+enum CornerOp {
+    Fillet(f64),
+    Chamfer(ChamferSpec),
+}
+
+impl CornerOp {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Fillet(_) => "fillets",
+            Self::Chamfer(_) => "chamfers",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Fillet(_) => "fillet",
+            Self::Chamfer(_) => "chamfer",
+        }
+    }
+
+    fn size_field(self) -> &'static str {
+        match self {
+            Self::Fillet(_) => "radius",
+            Self::Chamfer(_) => "distance",
+        }
+    }
+}
+
+/// Rounds or bevels corners on a polyline (`target`) or between two objects
+/// (`first` and `second`): AutoCAD's `FILLET` (`F`) and `CHAMFER` (`CHA`).
+fn apply_corner(at: &mut Attempt, op: &Operation, mode: &CornerMode, kind: CornerOp) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+
+    match mode {
+        CornerMode::Polyline { target } => {
+            let found = match resolve(at, target, op) {
+                Ok(found) => found,
+                Err(applied) => return *applied,
+            };
+            let reach = at.reach(found.file, found.row);
+            if let Some(refusal) = many_paths(files, found.file, op, "target") {
+                return refusal;
+            }
+            if let Some(layer) =
+                batch_object_locked_layer(at, files, found.row, found.file, found.list, found.index)
+            {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::Locked,
+                        format!(
+                            "`{}` is on layer `{layer}`, which is locked; unlock it first with \
+                             change_layer, set: {{\"locked\": false}}",
+                            found.id
+                        ),
+                        "target",
+                    ),
+                );
+            }
+            let rows = match at.rows_now() {
+                Ok(r) => r,
+                Err(e) => return fail(reach, e),
+            };
+            let record = match sheet_record(at, &rows, found.row, &mut Vec::new()) {
+                Ok(r) => r,
+                Err(e) => return fail(reach, e),
+            };
+            let local = found
+                .id
+                .split_once(ID_SEPARATOR)
+                .map_or(found.id.as_str(), |(_, l)| l)
+                .to_owned();
+            let in_row = matches!(found.file, FileRef::Rows(_));
+            let Some(obj_idx) = record
+                .objects
+                .iter()
+                .position(|o| o.in_row == in_row && o.id.eq_ignore_ascii_case(&local))
+            else {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::UnknownName,
+                        format!("could not read `{}` to {} it", found.id, kind.noun()),
+                        "target",
+                    ),
+                );
+            };
+            let base = &record.sheet.objects[obj_idx];
+            let space = crate::query::space_of(&record.sheet, obj_idx);
+            let obj_name = record.objects[obj_idx].name.clone();
+            let res = match kind {
+                CornerOp::Fillet(r) => compute_fillet_polyline(base, r),
+                CornerOp::Chamfer(spec) => compute_chamfer_polyline(base, spec),
+            };
+            let res = match res {
+                Ok(r) => r,
+                Err(e) => return fail(reach, op_err(e.code, e.message, kind.size_field())),
+            };
+            let path = match found.file {
+                FileRef::Rows(f) => files.rows_files[f].path.clone(),
+                FileRef::Template(t) => files.templates[t].path.clone(),
+            };
+            let (new_kind, new_keys) =
+                object_to_record_keys(&res.polyline, &local, obj_name.as_deref(), space.as_deref());
+            let rec = match at.file(found.file) {
+                Ok(r) => r,
+                Err(e) => return fail(reach, e),
+            };
+            let before = rec.object_text(found.list, found.index);
+            if let Err(e) =
+                rec.replace_object(found.list, found.index, new_kind, &new_keys, op.index)
+            {
+                return fail(reach, op_err(e.code, e.message, "target"));
+            }
+            let after = rec.object_text(found.list, found.index);
+            let skipped_note = if res.corners_skipped > 0 {
+                format!(" ({} skipped)", res.corners_skipped)
+            } else {
+                String::new()
+            };
+            Applied {
+                outcome: Ok(Done {
+                    record: path,
+                    id: Some(found.id.clone()),
+                    before: Some(before),
+                    after: Some(after),
+                    row_value: None,
+                    row_values: Vec::new(),
+                    ids_written: Vec::new(),
+                    inserts: Vec::new(),
+                    attributes_removed: Vec::new(),
+                    imported: None,
+                    copies: Vec::new(),
+                    copy_sheets: Vec::new(),
+                    transformed: Vec::new(),
+                    created_row_values: Vec::new(),
+                    replacements: Vec::new(),
+                    attributes_set: Vec::new(),
+                    split_id: None,
+                    snapped: Vec::new(),
+                    message: format!(
+                        "{} {} corner{} of `{}`{skipped_note}",
+                        kind.verb(),
+                        res.corners_modified,
+                        if res.corners_modified == 1 { "" } else { "s" },
+                        found.id,
+                    ),
+                }),
+                sheets: reach,
+                refuse: false,
+            }
+        }
+        CornerMode::TwoObjects {
+            first,
+            second,
+            trim,
+            first_end,
+            second_end,
+            new_id,
+            layer,
+        } => {
+            let f1 = match resolve(at, first, op) {
+                Ok(f) => f,
+                Err(applied) => return keyed(*applied, op, "first"),
+            };
+            let f2 = match resolve(at, second, op) {
+                Ok(f) => f,
+                Err(applied) => return keyed(*applied, op, "second"),
+            };
+            let mut reach_set: BTreeSet<usize> = BTreeSet::new();
+            reach_set.extend(at.reach(f1.file, f1.row));
+            reach_set.extend(at.reach(f2.file, f2.row));
+            let reach: Vec<usize> = reach_set.into_iter().collect();
+
+            if let Some(refusal) = many_paths(files, f1.file, op, "first") {
+                return refusal;
+            }
+            if let Some(refusal) = many_paths(files, f2.file, op, "second") {
+                return refusal;
+            }
+            if f1.row != f2.row {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`second` (`{}`) is on sheet `{}`, not on sheet `{}`",
+                            f2.id,
+                            files.name(f2.row),
+                            files.name(f1.row)
+                        ),
+                        "second",
+                    ),
+                );
+            }
+            if (f1.file, f1.list, f1.index) == (f2.file, f2.list, f2.index) {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`first` and `second` both name `{}`; to {} a single polyline's \
+                             corners, pass it under `target`",
+                            f1.id,
+                            kind.noun()
+                        ),
+                        "second",
+                    ),
+                );
+            }
+            if f1.file != f2.file {
+                let shared = |file: FileRef| matches!(file, FileRef::Template(t) if files.templates[t].sheets.len() > 1);
+                if shared(f1.file) || shared(f2.file) {
+                    return fail(
+                        reach,
+                        op_err(
+                            ErrorCode::BadValue,
+                            format!(
+                                "cannot {} a shared template object with a row-only object on `{}`",
+                                kind.noun(),
+                                files.name(f1.row)
+                            ),
+                            "second",
+                        ),
+                    );
+                }
+            }
+            if *trim {
+                for (f, key) in [(&f1, "first"), (&f2, "second")] {
+                    if let Some(locked) =
+                        batch_object_locked_layer(at, files, f.row, f.file, f.list, f.index)
+                    {
+                        return fail(
+                            reach,
+                            op_err(
+                                ErrorCode::Locked,
+                                format!(
+                                    "`{}` is on layer `{locked}`, which is locked; unlock it \
+                                     first with change_layer, set: {{\"locked\": false}}",
+                                    f.id
+                                ),
+                                key,
+                            ),
+                        );
+                    }
+                }
+            }
+            let rows = match at.rows_now() {
+                Ok(r) => r,
+                Err(e) => return fail(reach, e),
+            };
+            let record = match sheet_record(at, &rows, f1.row, &mut Vec::new()) {
+                Ok(r) => r,
+                Err(e) => return fail(reach, e),
+            };
+            let local1 = f1
+                .id
+                .split_once(ID_SEPARATOR)
+                .map_or(f1.id.as_str(), |(_, l)| l)
+                .to_owned();
+            let local2 = f2
+                .id
+                .split_once(ID_SEPARATOR)
+                .map_or(f2.id.as_str(), |(_, l)| l)
+                .to_owned();
+            let in_row1 = matches!(f1.file, FileRef::Rows(_));
+            let in_row2 = matches!(f2.file, FileRef::Rows(_));
+            let Some(idx1) = record
+                .objects
+                .iter()
+                .position(|o| o.in_row == in_row1 && o.id.eq_ignore_ascii_case(&local1))
+            else {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::UnknownName,
+                        format!("could not read `{}`", f1.id),
+                        "first",
+                    ),
+                );
+            };
+            let Some(idx2) = record
+                .objects
+                .iter()
+                .position(|o| o.in_row == in_row2 && o.id.eq_ignore_ascii_case(&local2))
+            else {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::UnknownName,
+                        format!("could not read `{}`", f2.id),
+                        "second",
+                    ),
+                );
+            };
+            if !record.sheet.same_space(idx1, idx2) {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!("`{}` is in a different space from `{}`", f2.id, f1.id),
+                        "second",
+                    ),
+                );
+            }
+            let obj1 = &record.sheet.objects[idx1];
+            let obj2 = &record.sheet.objects[idx2];
+            let space = crate::query::space_of(&record.sheet, idx1);
+            let name1 = record.objects[idx1].name.clone();
+            let name2 = record.objects[idx2].name.clone();
+
+            let res = match kind {
+                CornerOp::Fillet(r) => compute_fillet_two(
+                    obj1,
+                    obj2,
+                    r,
+                    *trim,
+                    *first_end,
+                    *second_end,
+                    layer.as_deref(),
+                ),
+                CornerOp::Chamfer(spec) => compute_chamfer_two(
+                    obj1,
+                    obj2,
+                    spec,
+                    *trim,
+                    *first_end,
+                    *second_end,
+                    layer.as_deref(),
+                ),
+            };
+            let res = match res {
+                Ok(r) => r,
+                Err(e) => return fail(reach, op_err(e.code, e.message, kind.size_field())),
+            };
+
+            let added_local_id = if let Some(ref added_obj) = res.added {
+                Some(match new_id {
+                    Some(explicit) => explicit.clone(),
+                    None => {
+                        let mut taken: BTreeSet<String> = BTreeSet::new();
+                        for &k in &reach {
+                            match at.objects(k) {
+                                Ok(objects) => {
+                                    taken
+                                        .extend(objects.into_iter().map(|o| o.3.id.to_lowercase()));
+                                }
+                                Err(e) => return fail(reach.clone(), e),
+                            }
+                        }
+                        let prefix = added_obj.type_name();
+                        (1..)
+                            .map(|n| format!("{prefix}-{n}"))
+                            .find(|c| !taken.contains(&c.to_lowercase()))
+                            .expect("a free id")
+                    }
+                })
+            } else {
+                None
+            };
+
+            let mut transformed: Vec<(String, Vec<usize>)> = Vec::new();
+            let mut before_text = None;
+            let mut after_text = None;
+
+            if let Some(ref new_obj1) = res.first {
+                let (k1, keys1) =
+                    object_to_record_keys(new_obj1, &local1, name1.as_deref(), space.as_deref());
+                let rec1 = match at.file(f1.file) {
+                    Ok(r) => r,
+                    Err(e) => return fail(reach, e),
+                };
+                before_text = Some(rec1.object_text(f1.list, f1.index));
+                if let Err(e) = rec1.replace_object(f1.list, f1.index, k1, &keys1, op.index) {
+                    return fail(reach, op_err(e.code, e.message, "first"));
+                }
+                after_text = Some(rec1.object_text(f1.list, f1.index));
+                transformed.push((f1.id.clone(), at.reach(f1.file, f1.row)));
+            }
+            if let Some(ref new_obj2) = res.second {
+                let (k2, keys2) =
+                    object_to_record_keys(new_obj2, &local2, name2.as_deref(), space.as_deref());
+                let rec2 = match at.file(f2.file) {
+                    Ok(r) => r,
+                    Err(e) => return fail(reach, e),
+                };
+                if let Err(e) = rec2.replace_object(f2.list, f2.index, k2, &keys2, op.index) {
+                    return fail(reach, op_err(e.code, e.message, "second"));
+                }
+                transformed.push((f2.id.clone(), at.reach(f2.file, f2.row)));
+            }
+
+            // Place the added arc/bevel in the row if either object is in a row;
+            // otherwise in the shared template.
+            let (dest_file, dest_list) = if matches!(f1.file, FileRef::Rows(_)) {
+                (f1.file, f1.list)
+            } else if matches!(f2.file, FileRef::Rows(_)) {
+                (f2.file, f2.list)
+            } else {
+                (f1.file, f1.list)
+            };
+            let path = match dest_file {
+                FileRef::Rows(f) => files.rows_files[f].path.clone(),
+                FileRef::Template(t) => files.templates[t].path.clone(),
+            };
+
+            let mut created_full_id = None;
+            if let (Some(added_obj), Some(added_local)) = (&res.added, &added_local_id) {
+                let (ak, akeys) =
+                    object_to_record_keys(added_obj, added_local, None, space.as_deref());
+                let rec = match at.file(dest_file) {
+                    Ok(r) => r,
+                    Err(e) => return fail(reach, e),
+                };
+                let added_idx = match rec.add(dest_list, ak, &akeys, op.index) {
+                    Ok(i) => i,
+                    Err(e) => return fail(reach, op_err(e.code, e.message, "new_id")),
+                };
+                after_text = Some(rec.object_text(dest_list, added_idx));
+                created_full_id =
+                    Some(format!("{}{ID_SEPARATOR}{added_local}", files.name(f1.row)));
+            }
+
+            let message = match &created_full_id {
+                Some(cid) => format!("{} `{}` and `{}` with `{cid}`", kind.verb(), f1.id, f2.id),
+                None => format!(
+                    "{} `{}` and `{}` to a sharp corner",
+                    kind.verb(),
+                    f1.id,
+                    f2.id
+                ),
+            };
+
+            Applied {
+                outcome: Ok(Done {
+                    record: path,
+                    id: created_full_id,
+                    before: before_text,
+                    after: after_text,
+                    row_value: None,
+                    row_values: Vec::new(),
+                    ids_written: Vec::new(),
+                    inserts: Vec::new(),
+                    attributes_removed: Vec::new(),
+                    imported: None,
+                    copies: Vec::new(),
+                    copy_sheets: Vec::new(),
+                    transformed,
+                    created_row_values: Vec::new(),
+                    replacements: Vec::new(),
+                    attributes_set: Vec::new(),
+                    split_id: None,
+                    snapped: Vec::new(),
+                    message,
+                }),
+                sheets: reach,
+                refuse: false,
+            }
+        }
+    }
+}
+
 /// when `margin` is omitted), and written as a rectangular `revision_cloud`
 /// object in the sheet's row or template.
 #[allow(clippy::too_many_arguments)]
@@ -8181,9 +8712,25 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::Offset { target, .. }
         | Body::Trim { target, .. }
         | Body::Extend { target, .. }
+        | Body::Fillet {
+            mode: CornerMode::Polyline { target },
+            ..
+        }
+        | Body::Chamfer {
+            mode: CornerMode::Polyline { target },
+            ..
+        }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => reaches(target),
+        Body::Fillet {
+            mode: CornerMode::TwoObjects { first, second, .. },
+            ..
+        }
+        | Body::Chamfer {
+            mode: CornerMode::TwoObjects { first, second, .. },
+            ..
+        } => reaches(first) || reaches(second),
         Body::Copy { targets, .. }
         | Body::Transform { targets, .. }
         | Body::DrawOrder { targets, .. } => targets.iter().any(|(t, _)| reaches(t)),
@@ -8336,6 +8883,8 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
         Body::Offset { .. } => "distance".to_owned(),
         Body::Trim { .. } => "boundary".to_owned(),
         Body::Extend { .. } => "boundary".to_owned(),
+        Body::Fillet { .. } => "radius".to_owned(),
+        Body::Chamfer { .. } => "distance".to_owned(),
     }
 }
 
@@ -8509,9 +9058,25 @@ fn target_words(op: &Operation) -> String {
         | Body::Offset { target, .. }
         | Body::Trim { target, .. }
         | Body::Extend { target, .. }
+        | Body::Fillet {
+            mode: CornerMode::Polyline { target },
+            ..
+        }
+        | Body::Chamfer {
+            mode: CornerMode::Polyline { target },
+            ..
+        }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => target.words(),
+        Body::Fillet {
+            mode: CornerMode::TwoObjects { first, second, .. },
+            ..
+        }
+        | Body::Chamfer {
+            mode: CornerMode::TwoObjects { first, second, .. },
+            ..
+        } => format!("{} and {}", first.words(), second.words()),
         Body::Copy { targets, .. }
         | Body::Transform { targets, .. }
         | Body::DrawOrder { targets, .. } => match targets.as_slice() {

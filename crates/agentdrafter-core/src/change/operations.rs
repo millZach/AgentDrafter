@@ -26,6 +26,7 @@ use crate::query::snap::{check_shape, no_kind};
 use crate::query::Selection;
 use crate::units::{parse_length, LengthError, Unit};
 
+use super::fillet_chamfer::{ChamferSpec, CornerEnd};
 use super::replace::{TextMatchKind, TextMatcher, TextScope};
 use super::trim_extend::{ExtendEnd, TrimKeep};
 
@@ -79,6 +80,13 @@ pub(crate) enum Kind {
     /// Carries an open object on to one or more boundary objects: AutoCAD's
     /// EXTEND.
     Extend,
+    /// Rounds the corner between two objects or every corner of a polyline
+    /// with an arc of a radius (or radius 0 for a sharp corner): AutoCAD's
+    /// FILLET.
+    Fillet,
+    /// Bevels the corner between two lines or every corner of a polyline by
+    /// distances or length and angle: AutoCAD's CHAMFER.
+    Chamfer,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -250,6 +258,8 @@ impl Spec {
             Kind::Offset => &["O"],
             Kind::Trim => &["TR"],
             Kind::Extend => &["EX"],
+            Kind::Fillet => &["F"],
+            Kind::Chamfer => &["CHA"],
             _ => &[],
         }
     }
@@ -301,7 +311,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 74] = [
+pub(crate) const SPECS: [Spec; 76] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -440,6 +450,16 @@ pub(crate) const SPECS: [Spec; 74] = [
         name: "extend",
         alias: "EXTEND",
         kind: Kind::Extend,
+    },
+    Spec {
+        name: "fillet",
+        alias: "FILLET",
+        kind: Kind::Fillet,
+    },
+    Spec {
+        name: "chamfer",
+        alias: "CHAMFER",
+        kind: Kind::Chamfer,
     },
     grid("set_cell", "TABLEDIT", GridOp::SetCell),
     grid("add_row", "", GridOp::Add(Axis::Row)),
@@ -1031,6 +1051,20 @@ fn does(spec: &Spec) -> String {
                          open spline) on at its `end` (`start`, `end`, or `both`) until it meets \
                          the nearest boundary object (`boundary` or `boundaries`, including block \
                          inserts). `target` keeps its ID. AutoCAD's EXTEND (EX)."
+            .to_owned(),
+        Kind::Fillet => "Rounds the corner between two objects (`first` and `second`: lines, \
+                         arcs or circles) or every straight corner of a flat polyline (`target`) \
+                         with an arc of `radius` (or `radius: 0` to square two lines to a sharp \
+                         corner or square up arc corners on a polyline). Supports `trim` (true by \
+                         default), `first_end`/`second_end` (`start`/`end`), `new_id` and `layer` \
+                         in two-object mode. AutoCAD's FILLET (F)."
+            .to_owned(),
+        Kind::Chamfer => "Bevels the corner between two lines (`first` and `second`) or every \
+                          straight corner of a flat polyline (`target`) by `distance` (equal \
+                          cutbacks), `distance1` and `distance2`, or `length` and `angle` (in \
+                          degrees; zero distances bring two lines to a sharp corner). Supports \
+                          `trim` (true by default), `first_end`/`second_end` (`start`/`end`), \
+                          `new_id` and `layer` in two-object mode. AutoCAD's CHAMFER (CHA)."
             .to_owned(),
     }
 }
@@ -2217,6 +2251,217 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                 },
             },
         }),
+        Kind::Fillet => json!({
+            "type": "object",
+            "required": ["radius"],
+            "additionalProperties": false,
+            "oneOf": [
+                {
+                    "required": ["first", "second"],
+                    "not": { "required": ["target"] },
+                },
+                {
+                    "required": ["target"],
+                    "not": {
+                        "anyOf": [
+                            { "required": ["first"] },
+                            { "required": ["second"] },
+                            { "required": ["first_end"] },
+                            { "required": ["second_end"] },
+                            { "required": ["trim"] },
+                            { "required": ["new_id"] },
+                            { "required": ["layer"] },
+                        ],
+                    },
+                },
+            ],
+            "properties": {
+                "first": {
+                    "description": "First object to fillet (line, arc or circle), by ID or name. \
+                                    Give `first` and `second`, or `target` for a polyline.",
+                    "$ref": "#/$defs/target",
+                },
+                "second": {
+                    "description": "Second object to fillet (line, arc or circle), by ID or name.",
+                    "$ref": "#/$defs/target",
+                },
+                "target": {
+                    "description": "A flat polyline whose corners are all filleted in place \
+                                    (AutoCAD's FILLET Polyline option).",
+                    "$ref": "#/$defs/target",
+                },
+                "radius": {
+                    "description": "Non-negative fillet radius in the set's declared unit, or a \
+                                    length carrying its own unit such as \"5 mm\". Use 0 to bring \
+                                    two lines to a sharp corner or square up arc corners on a \
+                                    polyline.",
+                    "$ref": "#/$defs/length",
+                },
+                "trim": {
+                    "description": "Whether `first` and `second` are trimmed or extended to the \
+                                    fillet arc (AutoCAD's TRIMMODE). True when left out.",
+                    "type": "boolean",
+                },
+                "first_end": {
+                    "description": "Which end of `first` to keep when disambiguating a crossing: \
+                                    `start` or `end`.",
+                    "enum": CornerEnd::ALL,
+                },
+                "second_end": {
+                    "description": "Which end of `second` to keep when disambiguating a crossing: \
+                                    `start` or `end`.",
+                    "enum": CornerEnd::ALL,
+                },
+                "new_id": {
+                    "description": "Optional ID for the new fillet arc created in two-object mode \
+                                    when `radius > 0`.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "layer": {
+                    "description": "Optional layer for the new fillet arc; inherits `first`'s \
+                                    layer when left out.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+            },
+        }),
+        Kind::Chamfer => json!({
+            "type": "object",
+            "required": [],
+            "additionalProperties": false,
+            "allOf": [
+                {
+                    "oneOf": [
+                        {
+                            "required": ["first", "second"],
+                            "not": { "required": ["target"] },
+                        },
+                        {
+                            "required": ["target"],
+                            "not": {
+                                "anyOf": [
+                                    { "required": ["first"] },
+                                    { "required": ["second"] },
+                                    { "required": ["first_end"] },
+                                    { "required": ["second_end"] },
+                                    { "required": ["trim"] },
+                                    { "required": ["new_id"] },
+                                    { "required": ["layer"] },
+                                ],
+                            },
+                        },
+                    ],
+                },
+                {
+                    "oneOf": [
+                        {
+                            "required": ["distance"],
+                            "not": {
+                                "anyOf": [
+                                    { "required": ["distance1"] },
+                                    { "required": ["distance2"] },
+                                    { "required": ["length"] },
+                                    { "required": ["angle"] },
+                                ],
+                            },
+                        },
+                        {
+                            "required": ["distance1", "distance2"],
+                            "not": {
+                                "anyOf": [
+                                    { "required": ["distance"] },
+                                    { "required": ["length"] },
+                                    { "required": ["angle"] },
+                                ],
+                            },
+                        },
+                        {
+                            "required": ["length", "angle"],
+                            "not": {
+                                "anyOf": [
+                                    { "required": ["distance"] },
+                                    { "required": ["distance1"] },
+                                    { "required": ["distance2"] },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            ],
+            "properties": {
+                "first": {
+                    "description": "First line to chamfer, by ID or name. Give `first` and \
+                                    `second`, or `target` for a polyline.",
+                    "$ref": "#/$defs/target",
+                },
+                "second": {
+                    "description": "Second line to chamfer, by ID or name.",
+                    "$ref": "#/$defs/target",
+                },
+                "target": {
+                    "description": "A flat polyline whose corners are all chamfered in place \
+                                    (AutoCAD's CHAMFER Polyline option).",
+                    "$ref": "#/$defs/target",
+                },
+                "distance": {
+                    "description": "Equal non-negative chamfer distance along both legs (0 brings \
+                                    two lines to a sharp corner). Give `distance`, `distance1` + \
+                                    `distance2`, or `length` + `angle`.",
+                    "$ref": "#/$defs/length",
+                },
+                "distance1": {
+                    "description": "Non-negative chamfer distance along `first` (or each incoming \
+                                    polyline segment). Give with `distance2`.",
+                    "$ref": "#/$defs/length",
+                },
+                "distance2": {
+                    "description": "Non-negative chamfer distance along `second` (or each outgoing \
+                                    polyline segment). Give with `distance1`.",
+                    "$ref": "#/$defs/length",
+                },
+                "length": {
+                    "description": "Non-negative chamfer length along `first` (or each incoming \
+                                    polyline segment). Give with `angle`.",
+                    "$ref": "#/$defs/length",
+                },
+                "angle": {
+                    "description": "Chamfer angle in degrees, strictly between 0 and 180, measured \
+                                    from `first` (or incoming polyline segment) to the bevel line. \
+                                    Give with `length`.",
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "exclusiveMaximum": 180,
+                },
+                "trim": {
+                    "description": "Whether `first` and `second` are trimmed or extended to the \
+                                    chamfer line (AutoCAD's TRIMMODE). True when left out.",
+                    "type": "boolean",
+                },
+                "first_end": {
+                    "description": "Which end of `first` to keep when disambiguating a crossing: \
+                                    `start` or `end`.",
+                    "enum": CornerEnd::ALL,
+                },
+                "second_end": {
+                    "description": "Which end of `second` to keep when disambiguating a crossing: \
+                                    `start` or `end`.",
+                    "enum": CornerEnd::ALL,
+                },
+                "new_id": {
+                    "description": "Optional ID for the new chamfer line created in two-object \
+                                    mode when chamfer distances are non-zero.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "layer": {
+                    "description": "Optional layer for the new chamfer line; inherits `first`'s \
+                                    layer when left out.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+            },
+        }),
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
@@ -2276,6 +2521,241 @@ fn insert_selection_schema() -> Value {
             },
         },
     })
+}
+
+/// Parses either polyline mode (`target`) or two-object mode (`first`, `second`,
+/// optional `trim`, `first_end`, `second_end`, `new_id`, `layer`) for `fillet`
+/// and `chamfer`.
+fn read_corner_mode(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+) -> Result<CornerMode, (ErrorCode, String, String)> {
+    let parse_target = |key: &str| -> Result<Target, (ErrorCode, String, String)> {
+        let Some(val) = map.get(key) else {
+            return Err((
+                ErrorCode::MissingKey,
+                format!("missing key `{key}`"),
+                key.to_owned(),
+            ));
+        };
+        let mut t = read_target(val).map_err(|(code, msg, sub)| {
+            let field = if sub.is_empty() {
+                key.to_owned()
+            } else {
+                format!("{key}.{sub}")
+            };
+            (code, msg, field)
+        })?;
+        if let Some(sheet) = default_sheet {
+            if let Target::Name {
+                sheet: slot @ None, ..
+            } = &mut t
+            {
+                *slot = Some(sheet.to_owned());
+            }
+        }
+        Ok(t)
+    };
+    let has_target = map.contains_key("target");
+    let has_first = map.contains_key("first");
+    let has_second = map.contains_key("second");
+
+    if has_target {
+        for forbidden in [
+            "first",
+            "second",
+            "trim",
+            "first_end",
+            "second_end",
+            "new_id",
+            "layer",
+        ] {
+            if map.contains_key(forbidden) {
+                return Err((
+                    ErrorCode::Usage,
+                    format!(
+                        "`{forbidden}` applies only to two-object mode (`first` and `second`), \
+                         not polyline mode (`target`)"
+                    ),
+                    forbidden.to_owned(),
+                ));
+            }
+        }
+        return Ok(CornerMode::Polyline {
+            target: parse_target("target")?,
+        });
+    }
+
+    if !has_first && !has_second {
+        return Err((
+            ErrorCode::MissingKey,
+            "give `first` and `second` (two objects), or `target` (a polyline)".to_owned(),
+            "first".to_owned(),
+        ));
+    }
+    let first = parse_target("first")?;
+    let second = parse_target("second")?;
+    let trim = match map.get("trim") {
+        None => true,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err((
+                ErrorCode::WrongType,
+                "expected `trim`, true or false".to_owned(),
+                "trim".to_owned(),
+            ))
+        }
+    };
+    let parse_end = |key: &str| -> Result<Option<CornerEnd>, (ErrorCode, String, String)> {
+        match map.get(key) {
+            None => Ok(None),
+            Some(Value::String(s)) => CornerEnd::parse(s).map(Some).ok_or_else(|| {
+                (
+                    ErrorCode::BadValue,
+                    format!(
+                        "unknown `{key}` `{s}`; expected one of {}",
+                        CornerEnd::ALL.join(", ")
+                    ),
+                    key.to_owned(),
+                )
+            }),
+            Some(_) => Err((
+                ErrorCode::WrongType,
+                format!("expected `{key}`, one of {}", CornerEnd::ALL.join(", ")),
+                key.to_owned(),
+            )),
+        }
+    };
+    let first_end = parse_end("first_end")?;
+    let second_end = parse_end("second_end")?;
+    let parse_opt_str = |key: &str| -> Result<Option<String>, (ErrorCode, String, String)> {
+        match map.get(key) {
+            None => Ok(None),
+            Some(Value::String(s)) if !s.trim().is_empty() => Ok(Some(s.clone())),
+            Some(Value::String(_)) => Err((
+                ErrorCode::BadValue,
+                format!("`{key}` cannot be empty"),
+                key.to_owned(),
+            )),
+            Some(_) => Err((
+                ErrorCode::WrongType,
+                format!("expected `{key}`, a string"),
+                key.to_owned(),
+            )),
+        }
+    };
+    let new_id = parse_opt_str("new_id")?;
+    let layer = parse_opt_str("layer")?;
+    Ok(CornerMode::TwoObjects {
+        first,
+        second,
+        trim,
+        first_end,
+        second_end,
+        new_id,
+        layer,
+    })
+}
+
+/// Parses `distance` (equal cutbacks), `distance1` + `distance2`, or `length` +
+/// `angle` for `chamfer`.
+fn read_chamfer_spec(
+    map: &Map<String, Value>,
+    units: Unit,
+) -> Result<ChamferSpec, (ErrorCode, String, String)> {
+    let has_d = map.contains_key("distance");
+    let has_d1 = map.contains_key("distance1");
+    let has_d2 = map.contains_key("distance2");
+    let has_len = map.contains_key("length");
+    let has_ang = map.contains_key("angle");
+    let read_non_neg = |key: &str| -> Result<f64, (ErrorCode, String, String)> {
+        let v = map.get(key).unwrap();
+        let d = length(v, units).map_err(|msg| (ErrorCode::BadValue, msg, key.to_owned()))?;
+        if !d.is_finite() || d < 0.0 {
+            return Err((
+                ErrorCode::BadValue,
+                format!("`{key}` must be a non-negative length"),
+                key.to_owned(),
+            ));
+        }
+        Ok(d)
+    };
+    match (has_d, has_d1 || has_d2, has_len || has_ang) {
+        (true, false, false) => {
+            let d = read_non_neg("distance")?;
+            Ok(ChamferSpec::Distances(d, d))
+        }
+        (false, true, false) => {
+            if !has_d1 {
+                return Err((
+                    ErrorCode::MissingKey,
+                    "missing key `distance1` to go with `distance2`".to_owned(),
+                    "distance1".to_owned(),
+                ));
+            }
+            if !has_d2 {
+                return Err((
+                    ErrorCode::MissingKey,
+                    "missing key `distance2` to go with `distance1`".to_owned(),
+                    "distance2".to_owned(),
+                ));
+            }
+            Ok(ChamferSpec::Distances(
+                read_non_neg("distance1")?,
+                read_non_neg("distance2")?,
+            ))
+        }
+        (false, false, true) => {
+            if !has_len {
+                return Err((
+                    ErrorCode::MissingKey,
+                    "missing key `length` to go with `angle`".to_owned(),
+                    "length".to_owned(),
+                ));
+            }
+            if !has_ang {
+                return Err((
+                    ErrorCode::MissingKey,
+                    "missing key `angle` to go with `length`".to_owned(),
+                    "angle".to_owned(),
+                ));
+            }
+            let len = read_non_neg("length")?;
+            let ang = match map.get("angle") {
+                Some(Value::Number(n)) => n.as_f64(),
+                _ => None,
+            };
+            let Some(angle_deg) = ang else {
+                return Err((
+                    ErrorCode::WrongType,
+                    "expected `angle`, a number of degrees strictly between 0 and 180".to_owned(),
+                    "angle".to_owned(),
+                ));
+            };
+            if !angle_deg.is_finite() || angle_deg <= 0.0 || angle_deg >= 180.0 {
+                return Err((
+                    ErrorCode::BadValue,
+                    "`angle` must be strictly between 0 and 180 degrees".to_owned(),
+                    "angle".to_owned(),
+                ));
+            }
+            Ok(ChamferSpec::LengthAngle {
+                length: len,
+                angle_deg,
+            })
+        }
+        (false, false, false) => Err((
+            ErrorCode::MissingKey,
+            "give `distance`, `distance1` and `distance2`, or `length` and `angle`".to_owned(),
+            "distance".to_owned(),
+        )),
+        _ => Err((
+            ErrorCode::Usage,
+            "give `distance`, `distance1` and `distance2`, or `length` and `angle` — not a mix"
+                .to_owned(),
+            "distance".to_owned(),
+        )),
+    }
 }
 
 /// Parses `boundary` (one target) or `boundaries` (a non-empty list of targets)
@@ -3263,6 +3743,18 @@ pub(crate) enum Body {
         boundaries: Vec<(Target, String)>,
         end: ExtendEnd,
     },
+    /// Rounds the corner between two objects or every corner of a polyline:
+    /// AutoCAD's FILLET.
+    Fillet {
+        mode: CornerMode,
+        radius: f64,
+    },
+    /// Bevels the corner between two lines or every corner of a polyline:
+    /// AutoCAD's CHAMFER.
+    Chamfer {
+        mode: CornerMode,
+        spec: ChamferSpec,
+    },
     /// A table operation: on the entry `name` of the template `to` names,
     /// with the keys it adds or sets, and the new name a rename gives.
     Table {
@@ -3315,6 +3807,24 @@ pub(crate) enum Body {
         objects: Option<Vec<Value>>,
         /// What an import_blocks imports.
         import: Option<Import>,
+    },
+}
+
+/// Target specification shared by `fillet` and `chamfer`: either a single flat
+/// polyline (`target`) or two objects (`first` and `second`).
+#[derive(Clone, Debug)]
+pub(crate) enum CornerMode {
+    Polyline {
+        target: Target,
+    },
+    TwoObjects {
+        first: Target,
+        second: Target,
+        trim: bool,
+        first_end: Option<CornerEnd>,
+        second_end: Option<CornerEnd>,
+        new_id: Option<String>,
+        layer: Option<String>,
     },
 }
 
@@ -5135,6 +5645,65 @@ fn operation(
                 boundaries,
                 end,
             }
+        }
+        Kind::Fillet => {
+            keys(&[
+                "first",
+                "second",
+                "target",
+                "radius",
+                "trim",
+                "first_end",
+                "second_end",
+                "new_id",
+                "layer",
+            ])?;
+            let mode = read_corner_mode(map, default_sheet)
+                .map_err(|(code, msg, field)| fail(code, msg, &field))?;
+            let radius = match map.get("radius") {
+                Some(v) => {
+                    let r =
+                        length(v, units).map_err(|msg| fail(ErrorCode::BadValue, msg, "radius"))?;
+                    if !r.is_finite() || r < 0.0 {
+                        return Err(fail(
+                            ErrorCode::BadValue,
+                            "`radius` must be a non-negative length".to_owned(),
+                            "radius",
+                        ));
+                    }
+                    r
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `radius`, the fillet radius (0 for a sharp corner)".to_owned(),
+                        "radius",
+                    ))
+                }
+            };
+            Body::Fillet { mode, radius }
+        }
+        Kind::Chamfer => {
+            keys(&[
+                "first",
+                "second",
+                "target",
+                "distance",
+                "distance1",
+                "distance2",
+                "length",
+                "angle",
+                "trim",
+                "first_end",
+                "second_end",
+                "new_id",
+                "layer",
+            ])?;
+            let mode = read_corner_mode(map, default_sheet)
+                .map_err(|(code, msg, field)| fail(code, msg, &field))?;
+            let spec = read_chamfer_spec(map, units)
+                .map_err(|(code, msg, field)| fail(code, msg, &field))?;
+            Body::Chamfer { mode, spec }
         }
         Kind::Grid(grid_op) => {
             let allowed: Vec<&str> = match grid_op {
