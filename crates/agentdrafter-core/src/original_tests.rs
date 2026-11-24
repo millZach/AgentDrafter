@@ -3002,6 +3002,7 @@ fn check_preserves_sheet_units_for_viewport_dimensions_and_uses_inch_units_on_ex
         blocks: read_ref.blocks,
         objects: read_ref.objects,
         paper: read_ref.paper,
+        page_setup: read_ref.page_setup,
         ltscale: read_ref.ltscale,
         layout: read_ref.layout,
         other_layouts: read_ref.other_layouts,

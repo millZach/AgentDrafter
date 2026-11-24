@@ -76,6 +76,14 @@ fn resolve_by_block(child: &Properties, parent: &Properties) -> Properties {
             other => other,
         },
         linetype_scale: child.linetype_scale,
+        plot_style: match &child.plot_style {
+            crate::model::ObjectPlotStyle::ByBlock => parent.plot_style.clone(),
+            other => other.clone(),
+        },
+        transparency: match child.transparency {
+            crate::model::ObjectTransparency::ByBlock => parent.transparency,
+            other => other,
+        },
     }
 }
 
@@ -95,6 +103,8 @@ fn resolve_style_pen(
             other => other,
         },
         linetype_scale: parent.linetype_scale,
+        plot_style: parent.plot_style.clone(),
+        transparency: parent.transparency,
     }
 }
 
@@ -861,12 +871,16 @@ fn explode_dimension(
         linetype: ObjectLinetype::ByLayer,
         lineweight: dim.properties.lineweight,
         linetype_scale: 1.0,
+        plot_style: dim.properties.plot_style.clone(),
+        transparency: dim.properties.transparency,
     };
     let text_props = Properties {
         color: dim.properties.color,
         linetype: ObjectLinetype::ByLayer,
         lineweight: ObjectLineweight::ByLayer,
         linetype_scale: 1.0,
+        plot_style: dim.properties.plot_style.clone(),
+        transparency: dim.properties.transparency,
     };
     let mut out = Vec::new();
     for [a, b] in laid.lines() {
@@ -1080,6 +1094,8 @@ fn explode_table(table: &Table, sheet: &Sheet) -> Result<Vec<Object>, Error> {
         linetype: ObjectLinetype::ByLayer,
         lineweight: ObjectLineweight::ByLayer,
         linetype_scale: 1.0,
+        plot_style: table.properties.plot_style.clone(),
+        transparency: table.properties.transparency,
     };
     let z = table.position.z;
     let mut out = Vec::new();
@@ -1136,6 +1152,7 @@ mod tests {
             blocks: Vec::new(),
             objects: Vec::new(),
             paper: None,
+            page_setup: None,
             ltscale: 1.0,
             layout: None,
             other_layouts: Vec::new(),

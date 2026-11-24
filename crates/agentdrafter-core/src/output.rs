@@ -166,6 +166,7 @@ pub(crate) fn read_record_with_recovery(
             objects: drawing.objects,
             // A DWG that opens on its layout plots on its layout's paper.
             paper: drawing.paper.or(paper),
+            page_setup: drawing.page_setup,
             ltscale: drawing.ltscale,
             layout: drawing.layout,
             other_layouts: drawing.other_layouts,

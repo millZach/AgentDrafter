@@ -25,7 +25,7 @@ use crate::set::SET_SETTINGS_FILE;
 use crate::units::Unit;
 
 /// The keys of a drawing set's settings.
-pub(crate) const SETTINGS_KEYS: [&str; 4] = ["units", "output", "rows", "clean"];
+pub(crate) const SETTINGS_KEYS: [&str; 5] = ["units", "output", "rows", "clean", "plot_style"];
 
 /// The keys at the top of a set's rows file.
 pub(crate) const ROWS_FILE_KEYS: [&str; 1] = ["rows"];
@@ -71,6 +71,9 @@ pub(crate) struct SetSettings {
     /// `superseded/` unless a run asks otherwise: `clean: true`. False when
     /// the settings leave it out.
     pub clean: bool,
+    /// The CTB or STB plot style file name the set plots with unless a plot
+    /// request names another.
+    pub plot_style: Option<String>,
 }
 
 /// A path the settings' `rows` names: a rows file or a folder of them.
@@ -270,12 +273,17 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
         Some(node) => super::boolean(node, "clean")?,
         None => false,
     };
+    let plot_style = match fields.get("plot_style") {
+        Some(node) => Some(super::page_setup::plot_style_file(node, "plot_style")?),
+        None => None,
+    };
     Ok(SetSettings {
         units,
         output: output.to_owned(),
         rows,
         rows_listed,
         clean,
+        plot_style,
     })
 }
 

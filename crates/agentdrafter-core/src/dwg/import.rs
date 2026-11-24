@@ -58,10 +58,12 @@ pub(crate) fn read_blocks(path: &Path, dxf: bool) -> Result<DrawingBlocks, Error
         .collect();
     // A layer is taken with its linetype, so one whose linetype is not
     // read is not taken either.
+    let named_mode = !drawing.header.plotstyle_mode;
+    let ps_map = super::page_setup::plot_style_handle_map(&drawing);
     let layers: Vec<Layer> = drawing
         .layers
         .iter()
-        .filter_map(read_layer)
+        .filter_map(|l| read_layer(l, named_mode, &ps_map))
         .filter_map(|mut layer| {
             if layer.linetype.is_empty() || layer.linetype.eq_ignore_ascii_case(CONTINUOUS) {
                 CONTINUOUS.clone_into(&mut layer.linetype);

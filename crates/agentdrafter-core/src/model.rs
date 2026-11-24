@@ -24,6 +24,7 @@ pub(crate) mod hatch;
 pub(crate) mod layout;
 pub(crate) mod leader;
 pub(crate) mod leader_block;
+pub(crate) mod page_setup;
 pub(crate) mod revision_cloud;
 pub(crate) mod table;
 pub(crate) mod wipeout;
@@ -48,6 +49,10 @@ pub use leader::{
     MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText, MTextBox, STANDARD_MLEADER_STYLE,
 };
 pub use leader_block::{BlockConnection, Outline};
+pub use page_setup::{
+    ObjectPlotStyle, ObjectTransparency, PageSetup, PlotArea, PlotScale, PlotStyleMode,
+    MAX_TRANSPARENCY, NORMAL_PLOT_STYLE,
+};
 pub use revision_cloud::{
     RevisionCloud, RevisionCloudBoundary, RevisionCloudStyle, MOST_REVCLOUD_ARCS,
     REVCLOUD_APPLICATION, REVCLOUD_BULGE, REVCLOUD_CALLIGRAPHY_WIDTH_FACTOR,
@@ -477,6 +482,13 @@ pub struct Properties {
     /// the sheet's [`Sheet::ltscale`]: AutoCAD's CELTSCALE.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub linetype_scale: f64,
+    /// Named plot style for STB drawings (`ByLayer`, `ByBlock` or a style
+    /// name such as `Heavy`).
+    #[serde(default, skip_serializing_if = "ObjectPlotStyle::is_by_layer")]
+    pub plot_style: ObjectPlotStyle,
+    /// Object transparency (`ByLayer`, `ByBlock`, or `0..=90` percent).
+    #[serde(default, skip_serializing_if = "ObjectTransparency::is_by_layer")]
+    pub transparency: ObjectTransparency,
 }
 
 impl Default for Properties {
@@ -486,6 +498,8 @@ impl Default for Properties {
             linetype: ObjectLinetype::ByLayer,
             lineweight: ObjectLineweight::ByLayer,
             linetype_scale: 1.0,
+            plot_style: ObjectPlotStyle::ByLayer,
+            transparency: ObjectTransparency::ByLayer,
         }
     }
 }
@@ -709,6 +723,13 @@ pub struct Layer {
     /// The pen width objects on the layer plot with; none for AutoCAD's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineweight: Option<Lineweight>,
+    /// Named plot style for STB drawings (such as `Normal` or `Heavy`).
+    /// None in CTB drawings or when using `Normal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_style: Option<String>,
+    /// Layer transparency percentage from `0` (opaque) to `90` (90% transparent).
+    #[serde(default, skip_serializing_if = "page_setup::is_zero_u8")]
+    pub transparency: u8,
     /// Whether the layer is on. An object on a layer that is off draws
     /// nothing, and still counts towards the extents, as in AutoCAD.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
@@ -739,6 +760,8 @@ impl Layer {
             color: WHITE,
             linetype: CONTINUOUS.to_owned(),
             lineweight: None,
+            plot_style: None,
+            transparency: 0,
             on: true,
             frozen: false,
             locked: false,
@@ -873,6 +896,11 @@ pub struct Sheet {
     /// and a plot draw the sheet as they would without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paper: Option<Paper>,
+    /// The sheet's page setup (`PAGESETUP`): paper, plot area (`extents`,
+    /// `window` or `layout`), scale, centring, offset, plot style table and
+    /// transparency plotting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_setup: Option<PageSetup>,
     /// What every linetype on the sheet is enlarged by, more than 0:
     /// AutoCAD's LTSCALE. An object's own linetype scale multiplies it.
     #[serde(default = "one", skip_serializing_if = "is_one")]
@@ -994,9 +1022,43 @@ impl Sheet {
                     .map(|(_, l)| (*l).clone())
                     .collect();
                 page.paper.clone_from(&all[k].paper);
+                if all[k].page_setup.is_some() {
+                    page.page_setup.clone_from(&all[k].page_setup);
+                }
                 std::borrow::Cow::Owned(page)
             })
             .collect()
+    }
+
+    /// The effective page setup for the current page (`layout`'s own page
+    /// setup when present, otherwise the sheet's top-level `page_setup`).
+    pub fn effective_page_setup(&self) -> Option<&PageSetup> {
+        self.layout
+            .as_ref()
+            .and_then(|l| l.page_setup.as_ref())
+            .or(self.page_setup.as_ref())
+    }
+
+    /// Whether this sheet uses named plot styles (STB, `PSTYLEMODE = 0`):
+    /// any layer or object names a plot style, or any page setup names an
+    /// `.stb` file.
+    pub fn uses_named_plot_styles(&self) -> bool {
+        if self.layers.iter().any(|l| l.plot_style.is_some()) {
+            return true;
+        }
+        if self
+            .objects
+            .iter()
+            .chain(self.blocks.iter().flat_map(|b| b.objects.iter()))
+            .any(|o| matches!(o.properties().plot_style, ObjectPlotStyle::Named(_)))
+        {
+            return true;
+        }
+        if self.page_setup.as_ref().is_some_and(PageSetup::uses_stb) {
+            return true;
+        }
+        self.layouts()
+            .any(|l| l.page_setup.as_ref().is_some_and(PageSetup::uses_stb))
     }
 
     /// The sheet's viewports in the layout it draws, `layout`, each with
@@ -1206,6 +1268,14 @@ pub struct DrawingContents {
     /// a standard paper, whole, at full size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paper: Option<Paper>,
+    /// The drawing's model-space or active-layout page setup read from the
+    /// DWG's `Layout` object, when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_setup: Option<PageSetup>,
+    /// Whether the drawing uses colour-dependent (CTB) or named (STB) plot
+    /// styles (`$PSTYLEMODE`).
+    #[serde(default, skip_serializing_if = "PlotStyleMode::is_color_dependent")]
+    pub plot_style_mode: PlotStyleMode,
     /// How many of the drawing's layouts the core reads no page setup of:
     /// the one the drawing opens on, and any other that holds anything,
     /// whose page setup is not a standard paper plotted whole at full size.

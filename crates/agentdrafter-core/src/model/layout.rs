@@ -32,6 +32,10 @@ pub struct Layout {
     /// sheet's own [`Paper`] is the paper of the layout it draws.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paper: Option<Paper>,
+    /// This layout's page setup (`PAGESETUP`), if customized or read from a
+    /// DWG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_setup: Option<super::PageSetup>,
     /// For each of the sheet's objects, in order, whether it is in this
     /// layout's paper space. Every viewport is in one layout's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -45,6 +49,7 @@ impl Layout {
         Self {
             name: name.into(),
             paper: None,
+            page_setup: None,
             paper_space: objects
                 .iter()
                 .map(|o| matches!(o, super::Object::Viewport(_)))

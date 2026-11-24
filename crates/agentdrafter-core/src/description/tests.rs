@@ -47,6 +47,7 @@ fn reads_one_line() {
                 properties: Default::default(),
             })],
             paper: None,
+            page_setup: None,
             ltscale: 1.0,
             wipeout_frame: Default::default(),
             custom_properties: Default::default(),
@@ -146,7 +147,7 @@ fn an_unknown_key_is_named() {
     let e = error("units: mm\nobjects:\n  - line:\n      form: [0, 0, 0]\n");
     assert_eq!(
         e.message,
-        "unknown key `form`; a line takes from, to, layer, color, linetype, lineweight, linetype_scale, id, name, space, copy_of"
+        "unknown key `form`; a line takes from, to, layer, color, linetype, lineweight, linetype_scale, plot_style, transparency, id, name, space, copy_of"
     );
 }
 

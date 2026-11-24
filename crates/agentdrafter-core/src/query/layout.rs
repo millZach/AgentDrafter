@@ -325,19 +325,80 @@ fn sheet_layout(
             });
         (paper, paper_unit, page_setup)
     } else {
-        let page_setup = sheet.layout.as_ref().and_then(|_| {
-            let paper = sheet.paper.as_ref()?;
-            let setup = PageSetup::of(paper.name.as_deref()?)?;
-            let (numerator, denominator) = setup.plot_scale(sheet.units);
+        let effective = sheet.effective_page_setup();
+        let page_setup = if let Some(ps) = effective {
+            let effective_paper = ps.paper.as_ref().or(sheet.paper.as_ref());
+            let dwg_setup = effective_paper
+                .and_then(|p| p.name.as_deref())
+                .and_then(PageSetup::of);
+            let media = dwg_setup
+                .as_ref()
+                .map(|s| s.media.clone())
+                .or_else(|| {
+                    effective_paper.map(|p| {
+                        p.name
+                            .clone()
+                            .unwrap_or_else(|| format!("{} x {}", p.width, p.height))
+                    })
+                })
+                .unwrap_or_default();
+            let area = match ps.area {
+                Some(crate::model::PlotArea::Extents) => "extents",
+                Some(crate::model::PlotArea::Window { .. }) => "window",
+                Some(crate::model::PlotArea::Layout) => "layout",
+                None if sheet.layout.is_some() => "layout",
+                None => "extents",
+            }
+            .to_owned();
+            let scale = match ps.scale {
+                crate::model::PlotScale::Fit => "fit".to_owned(),
+                crate::model::PlotScale::Ratio {
+                    numerator,
+                    denominator,
+                } => {
+                    if sheet.layout.is_some()
+                        && (numerator - 1.0).abs() < 1e-9
+                        && (denominator - 1.0).abs() < 1e-9
+                    {
+                        if let Some(s) = dwg_setup.as_ref() {
+                            let (n, d) = s.plot_scale(sheet.units);
+                            format!("{n}:{d}")
+                        } else {
+                            "1:1".to_owned()
+                        }
+                    } else {
+                        format!("{numerator}:{denominator}")
+                    }
+                }
+            };
             Some(PageSetupUsed {
-                plotter: PLOTTER.to_owned(),
-                paper: setup.media,
-                area: "layout".to_owned(),
-                scale: format!("{numerator}:{denominator}"),
-                plot_style: PLOT_STYLE.to_owned(),
+                plotter: ps.plotter.clone().unwrap_or_else(|| PLOTTER.to_owned()),
+                paper: media,
+                area,
+                scale,
+                plot_style: ps
+                    .plot_style
+                    .clone()
+                    .unwrap_or_else(|| PLOT_STYLE.to_owned()),
             })
-        });
-        (sheet.paper.clone(), None, page_setup)
+        } else {
+            sheet.layout.as_ref().and_then(|_| {
+                let paper = sheet.paper.as_ref()?;
+                let setup = PageSetup::of(paper.name.as_deref()?)?;
+                let (numerator, denominator) = setup.plot_scale(sheet.units);
+                Some(PageSetupUsed {
+                    plotter: PLOTTER.to_owned(),
+                    paper: setup.media,
+                    area: "layout".to_owned(),
+                    scale: format!("{numerator}:{denominator}"),
+                    plot_style: PLOT_STYLE.to_owned(),
+                })
+            })
+        };
+        let paper = effective
+            .and_then(|ps| ps.paper.clone())
+            .or_else(|| sheet.paper.clone());
+        (paper, None, page_setup)
     };
     let viewports = sheet
         .viewports()

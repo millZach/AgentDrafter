@@ -297,6 +297,8 @@ mod tests {
                 clip: None,
                 clip_boundary: None,
                 color: Color(7),
+                plot_style: None,
+                transparency: 0,
                 shape: Shape::Stroke {
                     lineweight: 0.25,
                     runs: vec![vec![[0.0, 0.0], [10.0, 0.0]]],

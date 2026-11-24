@@ -13,6 +13,8 @@ fn item(object: usize, shape: Shape) -> Item {
         clip: None,
         clip_boundary: None,
         color: Color(7),
+        plot_style: None,
+        transparency: 0,
         shape,
     }
 }

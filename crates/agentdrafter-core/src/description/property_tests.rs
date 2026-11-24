@@ -55,6 +55,7 @@ fn an_object_takes_its_own_colour_linetype_lineweight_and_linetype_scale() {
             linetype: ObjectLinetype::Named("DASHED".to_owned()),
             lineweight: ObjectLineweight::Width(Lineweight::from_millimetres(0.35).unwrap()),
             linetype_scale: 0.5,
+            ..Properties::default()
         }
     );
     assert_eq!(

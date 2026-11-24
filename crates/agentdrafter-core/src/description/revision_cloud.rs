@@ -13,7 +13,7 @@ use crate::model::{
 use crate::units::Unit;
 
 /// The keys a `revision_cloud` object takes in a sheet description.
-pub(crate) const REVISION_CLOUD_KEYS: [&str; 10] = [
+pub(crate) const REVISION_CLOUD_KEYS: [&str; 12] = [
     "rectangle",
     "polygon",
     "arc_length",
@@ -24,6 +24,8 @@ pub(crate) const REVISION_CLOUD_KEYS: [&str; 10] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
 
 /// The keys a revision cloud's `rectangle` mapping takes.

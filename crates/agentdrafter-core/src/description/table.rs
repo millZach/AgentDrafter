@@ -34,7 +34,7 @@ pub(crate) const TABLE_STYLE_KEYS: [&str; 9] = [
 pub(crate) const ROW_STYLE_KEYS: [&str; 3] = [TEXT_STYLE_KEY, "text_height", "justify"];
 
 /// The keys a table takes.
-pub(crate) const TABLE_KEYS: [&str; 12] = [
+pub(crate) const TABLE_KEYS: [&str; 14] = [
     "position",
     "columns",
     "rows",
@@ -47,6 +47,8 @@ pub(crate) const TABLE_KEYS: [&str; 12] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
 
 /// The keys a cell written as a mapping takes.

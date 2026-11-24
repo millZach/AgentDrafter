@@ -71,6 +71,7 @@ The settings are the file `set.yaml` at the top of the set's folder. `agentdraft
 | `output` | yes | The folder the set's outputs go to, relative to the set's folder, such as `dwg` or `../issued`: its DWGs, and its PDFs when it is plotted. A build or a plot makes it if it is not there. Each DWG names the set in its build mark, so a render or a plot of it alone finds the set wherever this folder is ([below](#the-build-mark-names-the-set)). |
 | `rows` | yes | The file the set's rows are in, relative to the set's folder, such as `rows.yaml`; or a folder of rows files, such as `rows`; or a list of such paths, such as `[rows/areas.yaml, rows/schedules.yaml]` ([Several rows files](#several-rows-files)). |
 | `clean` | no | `true` or `false`: whether every build and plot of the set moves its [leftover outputs](#leftover-outputs) into `superseded/` in the output folder. Without it, or `false`, they are only listed. A run's own `--clean` or `--no-clean` overrides it for that run. |
+| `plot_style` | no | The default CTB or STB plot style file name (such as `monochrome.ctb` or `plant.stb`) used when plotting the set, found in the plot style folders. A run's own `--plot-style` overrides it. |
 
 A path in a set is written as a sheet description writes its block library's: relative, with `/` between folders on every system, not starting with `/`, and holding none of `\ : < > " | ? *`.
 

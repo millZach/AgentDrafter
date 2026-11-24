@@ -394,22 +394,31 @@ fn render_page(
     check_size(view.width, view.height)?;
 
     let style = through.map(|(style, _)| style);
-    let mut pixmap = raster::rasterize(&list, &view, style).ok_or_else(|| {
-        Error::new(
-            ErrorCode::WriteFailed,
-            format!(
-                "could not make an image of {} by {} pixels",
-                view.width, view.height
-            ),
-        )
-    })?;
+    let plot_transparency = if through.is_some() {
+        sheet
+            .effective_page_setup()
+            .is_none_or(|ps| ps.plot_transparency)
+    } else {
+        true
+    };
+    let mut pixmap =
+        raster::rasterize(&list, &view, style, plot_transparency).ok_or_else(|| {
+            Error::new(
+                ErrorCode::WriteFailed,
+                format!(
+                    "could not make an image of {} by {} pixels",
+                    view.width, view.height
+                ),
+            )
+        })?;
     // What lies off the paper is cut away, where the image is larger than
     // the paper it fits. Through a plot style, ink is cut at the plot's
     // page, its extents on a sheet with no paper, as the PDF's page cuts it,
     // and the margin round it stays white. A page with no width or no
     // height, such as the extents of one straight line, has nothing to cut
     // at, and a plot refuses it; the render draws it uncut.
-    if sheet.paper.is_some() || through.is_some() {
+    let rendered_page_from = draw::page_of(sheet, &list).map_or(PageFrom::Extents, |(_, f)| f);
+    if sheet.paper.is_some() || sheet.effective_page_setup().is_some() || through.is_some() {
         if let Some((paper, _)) = draw::page_of(sheet, &list) {
             if paper.width() > 0.0 && paper.height() > 0.0 {
                 raster::blank_outside(&mut pixmap, &view, paper);
@@ -453,11 +462,7 @@ fn render_page(
         top_left: view.top_left,
         units: record.units,
         extents,
-        page: if sheet.paper.is_some() {
-            PageFrom::Paper
-        } else {
-            PageFrom::Extents
-        },
+        page: rendered_page_from,
         drawn_through,
         objects: object_counts(sheet),
         objects_not_drawn: record.objects_not_drawn,

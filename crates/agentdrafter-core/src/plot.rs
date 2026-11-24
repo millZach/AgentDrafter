@@ -276,9 +276,17 @@ pub fn plot(request: &PlotRequest) -> Result<PlotReport, Error> {
 /// fonts and plot styles from the folders `settings` names. The PDF is
 /// written whole or not at all.
 pub fn plot_with(request: &PlotRequest, settings: &Settings) -> Result<PlotReport, Error> {
-    let style = plot_style(request.plot_style.as_deref(), settings)?;
+    let explicit_style = request
+        .plot_style
+        .as_deref()
+        .map(|name| plot_style(Some(name), settings))
+        .transpose()?;
     let source = request.source.as_path();
     let record = read_record(source)?;
+    let style = match explicit_style {
+        Some(style) => style,
+        None => plot_style_for_sheet(&record.sheet, settings)?,
+    };
     let output = request
         .output
         .clone()
@@ -343,7 +351,10 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
     let set = read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
     let rows_files = read_rows_files_in(&PlotFiles, folder, &set)?;
     let rows = rows_of(&rows_files)?;
-    let style = plot_style(request.plot_style.as_deref(), settings)?;
+    let chosen_style = request.plot_style.as_deref().or(set.plot_style.as_deref());
+    let set_style = chosen_style
+        .map(|name| plot_style(Some(name), settings))
+        .transpose()?;
     let output = folder.join(&set.output);
     fs::create_dir_all(&output).map_err(|e| {
         Error::new(
@@ -361,6 +372,10 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
             let plotted = read_text(&template, "the template").and_then(|(bytes, text)| {
                 let (read, library) = template_at(&text, &template, row, set.units, &mut notices)?;
                 let sheet = read.sheet;
+                let sheet_style = match &set_style {
+                    Some(style) => std::borrow::Cow::Borrowed(style),
+                    None => std::borrow::Cow::Owned(plot_style_for_sheet(&sheet, settings)?),
+                };
                 let rows_file = &rows_files[row.file_index];
                 let mut files = vec![
                     (SourceKind::Template, template.clone(), bytes),
@@ -387,7 +402,7 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
                     &pdf,
                     request.overwrite,
                     &row.sheet,
-                    &style,
+                    sheet_style.as_ref(),
                     settings,
                 )
             });
@@ -461,9 +476,40 @@ fn read_text(path: &Path, what: &str) -> Result<(Vec<u8>, String), Error> {
     Ok((bytes, text))
 }
 
-/// The plot style `name` names, read from the plot style folders, or the
-/// built-in monochrome style when there is no name. A render through a
-/// plot style finds it here too.
+/// Resolves the plot style from `sheet`'s effective page setup (when no
+/// explicit `--plot-style` or `set.yaml` `plot_style` was supplied). When
+/// the style came from a DWG's stored `Layout.plot_style_sheet` and is not
+/// found in the configured plot style folders, falls back to built-in
+/// monochrome so DWGs with AutoCAD's default `monochrome.ctb` still plot
+/// on machines without AutoCAD's `Plot Styles` folder.
+pub(crate) fn plot_style_for_sheet(
+    sheet: &Sheet,
+    settings: &Settings,
+) -> Result<(PlotStyle, PlotStyleUsed), Error> {
+    let Some(ps) = sheet.effective_page_setup() else {
+        return plot_style(None, settings);
+    };
+    let Some(name) = ps.plot_style.as_deref() else {
+        return plot_style(None, settings);
+    };
+    if ps.plot_style_from_dwg {
+        if !crate::description::page_setup::is_plot_style_file(name) {
+            return plot_style(None, settings);
+        }
+        let found = settings
+            .plot_style_folders
+            .iter()
+            .any(|folder| file_in(folder, name).is_some());
+        if !found {
+            return plot_style(None, settings);
+        }
+    }
+    plot_style(Some(name), settings)
+}
+
+/// The plot style `name` names (a CTB or STB file), read from the plot
+/// style folders, or the built-in monochrome style when there is no name.
+/// A render through a plot style finds it here too.
 pub(crate) fn plot_style(
     name: Option<&str>,
     settings: &Settings,
@@ -478,19 +524,18 @@ pub(crate) fn plot_style(
     };
     // Lower-cased whole, so a name of any characters is checked without
     // cutting one in two.
-    let plain = !name.contains(['/', '\\', ':'])
-        && name.len() > 4
-        && name.to_ascii_lowercase().ends_with(".ctb");
+    let plain = crate::description::page_setup::is_plot_style_file(name);
     if !plain {
         return Err(Error::new(
             ErrorCode::BadValue,
             format!(
-                "a plot style is named by its CTB file's name, such as `monochrome.ctb`, and \
-                 found in the plot style folders; `{name}` is not such a name"
+                "a plot style is named by its CTB or STB file's name, such as `monochrome.ctb` \
+                 or `plant.stb`, and found in the plot style folders; `{name}` is not such a name"
             ),
         )
         .at_field("plot_style"));
     }
+    let expect_stb = name.to_ascii_lowercase().ends_with(".stb");
     let folders = &settings.plot_style_folders;
     let Some(path) = folders.iter().find_map(|folder| file_in(folder, name)) else {
         let message = if folders.is_empty() {
@@ -515,7 +560,7 @@ pub(crate) fn plot_style(
         )
         .in_file(&path)
     })?;
-    let style = PlotStyle::parse_ctb(&bytes).map_err(|why| {
+    let style = PlotStyle::parse(&bytes, Some(expect_stb)).map_err(|why| {
         Error::new(
             ErrorCode::ReadFailed,
             format!("could not read the plot style `{name}`: {why}"),
@@ -553,6 +598,7 @@ pub(crate) fn plot_dwg_bytes(
         blocks: drawing.blocks,
         objects: drawing.objects,
         paper: drawing.paper,
+        page_setup: drawing.page_setup,
         ltscale: drawing.ltscale,
         layout: drawing.layout,
         other_layouts: drawing.other_layouts,
@@ -657,7 +703,7 @@ fn render_pdf_record(
         pdf: output.display().to_string(),
         sheet_size: page.1,
         page: page.3,
-        scale: 1.0,
+        scale: page.4,
         units: record.units,
         extents: list.extents(),
         plot_style: used.clone(),
@@ -680,28 +726,177 @@ fn render_pdf_record(
     Ok((bytes, report))
 }
 
-/// The page `sheet`, drawn as `list`, plots on at 1:1: the paper it
-/// declares, or else its extents, with the sheet's size, the box the page
-/// covers in drawing units, and which it is. A sheet with no paper that
-/// draws nothing, or nothing with both a width and a height, has no page.
+/// The page `sheet`, drawn as `list`, plots on: obeying `sheet`'s effective
+/// [`crate::model::PageSetup`] (paper, plot area `extents`/`window`/`layout`,
+/// scale `fit` or ratio, centring, offset, margins and transparency plotting)
+/// when present, or else the declared paper or extents at 1:1.
 fn page(
     sheet: &Sheet,
     list: &draw::DisplayList,
-) -> Result<(Page, SheetSize, Bounds, PageFrom), Error> {
+) -> Result<(Page, SheetSize, Bounds, PageFrom, f64), Error> {
     let units = sheet.units;
-    let Some((extents, from)) = draw::page_of(sheet, list) else {
+    let Some((source_bounds, from)) = draw::page_of(sheet, list) else {
         return Err(Error::new(
             ErrorCode::BadValue,
             "the sheet draws nothing, so it has no size to plot: a sheet is as large as what it \
              draws, such as its template's trim line",
         ));
     };
-    // Inches are exact in points, so a sheet drawn in inches plots on a page
-    // of exactly its size.
-    let points_per_unit = units.convert(1.0, Unit::In) * 72.0;
-    let width = extents.width() * points_per_unit;
-    let height = extents.height() * points_per_unit;
     let mm = |points: f64| (points / POINTS_PER_MILLIMETRE * 1000.0).round() / 1000.0;
+    let base_points_per_unit = units.convert(1.0, Unit::In) * 72.0;
+
+    let Some(ps) = sheet.effective_page_setup() else {
+        // Default 1:1 path with no page_setup: identical to legacy behaviour.
+        let width = source_bounds.width() * base_points_per_unit;
+        let height = source_bounds.height() * base_points_per_unit;
+        check_page_bounds(width, height, mm)?;
+        let size = SheetSize {
+            width_mm: mm(width),
+            height_mm: mm(height),
+            width_points: f64::from(width as f32),
+            height_points: f64::from(height as f32),
+        };
+        let page = Page {
+            origin: source_bounds.min,
+            points_per_unit: base_points_per_unit,
+            width,
+            height,
+            clip_window: None,
+            plot_transparency: true,
+        };
+        return Ok((page, size, source_bounds, from, 1.0));
+    };
+
+    let effective_paper = ps.paper.as_ref().or(sheet.paper.as_ref());
+    let [left_mm, bottom_mm, right_mm, top_mm] = ps.margins_mm;
+    let mm_per_unit = units.convert(1.0, Unit::Mm);
+    let src_w_mm = source_bounds.width() * mm_per_unit;
+    let src_h_mm = source_bounds.height() * mm_per_unit;
+
+    let (paper_w_pt, paper_h_pt, paper_w_mm, paper_h_mm) = match effective_paper {
+        Some(paper) => {
+            let w_pt = paper.width * base_points_per_unit;
+            let h_pt = paper.height * base_points_per_unit;
+            (
+                w_pt,
+                h_pt,
+                paper.width * mm_per_unit,
+                paper.height * mm_per_unit,
+            )
+        }
+        None => {
+            let scale = match ps.scale {
+                crate::model::PlotScale::Fit => {
+                    return Err(Error::new(
+                        ErrorCode::BadValue,
+                        "plot scale `fit` needs a paper size to fit to; declare `paper` on the \
+                         sheet or inside `page_setup`",
+                    ));
+                }
+                crate::model::PlotScale::Ratio {
+                    numerator,
+                    denominator,
+                } => numerator / denominator,
+            };
+            let w_pt = source_bounds.width() * base_points_per_unit * scale;
+            let h_pt = source_bounds.height() * base_points_per_unit * scale;
+            (w_pt, h_pt, src_w_mm * scale, src_h_mm * scale)
+        }
+    };
+
+    let printable_w_mm = paper_w_mm - left_mm - right_mm;
+    let printable_h_mm = paper_h_mm - bottom_mm - top_mm;
+    if !(printable_w_mm > 0.0 && printable_h_mm > 0.0) {
+        return Err(Error::new(
+            ErrorCode::BadValue,
+            "the page setup's margins leave no printable area on the paper",
+        ));
+    }
+
+    let scale = match ps.scale {
+        crate::model::PlotScale::Fit => {
+            if !(src_w_mm > 0.0 || src_h_mm > 0.0) {
+                return Err(Error::new(
+                    ErrorCode::BadValue,
+                    "cannot fit a zero-size drawing area to the paper",
+                ));
+            }
+            let sx = if src_w_mm > 0.0 {
+                printable_w_mm / src_w_mm
+            } else {
+                f64::INFINITY
+            };
+            let sy = if src_h_mm > 0.0 {
+                printable_h_mm / src_h_mm
+            } else {
+                f64::INFINITY
+            };
+            sx.min(sy)
+        }
+        crate::model::PlotScale::Ratio {
+            numerator,
+            denominator,
+        } => numerator / denominator,
+    };
+
+    check_page_bounds(paper_w_pt, paper_h_pt, mm)?;
+    let points_per_unit = base_points_per_unit * scale;
+    let mm_per_unit_on_paper = mm_per_unit * scale;
+    let scaled_w_mm = src_w_mm * scale;
+    let scaled_h_mm = src_h_mm * scale;
+
+    let (place_x_mm, place_y_mm) = if ps.center {
+        (
+            left_mm + (printable_w_mm - scaled_w_mm) / 2.0,
+            bottom_mm + (printable_h_mm - scaled_h_mm) / 2.0,
+        )
+    } else {
+        (
+            left_mm + ps.offset[0] * mm_per_unit,
+            bottom_mm + ps.offset[1] * mm_per_unit,
+        )
+    };
+
+    let origin = [
+        source_bounds.min[0] - place_x_mm / mm_per_unit_on_paper,
+        source_bounds.min[1] - place_y_mm / mm_per_unit_on_paper,
+    ];
+    let has_margins = left_mm > 0.0 || bottom_mm > 0.0 || right_mm > 0.0 || top_mm > 0.0;
+    let clip_window = if matches!(ps.area, Some(crate::model::PlotArea::Window { .. })) {
+        Some(source_bounds)
+    } else if has_margins {
+        Some(Bounds {
+            min: [
+                origin[0] + left_mm / mm_per_unit_on_paper,
+                origin[1] + bottom_mm / mm_per_unit_on_paper,
+            ],
+            max: [
+                origin[0] + (paper_w_mm - right_mm) / mm_per_unit_on_paper,
+                origin[1] + (paper_h_mm - top_mm) / mm_per_unit_on_paper,
+            ],
+        })
+    } else {
+        None
+    };
+
+    let size = SheetSize {
+        width_mm: mm(paper_w_pt),
+        height_mm: mm(paper_h_pt),
+        width_points: f64::from(paper_w_pt as f32),
+        height_points: f64::from(paper_h_pt as f32),
+    };
+    let page = Page {
+        origin,
+        points_per_unit,
+        width: paper_w_pt,
+        height: paper_h_pt,
+        clip_window,
+        plot_transparency: ps.plot_transparency,
+    };
+    Ok((page, size, source_bounds, from, scale))
+}
+
+fn check_page_bounds(width: f64, height: f64, mm: impl Fn(f64) -> f64) -> Result<(), Error> {
     if !(width > 0.0 && height > 0.0) {
         return Err(Error::new(
             ErrorCode::BadValue,
@@ -725,19 +920,7 @@ fn page(
             ),
         ));
     }
-    let size = SheetSize {
-        width_mm: mm(width),
-        height_mm: mm(height),
-        width_points: f64::from(width as f32),
-        height_points: f64::from(height as f32),
-    };
-    let page = Page {
-        origin: extents.min,
-        points_per_unit,
-        width,
-        height,
-    };
-    Ok((page, size, extents, from))
+    Ok(())
 }
 
 #[cfg(test)]

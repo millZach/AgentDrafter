@@ -24,7 +24,7 @@ pub(crate) const VALUE_NAME: &str = "^[A-Za-z0-9_-]+$";
 
 /// The schema of a drawing set's settings, `set.yaml`.
 pub(crate) fn set_schema() -> Value {
-    let [units_key, output_key, rows_key, clean_key] = SETTINGS_KEYS;
+    let [units_key, output_key, rows_key, clean_key, plot_style_key] = SETTINGS_KEYS;
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "AgentDrafter drawing set settings",
@@ -61,6 +61,12 @@ pub(crate) fn set_schema() -> Value {
                                 overrides it for that run.",
                 "type": "boolean",
             },
+            plot_style_key: super::page_setup::plot_style_file_schema(
+                "The CTB or STB plot style file name the drawing set plots with, such as \
+                 `monochrome.ctb` or `plant.stb`, found in the plot style folders. A run's own \
+                 `plot_style` overrides it for that run. Without it, each sheet's page setup or \
+                 the built-in monochrome style.",
+            ),
         },
     })
 }

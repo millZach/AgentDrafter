@@ -256,8 +256,20 @@ fn every_layout_boundary_and_frozen_layer_reads_back_from_the_dwg() {
     let read = read_dwg(&dwg).unwrap();
     let sheet = parse_sheet_description(TWO).unwrap();
     assert_eq!(read.objects, sheet.objects);
-    assert_eq!(read.layout, sheet.layout);
-    assert_eq!(read.other_layouts, sheet.other_layouts);
+    let same_layout = |a: &agentdrafter_core::Layout, b: &agentdrafter_core::Layout| {
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.paper, b.paper);
+        assert_eq!(a.paper_space, b.paper_space);
+        assert!(a.page_setup.is_some());
+    };
+    same_layout(
+        read.layout.as_ref().unwrap(),
+        sheet.layout.as_ref().unwrap(),
+    );
+    assert_eq!(read.other_layouts.len(), sheet.other_layouts.len());
+    for (a, b) in read.other_layouts.iter().zip(&sheet.other_layouts) {
+        same_layout(a, b);
+    }
     assert_eq!(read.paper, sheet.paper);
     assert_eq!(
         (read.objects_not_read, read.layouts_not_read),

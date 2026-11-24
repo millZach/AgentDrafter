@@ -63,9 +63,9 @@ const LOOK_AT_USAGE: &str =
     "agentdrafter look-at <drawing-set-folder> <sheet> [--layout <layout>] [--selected <id>]...";
 const LOOKING_AT_USAGE: &str = "agentdrafter looking-at <drawing-set-folder>";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]... [--no-system-fonts]";
-const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--plot-style <ctb> | --monochrome] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
+const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--plot-style <ctb-or-stb> | --monochrome] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--origins] [--values] [--change-set <change-set.json | -> [--all-or-none]] [--read-past-damage] [--fonts <folder>]... [--no-system-fonts]";
-const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--clean | --no-clean] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
+const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--clean | --no-clean] [--plot-style <ctb-or-stb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description | dwg> [--sheet <sheet>]... [--fonts <folder>]... [--no-system-fonts]";
@@ -1590,7 +1590,7 @@ fn help() -> Value {
              look-alike: the reply says which, and warns of it under `warnings` at its top."
         ),
         "plot_styles": format!(
-            "CTB plot styles are read from the folders --plot-styles names, then from those the \
+            "CTB and STB plot styles are read from the folders --plot-styles names, then from those the \
              {PLOT_STYLES_VARIABLE} environment variable lists, such as AutoCAD's Plot Styles \
              folder. There is no default folder."
         ),

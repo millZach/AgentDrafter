@@ -586,7 +586,7 @@ fn render_does() -> String {
      AgentDrafter rendered. A sheet drawn in several layouts renders each to a PNG of its own, \
      named after the PNG with `-` and the layout's name, such as panel-Details.png; the reply is \
      the first layout's, with the others' under `other_layouts`. To show what prints, it draws \
-     through the CTB plot style `plot_style` names, found in the plot style folders as plot \
+     through the CTB or STB plot style `plot_style` names, found in the plot style folders as plot \
      finds it, or with `monochrome` exactly as plot draws with no plot style named, every pen \
      black at its object's own lineweight; either way a layer that does not plot is left out, \
      and the two are not given together. The reply's `drawn_through` says which it drew \
@@ -606,7 +606,7 @@ fn render_input() -> Value {
             "width": pixels("How many pixels wide the image is, the drawing fitted inside it."),
             "height": pixels("How many pixels high the image is, the drawing fitted inside it."),
             "margin": number("The margin round the drawing's extents, in millimetres of paper. Without it, 5."),
-            "plot_style": plot_style_name("The CTB plot style to draw through, to show what prints, by its file name, such as `monochrome.ctb`, found in the plot style folders as plot finds it. Not given with `monochrome`. `null` acts as if it were left out. Without either, each object draws in its own colour."),
+            "plot_style": plot_style_name("The CTB or STB plot style to draw through, to show what prints, by its file name, such as `monochrome.ctb` or `plant.stb`, found in the plot style folders as plot finds it. Not given with `monochrome`. `null` acts as if it were left out. Without either, each object draws in its own colour."),
             "monochrome": flag("Draw exactly as plot draws with no plot style named: every pen black at its object's own lineweight. Not given with `plot_style`."),
             "plot_styles": plot_styles(),
             "fonts": fonts(),
@@ -779,8 +779,9 @@ fn plot_does() -> String {
     format!(
         "Plots a sheet description, or a DWG, to a PDF as AutoCAD plots it to PDF: the page is \
          the sheet's size, its extents at 1:1 (a sheet drawn 17 by 11 inches plots on a page of \
-         exactly 431.8 by 279.4 mm); each pen's colour and lineweight come from the CTB plot \
-         style `plot_style` names, found in the plot style folders, or with none from the \
+         exactly 431.8 by 279.4 mm); each pen's colour, screening and lineweight come from the CTB or STB plot \
+         style `plot_style` names, found in the plot style folders, or from the set's or sheet's \
+         page setup, or with none from the \
          {BUILT_IN_PLOT_STYLE} style, every pen black at its object's own lineweight; text draws \
          as AutoCAD draws it and can be searched and copied. It goes beside the source with a \
          .pdf extension unless `output` names another path, and is stamped with every file it \
@@ -802,7 +803,7 @@ fn plot_input() -> Value {
             "output": text("Where to write the PDF of one sheet description or DWG. Without it, beside the source."),
             "overwrite": flag("Replace a PDF already there, which is allowed only when AgentDrafter plotted it."),
             "clean": clean(),
-            "plot_style": plot_style_name("The CTB plot style to plot through, by its file name, such as `monochrome.ctb`, found in the plot style folders. `null` acts as if it were left out. Without it, the built-in monochrome style."),
+            "plot_style": plot_style_name("The CTB or STB plot style to plot through, by its file name, such as `monochrome.ctb` or `plant.stb`, found in the plot style folders. `null` acts as if it were left out. Without it, uses the set's or sheet page setup's plot style, or the built-in monochrome style."),
             "plot_styles": plot_styles(),
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),
@@ -1181,7 +1182,7 @@ fn change_input() -> Value {
                 "description": "Original DWG only: expected SHA-256 hex fingerprint of the original `.dwg` bytes. When given, refuses with `changed_by_hand` if the file on disk does not match, even when `allow_loss` is true. `null` acts as if it were left out.",
                 "type": ["string", "null"],
             },
-            "plot_style": plot_style_name("Original DWG only: CTB plot style file name (such as `monochrome.ctb`) for the revision PDF. `null` acts as if it were left out."),
+            "plot_style": plot_style_name("Original DWG only: CTB or STB plot style file name (such as `monochrome.ctb` or `plant.stb`) for the revision PDF. `null` acts as if it were left out."),
             "plot_styles": plot_styles(),
             "no_pdf": flag("Original DWG only: skip plotting the revision PDF beside the revision."),
             "fonts": fonts(),
@@ -2076,7 +2077,7 @@ fn no_system_fonts() -> Value {
 fn plot_styles() -> Value {
     json!({
         "description": format!(
-            "Folders to read CTB plot styles from, searched before those the \
+            "Folders to read CTB or STB plot styles from, searched before those the \
              {PLOT_STYLES_VARIABLE} environment variable lists on the machine the command runs on."
         ),
         "type": "array",

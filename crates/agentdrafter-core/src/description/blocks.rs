@@ -79,7 +79,7 @@ pub(crate) const BLOCK_KEYS: [&str; 3] = ["base_point", "objects", "parameters"]
 pub(crate) const CELL_KEY: &str = "cell";
 
 /// The keys an attribute definition takes.
-pub(crate) const ATTDEF_KEYS: [&str; 20] = [
+pub(crate) const ATTDEF_KEYS: [&str; 22] = [
     "tag",
     "prompt",
     "default",
@@ -99,12 +99,14 @@ pub(crate) const ATTDEF_KEYS: [&str; 20] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
     CELL_KEY,
 ];
 
 /// The keys a single line of text takes in a block: a sheet's, and its
 /// cell.
-pub(crate) const BLOCK_TEXT_KEYS: [&str; 14] = [
+pub(crate) const BLOCK_TEXT_KEYS: [&str; 16] = [
     "contents",
     "field",
     "position",
@@ -118,11 +120,13 @@ pub(crate) const BLOCK_TEXT_KEYS: [&str; 14] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
     CELL_KEY,
 ];
 
 /// The keys an insert takes, besides those every object on a sheet takes.
-pub(crate) const INSERT_KEYS: [&str; 14] = [
+pub(crate) const INSERT_KEYS: [&str; 16] = [
     "block",
     "position",
     "scale",
@@ -137,6 +141,8 @@ pub(crate) const INSERT_KEYS: [&str; 14] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
 
 /// The longest attribute tag AgentDrafter writes, in characters.

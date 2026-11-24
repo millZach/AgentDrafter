@@ -61,7 +61,7 @@ pub(crate) const DIMENSION_STYLE_KEYS: [&str; 26] = [
 ];
 
 /// The keys a dimension takes.
-pub(crate) const DIMENSION_KEYS: [&str; 17] = [
+pub(crate) const DIMENSION_KEYS: [&str; 19] = [
     "kind",
     "points",
     "angle",
@@ -79,6 +79,8 @@ pub(crate) const DIMENSION_KEYS: [&str; 17] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
 
 /// The keys a dimension of `kind` takes of its own, besides `kind`,

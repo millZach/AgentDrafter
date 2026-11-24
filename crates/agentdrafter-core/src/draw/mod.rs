@@ -70,8 +70,9 @@ use crate::model::block::{definition_text, Placement};
 use crate::model::leader::{arrowhead_shapes, trimmed};
 use crate::model::{
     attribute_text, Arrowhead, Block, Clip, Dimension, Insert, LaidContent, Layer, Leader,
-    Lettered, MLeader, MLeaderStyle, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3,
-    Polyline, Properties, Sheet, Table, TableStyle, CONTINUOUS, LAYER_ZERO, WHITE,
+    Lettered, MLeader, MLeaderStyle, Object, ObjectColor, ObjectLinetype, ObjectLineweight,
+    ObjectPlotStyle, ObjectTransparency, PlotArea, Point3, Polyline, Properties, Sheet, Table,
+    TableStyle, CONTINUOUS, LAYER_ZERO, WHITE,
 };
 use crate::text::placement::SheetFonts;
 
@@ -98,6 +99,7 @@ pub const DEFAULT_LINEWEIGHT: f64 = 0.25;
 pub enum PageFrom {
     Paper,
     Extents,
+    Window,
 }
 
 /// The box an output of `sheet` covers, drawn as `list`, and what it is:
@@ -105,6 +107,29 @@ pub enum PageFrom {
 /// one, and otherwise `list`'s extents. None when the sheet declares no
 /// paper and draws nothing.
 pub fn page_of(sheet: &Sheet, list: &DisplayList) -> Option<(Bounds, PageFrom)> {
+    if let Some(ps) = sheet.effective_page_setup() {
+        let effective_paper = ps.paper.as_ref().or(sheet.paper.as_ref());
+        match ps.area {
+            Some(PlotArea::Window { min, max }) => {
+                return Some((Bounds { min, max }, PageFrom::Window));
+            }
+            Some(PlotArea::Extents) => {
+                return list.extents().map(|e| (e, PageFrom::Extents));
+            }
+            Some(PlotArea::Layout) | None => {
+                if let Some(paper) = effective_paper {
+                    return Some((
+                        Bounds {
+                            min: [0.0, 0.0],
+                            max: [paper.width, paper.height],
+                        },
+                        PageFrom::Paper,
+                    ));
+                }
+                return list.extents().map(|e| (e, PageFrom::Extents));
+            }
+        }
+    }
     match &sheet.paper {
         Some(paper) => Some((
             Bounds {
@@ -272,6 +297,13 @@ pub struct Item {
     pub clip_boundary: Option<usize>,
     /// The AutoCAD colour index it draws in.
     pub color: Color,
+    /// The resolved named plot style (for STB drawings), when set on the
+    /// object or its layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_style: Option<String>,
+    /// The resolved transparency percentage (`0` opaque to `90` transparent).
+    #[serde(default, skip_serializing_if = "crate::model::page_setup::is_zero_u8")]
+    pub transparency: u8,
     pub shape: Shape,
 }
 
@@ -399,6 +431,10 @@ struct Pen<'a> {
     scale: f64,
     /// Millimetres on paper.
     lineweight: f64,
+    /// Named plot style for STB drawings.
+    plot_style: Option<&'a str>,
+    /// Transparency percentage `0..=90`.
+    transparency: u8,
 }
 
 impl Pen<'_> {
@@ -410,6 +446,8 @@ impl Pen<'_> {
         pattern: None,
         scale: 1.0,
         lineweight: DEFAULT_LINEWEIGHT,
+        plot_style: None,
+        transparency: 0,
     };
 
     /// The pattern with its lengths enlarged by the scale.
@@ -589,7 +627,12 @@ impl<'a> Drawer<'a> {
     /// How an object with `properties` on the layer named `layer` draws:
     /// with `by_block` where a property is `ByBlock`, the pen of the insert
     /// that draws it, if any.
-    fn pen(&self, layer: &str, properties: &Properties, by_block: Option<Pen<'a>>) -> Pen<'a> {
+    fn pen<'b>(
+        &'b self,
+        layer: &str,
+        properties: &'b Properties,
+        by_block: Option<Pen<'b>>,
+    ) -> Pen<'b> {
         let by_layer = self.layer_pen(layer);
         let by_block = by_block.unwrap_or(Pen::OUTSIDE_A_BLOCK);
         let color = match properties.color {
@@ -608,11 +651,23 @@ impl<'a> Drawer<'a> {
             ObjectLineweight::Default => DEFAULT_LINEWEIGHT,
             ObjectLineweight::Width(width) => width.millimetres(),
         };
+        let plot_style = match &properties.plot_style {
+            ObjectPlotStyle::ByLayer => by_layer.plot_style,
+            ObjectPlotStyle::ByBlock => by_block.plot_style,
+            ObjectPlotStyle::Named(name) => Some(name.as_str()),
+        };
+        let transparency = match properties.transparency {
+            ObjectTransparency::ByLayer => by_layer.transparency,
+            ObjectTransparency::ByBlock => by_block.transparency,
+            ObjectTransparency::Percent(p) => p,
+        };
         Pen {
             color,
             pattern,
             scale: self.sheet.ltscale * properties.linetype_scale * self.linetype_factor,
             lineweight,
+            plot_style,
+            transparency,
         }
     }
 
@@ -667,7 +722,7 @@ impl<'a> Drawer<'a> {
 
     /// How the layer named `name` draws, layer `0`'s defaults for a layer
     /// the sheet does not define.
-    fn layer_pen(&self, name: &str) -> Pen<'a> {
+    fn layer_pen<'b>(&'b self, name: &str) -> Pen<'b> {
         let layer = self.layer(name);
         Pen {
             color: Color(layer.color),
@@ -676,6 +731,8 @@ impl<'a> Drawer<'a> {
             lineweight: layer
                 .lineweight
                 .map_or(DEFAULT_LINEWEIGHT, |w| w.millimetres()),
+            plot_style: layer.plot_style.as_deref(),
+            transparency: layer.transparency,
         }
     }
 
@@ -720,7 +777,7 @@ impl<'a> Drawer<'a> {
             list.hatches_cut_short
                 .push(self.cut_short(index, object, None));
         }
-        list.add_shown(shown, index, &[], pen.color, drawn);
+        list.add_shown(shown, index, &[], pen, drawn);
     }
 
     /// Adds what an insert draws to `list`: its block's objects moved,
@@ -824,7 +881,7 @@ impl<'a> Drawer<'a> {
             let points = drawn_points.chain(drawn.reach.iter().copied());
             let had = own.into_iter().flat_map(|b| [b.min, b.max]);
             own = Bounds::of(had.chain(points.map(|p| placed.back(p))));
-            list.add_shown(shown, index, &here, pen.color, drawn);
+            list.add_shown(shown, index, &here, pen, drawn);
         }
         for (p, object) in block.objects.iter().enumerate() {
             let Object::AttributeDefinition(definition) = object else {
@@ -856,7 +913,7 @@ impl<'a> Drawer<'a> {
                     ..definition_text(definition)
                 };
                 let drawn = self.object(&Object::Text(in_block), pen, within, Some(&placed));
-                list.add_shown(shown, index, &[path, &[p]].concat(), pen.color, drawn);
+                list.add_shown(shown, index, &[path, &[p]].concat(), pen, drawn);
                 continue;
             }
             let scale = outer
@@ -880,7 +937,7 @@ impl<'a> Drawer<'a> {
                     ..Drawn::default()
                 },
             };
-            list.add_shown(shown, index, &[path, &[p]].concat(), pen.color, drawn);
+            list.add_shown(shown, index, &[path, &[p]].concat(), pen, drawn);
         }
         let b = own?;
         let corners = [b.min, [b.max[0], b.min[1]], b.max, [b.min[0], b.max[1]]];
@@ -1142,7 +1199,7 @@ impl<'a> Drawer<'a> {
             let runs = linetype::along(&landing, dashes.as_deref(), false);
             add_stroke(&mut drawn, line_pen.lineweight, runs);
         }
-        list.add_shown(shown, index, &[], line_pen.color, drawn);
+        list.add_shown(shown, index, &[], line_pen, drawn);
         match &laid.content {
             LaidContent::Text { text, .. } => {
                 let lettering = text::draw_mtext(text, self.fonts, pen.lineweight, tolerance);
@@ -1151,7 +1208,7 @@ impl<'a> Drawer<'a> {
                     runs: lettering.runs,
                     ..Drawn::default()
                 };
-                list.add_shown(shown, index, &[0], pen.color, drawn);
+                list.add_shown(shown, index, &[0], pen, drawn);
             }
             // Block content draws as an insert of its block draws, each
             // of the block's objects as its part, as an insert's are.
@@ -1172,7 +1229,7 @@ impl<'a> Drawer<'a> {
         let pen = self.pen(&leader.layer, &leader.properties, None);
         let path: Vec<Point2> = leader.path().iter().map(|&p| flat(p)).collect();
         let drawn = leader_lines(&[path], leader.arrowhead, leader.arrow_size, pen, tolerance);
-        list.add_shown(shown, index, &[], pen.color, drawn);
+        list.add_shown(shown, index, &[], pen, drawn);
         if let Some(annotation) = leader.annotation_text() {
             let lettering = text::draw_mtext(&annotation, self.fonts, pen.lineweight, tolerance);
             let drawn = Drawn {
@@ -1180,7 +1237,7 @@ impl<'a> Drawer<'a> {
                 runs: lettering.runs,
                 ..Drawn::default()
             };
-            list.add_shown(shown, index, &[0], pen.color, drawn);
+            list.add_shown(shown, index, &[0], pen, drawn);
         }
     }
 
@@ -1211,17 +1268,13 @@ impl<'a> Drawer<'a> {
             linetype: ObjectLinetype::ByLayer,
             lineweight,
             linetype_scale: 1.0,
+            plot_style: ObjectPlotStyle::ByBlock,
+            transparency: ObjectTransparency::ByBlock,
         };
-        let line_pen = self.pen(
-            &dimension.layer,
-            &block(ObjectLineweight::ByBlock),
-            Some(own),
-        );
-        let text_pen = self.pen(
-            &dimension.layer,
-            &block(ObjectLineweight::ByLayer),
-            Some(own),
-        );
+        let line_props = block(ObjectLineweight::ByBlock);
+        let text_props = block(ObjectLineweight::ByLayer);
+        let line_pen = self.pen(&dimension.layer, &line_props, Some(own));
+        let text_pen = self.pen(&dimension.layer, &text_props, Some(own));
         let laid = dimension.laid_out(&style, self.sheet.units, &|t| {
             text::mtext_box(t, self.fonts)
         });
@@ -1266,7 +1319,7 @@ impl<'a> Drawer<'a> {
                 contours: fills,
             });
         }
-        list.add_shown(shown, index, &[], line_pen.color, drawn);
+        list.add_shown(shown, index, &[], line_pen, drawn);
         let mut drawn = Drawn::default();
         if laid.lettering.is_empty() {
             let lettering =
@@ -1303,7 +1356,7 @@ impl<'a> Drawer<'a> {
             }
             add_stroke(&mut drawn, text_pen.lineweight, bars);
         }
-        list.add_shown(shown, index, &[0], text_pen.color, drawn);
+        list.add_shown(shown, index, &[0], text_pen, drawn);
     }
 
     /// Adds what a table draws to `list`, as AutoCAD 2026 laid out
@@ -1357,7 +1410,7 @@ impl<'a> Drawer<'a> {
             shown,
             index,
             &[],
-            border.color,
+            border,
             Drawn {
                 shapes: lines,
                 ..Drawn::default()
@@ -1373,7 +1426,7 @@ impl<'a> Drawer<'a> {
                 runs: lettering.runs,
                 ..Drawn::default()
             };
-            list.add_cell(shown, index, cell.at, pen.color, drawn);
+            list.add_cell(shown, index, cell.at, pen, drawn);
         }
     }
 
@@ -1415,7 +1468,7 @@ impl DisplayList {
         shown: Shown,
         index: usize,
         path: &[usize],
-        color: Color,
+        pen: Pen<'_>,
         drawn: Drawn,
     ) {
         match shown {
@@ -1425,7 +1478,7 @@ impl DisplayList {
                 }
                 self.wide_arcs
                     .extend(drawn.arcs.into_iter().map(|c| (index, c)));
-                self.add(index, path, color, drawn.shapes, drawn.reach);
+                self.add(index, path, pen, drawn.shapes, drawn.reach);
                 self.add_text(index, path, drawn.runs);
             }
             Shown::Counted => {
@@ -1437,7 +1490,7 @@ impl DisplayList {
         }
     }
 
-    /// Adds what the sheet's object at `index` draws in `color`: the
+    /// Adds what the sheet's object at `index` draws with `pen`: the
     /// object of its block at `path`, when it is an insert, as
     /// [`DisplayList::add_shown`] takes it. `reach` is a
     /// patterned hatch's boundary, which draws nothing of its own.
@@ -1445,7 +1498,7 @@ impl DisplayList {
         &mut self,
         index: usize,
         path: &[usize],
-        color: Color,
+        pen: Pen<'_>,
         shapes: Vec<Shape>,
         reach: Vec<Point2>,
     ) {
@@ -1454,6 +1507,7 @@ impl DisplayList {
         }
         self.take_in(reach);
         let (part, nested) = split_path(path);
+        let plot_style = pen.plot_style.map(str::to_owned);
         self.items.extend(shapes.into_iter().map(|shape| Item {
             object: index,
             part,
@@ -1462,7 +1516,9 @@ impl DisplayList {
             viewport: None,
             clip: None,
             clip_boundary: None,
-            color,
+            color: pen.color,
+            plot_style: plot_style.clone(),
+            transparency: pen.transparency,
             shape,
         }));
     }
@@ -1487,11 +1543,12 @@ impl DisplayList {
         shown: Shown,
         index: usize,
         cell: [usize; 2],
-        color: Color,
+        pen: Pen<'_>,
         drawn: Drawn,
     ) {
         match shown {
             Shown::Drawn => {
+                let plot_style = pen.plot_style.map(str::to_owned);
                 self.items
                     .extend(drawn.shapes.into_iter().map(|shape| Item {
                         object: index,
@@ -1501,7 +1558,9 @@ impl DisplayList {
                         viewport: None,
                         clip: None,
                         clip_boundary: None,
-                        color,
+                        color: pen.color,
+                        plot_style: plot_style.clone(),
+                        transparency: pen.transparency,
                         shape,
                     }));
                 self.text.extend(drawn.runs.into_iter().map(|run| TextRun {

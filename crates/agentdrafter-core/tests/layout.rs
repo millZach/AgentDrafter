@@ -186,7 +186,12 @@ fn a_layout_and_its_viewports_read_back_from_the_dwg() {
     let read = read_dwg(&dwg).unwrap();
     let sheet = parse_sheet_description(PANEL).unwrap();
     assert_eq!(read.objects, sheet.objects);
-    assert_eq!(read.layout, sheet.layout);
+    let read_layout = read.layout.as_ref().expect("layout read back");
+    let sheet_layout = sheet.layout.as_ref().expect("sheet layout");
+    assert_eq!(read_layout.name, sheet_layout.name);
+    assert_eq!(read_layout.paper, sheet_layout.paper);
+    assert_eq!(read_layout.paper_space, sheet_layout.paper_space);
+    assert!(read_layout.page_setup.is_some());
     assert_eq!(read.paper, sheet.paper);
     assert_eq!(
         (read.objects_not_read, read.layouts_not_read),
@@ -238,7 +243,12 @@ objects:
         let read = read_dwg(&dwg).unwrap();
         let sheet = parse_sheet_description(text).unwrap();
         assert_eq!(read.objects, sheet.objects, "{name}");
-        assert_eq!(read.layout, sheet.layout, "{name}");
+        let read_layout = read.layout.as_ref().expect("layout read back");
+        let sheet_layout = sheet.layout.as_ref().expect("sheet layout");
+        assert_eq!(read_layout.name, sheet_layout.name, "{name}");
+        assert_eq!(read_layout.paper, sheet_layout.paper, "{name}");
+        assert_eq!(read_layout.paper_space, sheet_layout.paper_space, "{name}");
+        assert!(read_layout.page_setup.is_some(), "{name}");
         assert_eq!(read.paper, sheet.paper, "{name}");
         assert_eq!(read.layouts_not_read, 0, "{name}");
     }

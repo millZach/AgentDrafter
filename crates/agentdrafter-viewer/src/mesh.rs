@@ -180,6 +180,8 @@ pub struct Mesh {
     /// The sheet of paper the drawing sits on, in drawing units:
     /// `[left, bottom, right, top]`.
     pub paper: [f64; 4],
+    /// Whether any item on the sheet has transparency > 0.
+    pub has_transparency: bool,
 }
 
 /// What a loaded sheet is, for the page.
@@ -264,12 +266,21 @@ impl Mesh {
             spans: Vec::new(),
             stencils: Vec::new(),
             paper,
+            has_transparency: sheet.display_list.items.iter().any(|i| i.transparency > 0),
         };
         let mut tessellator = FillTessellator::new();
         for (place, item) in sheet.display_list.items.iter().enumerate() {
             let place = place as u32;
-            let color = rgba(item.color);
-            let screen = screen_rgba(item.color);
+            let alpha = if item.transparency > 0 {
+                let opaque = 100_u32.saturating_sub(u32::from(item.transparency));
+                ((opaque * 255 + 50) / 100).min(255) as u8
+            } else {
+                255
+            };
+            let mut color = rgba(item.color);
+            color[3] = alpha;
+            let mut screen = screen_rgba(item.color);
+            screen[3] = alpha;
             // Cut at a clipped viewport's boundary, by the stencil.
             let cut = item
                 .clip_boundary
@@ -596,6 +607,8 @@ mod tests {
             clip: None,
             clip_boundary: None,
             color: Color(color),
+            plot_style: None,
+            transparency: 0,
             shape,
         }
     }
@@ -927,5 +940,21 @@ mod tests {
             mesh.fill_screen_colors.first(),
             Some(&[0x21, 0x28, 0x30, 255])
         );
+    }
+
+    #[test]
+    fn transparency_sets_vertex_alpha_and_flag() {
+        let mut translucent = item(
+            1,
+            Shape::Fill {
+                rule: FillRule::NonZero,
+                contours: vec![vec![[0.0, 0.0], [4.0, 0.0], [4.0, 2.0], [0.0, 2.0]]],
+            },
+        );
+        translucent.transparency = 50;
+        let mesh = Mesh::of(&sheet(vec![translucent], None));
+        assert!(mesh.has_transparency);
+        assert_eq!(mesh.fill_colors[0][3], 128);
+        assert_eq!(mesh.fill_screen_colors[0][3], 128);
     }
 }

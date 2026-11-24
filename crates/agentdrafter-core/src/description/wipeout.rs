@@ -9,13 +9,15 @@ use crate::model::{Point3, Properties, Wipeout, WipeoutFrame};
 use crate::units::Unit;
 
 /// The keys a `wipeout` object takes in a sheet description.
-pub(crate) const WIPEOUT_KEYS: [&str; 6] = [
+pub(crate) const WIPEOUT_KEYS: [&str; 8] = [
     "points",
     "layer",
     "color",
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
 
 /// The frame visibility values `wipeout_frame` accepts.

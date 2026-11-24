@@ -515,6 +515,8 @@ mod tests {
             clip: None,
             clip_boundary: None,
             color: Color(7),
+            plot_style: None,
+            transparency: 0,
             shape: Shape::Stroke {
                 lineweight,
                 runs: vec![points.to_vec()],
@@ -533,6 +535,8 @@ mod tests {
             clip: None,
             clip_boundary: None,
             color: Color(1),
+            plot_style: None,
+            transparency: 0,
             shape: Shape::Fill {
                 rule: FillRule::EvenOdd,
                 contours: vec![vec![
