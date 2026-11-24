@@ -144,8 +144,8 @@ pub use commands::{
 pub use description::{parse_block_library, parse_sheet_description, read_sheet_description};
 pub use display_list::{
     display_list, display_list_with, AttributeValue, Cloud, DisplayListReport, DisplayListRequest,
-    ObjectValues, Origin, PartFills, Preview, SheetObject, TemplateReach, WasDrawn, Written,
-    WrittenValue, DISPLAY_LIST_TOLERANCE,
+    ObjectValues, Origin, PartFills, Preview, SheetGroup, SheetObject, TemplateReach, WasDrawn,
+    Written, WrittenValue, DISPLAY_LIST_TOLERANCE,
 };
 pub use display_snaps::DisplaySnap;
 pub use draw::{
@@ -167,6 +167,7 @@ pub use looking_at::{
     LOOKING_AT_FILE, MOST_SELECTED,
 };
 pub use media::{apply_image_adjustments, decode_base64, decode_png_rgba, encode_base64};
+pub use model::Group;
 pub use model::{
     attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, DynamicParameter,
     DynamicParameterKind, DynamicValue, Insert, LookupRow, VisibilityState,
@@ -215,9 +216,10 @@ pub use plot::{
 pub use plot_style::NotFollowed;
 pub use query::{
     query, query_with, Answer, AttributeValues, BlockInserts, BlockText, End, Extents, FoundObject,
-    InsertAttributes, LayerUse, Matching, Measure, MeasuredPoint, ObjectGeometry, PageSetupUsed,
-    Query, QueryReport, QueryRequest, Selection, SelectionBox, SheetBlocks, SheetExtents,
-    SheetLayers, SheetLayout, SnapObject, SnappedFrom, ViewportFound, WrittenAt, EXTENTS_TOLERANCE,
+    GroupFound, GroupMember, InsertAttributes, LayerUse, Matching, Measure, MeasuredPoint,
+    ObjectGeometry, PageSetupUsed, Query, QueryReport, QueryRequest, Selection, SelectionBox,
+    SheetBlocks, SheetExtents, SheetGroups, SheetLayers, SheetLayout, SnapObject, SnappedFrom,
+    ViewportFound, WrittenAt, EXTENTS_TOLERANCE,
 };
 pub use render::{render, render_with, DrawnThrough, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;

@@ -623,6 +623,7 @@ pub(crate) fn plot_dwg_bytes(
         wipeout_frame: drawing.wipeout_frame,
         image_frame: drawing.image_frame,
         custom_properties: drawing.custom_properties,
+        groups: drawing.groups,
     };
     let resolved_xrefs = crate::xref::resolve_sheet_xrefs(&mut sheet, source);
     let mut files = vec![(SourceKind::of(source), source.to_path_buf(), bytes.to_vec())];

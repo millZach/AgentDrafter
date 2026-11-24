@@ -20,7 +20,7 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::array;
 use super::break_join::{compute_break, compute_join, BreakSpec};
@@ -1120,8 +1120,13 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                     Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
                     Target::Name {
                         sheet: Some(sheet), ..
+                    }
+                    | Target::Group {
+                        sheet: Some(sheet), ..
                     } => (sheet, format!("{key}.sheet")),
-                    Target::Name { sheet: None, .. } => continue,
+                    Target::Name { sheet: None, .. } | Target::Group { sheet: None, .. } => {
+                        continue
+                    }
                 };
                 if files.sheet(sheet).is_none() {
                     return Err(op_error(
@@ -1149,8 +1154,13 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                     Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
                     Target::Name {
                         sheet: Some(sheet), ..
+                    }
+                    | Target::Group {
+                        sheet: Some(sheet), ..
                     } => (sheet, format!("{key}.sheet")),
-                    Target::Name { sheet: None, .. } => continue,
+                    Target::Name { sheet: None, .. } | Target::Group { sheet: None, .. } => {
+                        continue
+                    }
                 };
                 if files.sheet(sheet).is_none() {
                     return Err(op_error(
@@ -1177,8 +1187,11 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                     Target::Id { sheet, .. } => Some((sheet, format!("{key}.id"))),
                     Target::Name {
                         sheet: Some(sheet), ..
+                    }
+                    | Target::Group {
+                        sheet: Some(sheet), ..
                     } => Some((sheet, format!("{key}.sheet"))),
-                    Target::Name { sheet: None, .. } => None,
+                    Target::Name { sheet: None, .. } | Target::Group { sheet: None, .. } => None,
                 };
                 if let Some((sheet, field)) = check {
                     if files.sheet(sheet).is_none() {
@@ -1210,8 +1223,13 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                     Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
                     Target::Name {
                         sheet: Some(sheet), ..
+                    }
+                    | Target::Group {
+                        sheet: Some(sheet), ..
                     } => (sheet, format!("{key}.sheet")),
-                    Target::Name { sheet: None, .. } => continue,
+                    Target::Name { sheet: None, .. } | Target::Group { sheet: None, .. } => {
+                        continue
+                    }
                 };
                 if files.sheet(sheet).is_none() {
                     return Err(op_error(
@@ -1289,6 +1307,18 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::BindXref {
                 to: AddTo::Sheet(sheet),
                 ..
+            }
+            | Body::AddGroup {
+                to: AddTo::Sheet(sheet),
+                ..
+            }
+            | Body::Ungroup {
+                to: AddTo::Sheet(sheet),
+                ..
+            }
+            | Body::EditGroup {
+                to: AddTo::Sheet(sheet),
+                ..
             } => (sheet, "sheet"),
             Body::Table {
                 to: AddTo::Template(written),
@@ -1307,6 +1337,18 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 ..
             }
             | Body::BindXref {
+                to: AddTo::Template(written),
+                ..
+            }
+            | Body::AddGroup {
+                to: AddTo::Template(written),
+                ..
+            }
+            | Body::Ungroup {
+                to: AddTo::Template(written),
+                ..
+            }
+            | Body::EditGroup {
                 to: AddTo::Template(written),
                 ..
             } => {
@@ -1347,8 +1389,11 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 Target::Id { sheet, .. } => (sheet, "target.id"),
                 Target::Name {
                     sheet: Some(sheet), ..
+                }
+                | Target::Group {
+                    sheet: Some(sheet), ..
                 } => (sheet, "target.sheet"),
-                Target::Name { sheet: None, .. } => continue,
+                Target::Name { sheet: None, .. } | Target::Group { sheet: None, .. } => continue,
             },
             Body::Copy { .. }
             | Body::Transform { .. }
@@ -1386,8 +1431,13 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                         Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
                         Target::Name {
                             sheet: Some(sheet), ..
+                        }
+                        | Target::Group {
+                            sheet: Some(sheet), ..
                         } => (sheet, format!("{key}.sheet")),
-                        Target::Name { sheet: None, .. } => continue,
+                        Target::Name { sheet: None, .. } | Target::Group { sheet: None, .. } => {
+                            continue
+                        }
                     };
                     if files.sheet(sheet).is_none() {
                         return Err(op_error(
@@ -1416,8 +1466,13 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                         Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
                         Target::Name {
                             sheet: Some(sheet), ..
+                        }
+                        | Target::Group {
+                            sheet: Some(sheet), ..
                         } => (sheet, format!("{key}.sheet")),
-                        Target::Name { sheet: None, .. } => continue,
+                        Target::Name { sheet: None, .. } | Target::Group { sheet: None, .. } => {
+                            continue
+                        }
                     };
                     if files.sheet(sheet).is_none() {
                         return Err(op_error(
@@ -1440,8 +1495,13 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                         Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
                         Target::Name {
                             sheet: Some(sheet), ..
+                        }
+                        | Target::Group {
+                            sheet: Some(sheet), ..
                         } => (sheet, format!("{key}.sheet")),
-                        Target::Name { sheet: None, .. } => continue,
+                        Target::Name { sheet: None, .. } | Target::Group { sheet: None, .. } => {
+                            continue
+                        }
                     };
                     if files.sheet(sheet).is_none() {
                         return Err(op_error(
@@ -1891,6 +1951,44 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         return apply_bind_xref(at, op, to, name, *mode);
     }
 
+    if let Body::AddGroup {
+        to,
+        name,
+        targets,
+        description,
+        selectable,
+    } = &op.body
+    {
+        return apply_add_group(at, op, to, name, targets, description, *selectable);
+    }
+
+    if let Body::Ungroup { to, name } = &op.body {
+        return apply_ungroup(at, op, to, name);
+    }
+
+    if let Body::EditGroup {
+        to,
+        name,
+        add,
+        remove,
+        rename,
+        description,
+        selectable,
+    } = &op.body
+    {
+        return apply_edit_group(
+            at,
+            op,
+            to,
+            name,
+            add,
+            remove,
+            rename.as_deref(),
+            description.as_deref(),
+            *selectable,
+        );
+    }
+
     if let Body::Block {
         library,
         import: Some(import),
@@ -1937,6 +2035,31 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
     if let Body::Transform { targets, by } = &op.body {
         return apply_transform(at, op, targets, by, settings);
     }
+    if let Body::Move {
+        target: target @ Target::Group { .. },
+        motion,
+    } = &op.body
+    {
+        return apply_move_group(at, op, target, motion, settings);
+    }
+    if let Body::Delete {
+        target: target @ Target::Group { .. },
+    } = &op.body
+    {
+        return apply_delete_group(at, op, target);
+    }
+    if let Body::Change {
+        target: target @ Target::Group { .. },
+        set,
+        viewport,
+        clip,
+        ..
+    } = &op.body
+    {
+        if !*viewport && clip.is_none() {
+            return apply_change_group(at, op, target, set);
+        }
+    }
 
     let target = match &op.body {
         Body::Change { target, .. }
@@ -1966,6 +2089,9 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::AttachXref { .. }
         | Body::DetachXref { .. }
         | Body::BindXref { .. }
+        | Body::AddGroup { .. }
+        | Body::Ungroup { .. }
+        | Body::EditGroup { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2249,6 +2375,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
             }
         }
         Body::Delete { .. } => {
+            let deleted_refs = deleted_member_refs(record, list, index, files.name(k));
             let kept = record.delete(list, index, op.index);
             done.ids_written = kept
                 .iter()
@@ -2258,6 +2385,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                         .map(move |&s| format!("{}/{place}", files.name(s)))
                 })
                 .collect();
+            prune_deleted_from_groups(at, file, &reach, &deleted_refs);
             done.message = format!("deletes `{id}`{template_note}");
             return Applied {
                 sheets: reach,
@@ -2455,6 +2583,9 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::AttachXref { .. }
         | Body::DetachXref { .. }
         | Body::BindXref { .. }
+        | Body::AddGroup { .. }
+        | Body::Ungroup { .. }
+        | Body::EditGroup { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -4823,6 +4954,1117 @@ fn resolve(at: &mut Attempt, target: &Target, op: &Operation) -> Result<Found, B
                 }
             }
         }
+        Target::Group { group, .. } => Err(Box::new(Applied {
+            sheets: Vec::new(),
+            outcome: Err(op_err(
+                ErrorCode::BadValue,
+                format!(
+                    "group `{group}` names a group of objects, which `{}` does not take as a \
+                     single target; target one object by its ID or name",
+                    op.spec.name
+                ),
+                "target.group",
+            )),
+            refuse: true,
+        })),
+    }
+}
+
+/// Resolves `target`, expanding `Target::Group` into all member objects of the
+/// named group on the matched sheet (looking in both template `groups:` and row
+/// `groups:`).
+fn resolve_all(
+    at: &mut Attempt,
+    target: &Target,
+    op: &Operation,
+) -> Result<Vec<Found>, Box<Applied>> {
+    let Target::Group { group, sheet } = target else {
+        return Ok(vec![resolve(at, target, op)?]);
+    };
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let rows: Vec<usize> = match sheet {
+        Some(sheet) => vec![files.sheet(sheet).expect("checked before")],
+        None => (0..files.rows.len()).collect(),
+    };
+    let mut found_groups: Vec<(usize, String, Vec<String>)> = Vec::new();
+    let mut names_on: Vec<String> = Vec::new();
+    for &k in &rows {
+        let t = files.template_of[k];
+        let mut hit: Option<(String, Vec<String>)> = None;
+        if let Ok(rec) = at.template(t) {
+            if let Some((canon, members, _, _)) = rec.group_entry(None, group) {
+                hit = Some((canon, members));
+            } else if sheet.is_some() {
+                names_on.extend(rec.group_names(None));
+            }
+        }
+        if hit.is_none() {
+            let (row_file, row_list) = files.row_list(k);
+            let row_idx = match row_list {
+                ObjectList::Row(r) => r,
+                ObjectList::Template => unreachable!(),
+            };
+            if let Ok(rec) = at.file(row_file) {
+                if let Some((canon, members, _, _)) = rec.group_entry(Some(row_idx), group) {
+                    hit = Some((canon, members));
+                } else if sheet.is_some() {
+                    names_on.extend(rec.group_names(Some(row_idx)));
+                }
+            }
+        }
+        if let Some((canon, members)) = hit {
+            found_groups.push((k, canon, members));
+        }
+    }
+    let (k, canonical, members) = match (found_groups.len(), sheet) {
+        (1, _) => found_groups.pop().expect("one"),
+        (0, Some(_)) => {
+            let k = rows[0];
+            return Err(Box::new(Applied {
+                sheets: vec![k],
+                outcome: Err(op_err(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "no group on sheet `{}` is named `{group}`; its groups: {}",
+                        files.name(k),
+                        if names_on.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            listed(&names_on)
+                        }
+                    ),
+                    "target.group",
+                )),
+                refuse: false,
+            }));
+        }
+        (0, None) => {
+            return Err(Box::new(Applied {
+                sheets: Vec::new(),
+                outcome: Err(op_err(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "no group on any sheet of the set is named `{group}`; check `query groups` \
+                         or give its sheet, one of {}",
+                        files.sheet_names()
+                    ),
+                    "target.group",
+                )),
+                refuse: true,
+            }));
+        }
+        (_, _) => {
+            let on: Vec<&str> = found_groups
+                .iter()
+                .map(|(r, _, _)| files.name(*r))
+                .collect();
+            return Err(Box::new(Applied {
+                sheets: Vec::new(),
+                outcome: Err(op_err(
+                    ErrorCode::BadValue,
+                    format!(
+                        "group `{group}` is on more than one sheet, {}; give `sheet` too, one of {}",
+                        on.join(", "),
+                        on.join(", ")
+                    ),
+                    "target",
+                )),
+                refuse: true,
+            }));
+        }
+    };
+    let objects = at.objects(k).map_err(|e| {
+        Box::new(Applied {
+            sheets: vec![k],
+            outcome: Err(e),
+            refuse: false,
+        })
+    })?;
+    let sheet_name = files.name(k);
+    let mut out: Vec<Found> = Vec::with_capacity(members.len());
+    for member in &members {
+        let matched = objects
+            .iter()
+            .find(|o| {
+                o.3.id.eq_ignore_ascii_case(member)
+                    || format!("{sheet_name}/{}", o.3.id).eq_ignore_ascii_case(member)
+            })
+            .or_else(|| {
+                let by_name: Vec<_> = objects
+                    .iter()
+                    .filter(|o| {
+                        o.3.name
+                            .as_deref()
+                            .is_some_and(|n| n.eq_ignore_ascii_case(member))
+                    })
+                    .collect();
+                (by_name.len() == 1).then(|| by_name[0])
+            });
+        if let Some((file, list, index, listed)) = matched {
+            if !out
+                .iter()
+                .any(|f| f.file == *file && f.list == *list && f.index == *index)
+            {
+                out.push(Found {
+                    row: k,
+                    file: *file,
+                    list: *list,
+                    index: *index,
+                    id: format!("{sheet_name}/{}", listed.id),
+                });
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err(Box::new(Applied {
+            sheets: vec![k],
+            outcome: Err(op_err(
+                ErrorCode::BadValue,
+                format!("group `{canonical}` has no objects on sheet `{sheet_name}`"),
+                "target.group",
+            )),
+            refuse: false,
+        }));
+    }
+    Ok(out)
+}
+
+/// Collects the local ID, full `SHEET/id`, and optional name of the object at
+/// `(list, index)` before it is deleted so any group referencing it can be
+/// pruned cleanly.
+fn deleted_member_refs(
+    record: &RecordFile,
+    list: ObjectList,
+    index: usize,
+    sheet_name: &str,
+) -> Vec<String> {
+    let mut refs = Vec::new();
+    if let Some(listed) = record.objects(list).get(index) {
+        refs.push(listed.id.clone());
+        refs.push(format!("{sheet_name}/{}", listed.id));
+        if let Some(name) = &listed.name {
+            refs.push(name.clone());
+        }
+    }
+    refs
+}
+
+/// Removes `deleted_refs` from any group in the template (if `file` is a
+/// template) and in every affected row's `groups:` mapping.
+fn prune_deleted_from_groups(
+    at: &mut Attempt,
+    file: FileRef,
+    reach: &[usize],
+    deleted_refs: &[String],
+) {
+    if deleted_refs.is_empty() {
+        return;
+    }
+    if let FileRef::Template(t) = file {
+        if let Ok(rec) = at.template(t) {
+            rec.prune_group_members(None, deleted_refs);
+        }
+    }
+    for &s in reach {
+        let (row_file, row_list) = at.files.row_list(s);
+        if let ObjectList::Row(r) = row_list {
+            let mut per_sheet_refs = deleted_refs.to_vec();
+            let sname = at.files.name(s);
+            if let Some(local) = deleted_refs.first() {
+                per_sheet_refs.push(format!("{sname}/{local}"));
+            }
+            if let Ok(rec) = at.file(row_file) {
+                rec.prune_group_members(Some(r), &per_sheet_refs);
+            }
+        }
+    }
+}
+
+/// Resolves a list of targets for `add_group` / `edit_group`, returning local
+/// member IDs written into YAML (each target's local ID on the sheet/template).
+fn resolve_group_member_ids(
+    at: &mut Attempt,
+    op: &Operation,
+    to: &AddTo,
+    targets: &[(Target, String)],
+    reach: &[usize],
+) -> Result<Vec<String>, Box<Applied>> {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let mut ids: Vec<String> = Vec::with_capacity(targets.len());
+    for (target, key) in targets {
+        let expanded = resolve_all(at, target, op).map_err(|a| Box::new(keyed(*a, op, key)))?;
+        for f in expanded {
+            match to {
+                AddTo::Template(written) => {
+                    let t = files.template(written).expect("checked before");
+                    if f.file != FileRef::Template(t) {
+                        return Err(Box::new(Applied {
+                            sheets: reach.to_vec(),
+                            outcome: Err(op_err(
+                                ErrorCode::BadValue,
+                                format!(
+                                    "`{}` is not written in template `{written}`; a template group \
+                                     may only hold objects of that template",
+                                    f.id
+                                ),
+                                key,
+                            )),
+                            refuse: false,
+                        }));
+                    }
+                }
+                AddTo::Sheet(sheet) => {
+                    let k = files.sheet(sheet).expect("checked before");
+                    if f.row != k {
+                        return Err(Box::new(Applied {
+                            sheets: reach.to_vec(),
+                            outcome: Err(op_err(
+                                ErrorCode::BadValue,
+                                format!(
+                                    "`{}` is on sheet `{}`, not `{sheet}`; every object in a \
+                                     group must be on the same sheet",
+                                    f.id,
+                                    files.name(f.row)
+                                ),
+                                key,
+                            )),
+                            refuse: false,
+                        }));
+                    }
+                }
+            }
+            let local =
+                f.id.split_once(ID_SEPARATOR)
+                    .map_or(f.id.as_str(), |(_, rest)| rest)
+                    .to_owned();
+            if !ids
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&local))
+            {
+                ids.push(local);
+            }
+        }
+    }
+    Ok(ids)
+}
+
+fn empty_done(record: PathBuf, message: String) -> Done {
+    Done {
+        record,
+        id: None,
+        before: None,
+        after: None,
+        row_value: None,
+        row_values: Vec::new(),
+        ids_written: Vec::new(),
+        inserts: Vec::new(),
+        attributes_removed: Vec::new(),
+        imported: None,
+        copies: Vec::new(),
+        copy_sheets: Vec::new(),
+        transformed: Vec::new(),
+        created_row_values: Vec::new(),
+        replacements: Vec::new(),
+        attributes_set: Vec::new(),
+        split_id: None,
+        deleted: Vec::new(),
+        created: Vec::new(),
+        snapped: Vec::new(),
+        message,
+    }
+}
+
+fn apply_add_group(
+    at: &mut Attempt,
+    op: &Operation,
+    to: &AddTo,
+    name: &str,
+    targets: &[(Target, String)],
+    description: &str,
+    selectable: bool,
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let (file, row_opt, reach, where_note) = match to {
+        AddTo::Template(written) => {
+            let t = files.template(written).expect("checked before");
+            let sheets = files.templates[t].sheets.clone();
+            let note = format!("in template `{written}`");
+            (FileRef::Template(t), None, sheets, note)
+        }
+        AddTo::Sheet(sheet) => {
+            let k = files.sheet(sheet).expect("checked before");
+            let (row_file, row_list) = files.row_list(k);
+            let r = match row_list {
+                ObjectList::Row(r) => r,
+                ObjectList::Template => unreachable!(),
+            };
+            let note = format!("on sheet `{}`", files.name(k));
+            (row_file, Some(r), vec![k], note)
+        }
+    };
+    if let Some(refusal) = many_paths(files, file, op, "template") {
+        return refusal;
+    }
+    // Check uniqueness across template and affected sheet row(s).
+    for &s in &reach {
+        let t = files.template_of[s];
+        if let Ok(rec) = at.template(t) {
+            if rec.group_entry(None, name).is_some() {
+                return Applied {
+                    sheets: reach,
+                    outcome: Err(op_err(
+                        ErrorCode::DuplicateName,
+                        format!(
+                            "group `{name}` already exists on sheet `{}`'s template",
+                            files.name(s)
+                        ),
+                        "name",
+                    )),
+                    refuse: false,
+                };
+            }
+        }
+        let (rf, rl) = files.row_list(s);
+        if let ObjectList::Row(r) = rl {
+            if let Ok(rec) = at.file(rf) {
+                if rec.group_entry(Some(r), name).is_some() {
+                    return Applied {
+                        sheets: reach,
+                        outcome: Err(op_err(
+                            ErrorCode::DuplicateName,
+                            format!("group `{name}` already exists on sheet `{}`", files.name(s)),
+                            "name",
+                        )),
+                        refuse: false,
+                    };
+                }
+            }
+        }
+    }
+    let member_ids = match resolve_group_member_ids(at, op, to, targets, &reach) {
+        Ok(ids) => ids,
+        Err(applied) => return *applied,
+    };
+    let mut keys = Map::new();
+    keys.insert(
+        "objects".to_owned(),
+        Value::Array(member_ids.iter().cloned().map(Value::String).collect()),
+    );
+    if !description.is_empty() {
+        keys.insert(
+            "description".to_owned(),
+            Value::String(description.to_owned()),
+        );
+    }
+    if !selectable {
+        keys.insert("selectable".to_owned(), Value::Bool(false));
+    }
+    let record = match at.file(file) {
+        Ok(r) => r,
+        Err(e) => {
+            return Applied {
+                sheets: reach,
+                outcome: Err(e),
+                refuse: false,
+            }
+        }
+    };
+    let path = record.path.clone();
+    let res = match row_opt {
+        None => record.table_add(
+            crate::description::group::GROUPS_KEY,
+            &crate::description::group::GROUP_KEYS,
+            name,
+            &keys,
+        ),
+        Some(r) => record.row_group_add(r, name, &keys),
+    };
+    if let Err(e) = res {
+        return Applied {
+            sheets: reach,
+            outcome: Err(op_err(e.code, e.message, "")),
+            refuse: false,
+        };
+    }
+    Applied {
+        sheets: reach,
+        outcome: Ok(empty_done(
+            path,
+            format!(
+                "adds group `{name}` with {} object{} {where_note}",
+                member_ids.len(),
+                if member_ids.len() == 1 { "" } else { "s" }
+            ),
+        )),
+        refuse: false,
+    }
+}
+
+struct LocatedGroup {
+    file: FileRef,
+    row: Option<usize>,
+    reach: Vec<usize>,
+    canonical: String,
+    members: Vec<String>,
+}
+
+/// Locates an existing group for `ungroup` / `edit_group` given `to` (template
+/// or sheet): a `template` target checks only the template; a `sheet` target
+/// checks the sheet's row first and falls back to its template.
+fn locate_group(
+    at: &mut Attempt,
+    op: &Operation,
+    to: &AddTo,
+    name: &str,
+) -> Result<LocatedGroup, Box<Applied>> {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    match to {
+        AddTo::Template(written) => {
+            let t = files.template(written).expect("checked before");
+            let sheets = files.templates[t].sheets.clone();
+            let rec = at.template(t).map_err(|e| {
+                Box::new(Applied {
+                    sheets: sheets.clone(),
+                    outcome: Err(e),
+                    refuse: false,
+                })
+            })?;
+            let Some((canon, objs, _, _)) = rec.group_entry(None, name) else {
+                let names = rec.group_names(None);
+                let hint = if names.is_empty() {
+                    "none".to_owned()
+                } else {
+                    names.join(", ")
+                };
+                return Err(Box::new(Applied {
+                    sheets,
+                    outcome: Err(op_err(
+                        ErrorCode::UnknownName,
+                        format!(
+                            "template `{written}` has no group named `{name}`; its groups: {hint}"
+                        ),
+                        "name",
+                    )),
+                    refuse: false,
+                }));
+            };
+            Ok(LocatedGroup {
+                file: FileRef::Template(t),
+                row: None,
+                reach: sheets,
+                canonical: canon,
+                members: objs,
+            })
+        }
+        AddTo::Sheet(sheet) => {
+            let k = files.sheet(sheet).expect("checked before");
+            let (row_file, row_list) = files.row_list(k);
+            let r = match row_list {
+                ObjectList::Row(r) => r,
+                ObjectList::Template => unreachable!(),
+            };
+            let mut names = Vec::new();
+            if let Ok(rec) = at.file(row_file) {
+                if let Some((canon, objs, _, _)) = rec.group_entry(Some(r), name) {
+                    return Ok(LocatedGroup {
+                        file: row_file,
+                        row: Some(r),
+                        reach: vec![k],
+                        canonical: canon,
+                        members: objs,
+                    });
+                }
+                names.extend(rec.group_names(Some(r)));
+            }
+            let t = files.template_of[k];
+            let t_sheets = files.templates[t].sheets.clone();
+            if let Ok(rec) = at.template(t) {
+                if let Some((canon, objs, _, _)) = rec.group_entry(None, name) {
+                    return Ok(LocatedGroup {
+                        file: FileRef::Template(t),
+                        row: None,
+                        reach: t_sheets,
+                        canonical: canon,
+                        members: objs,
+                    });
+                }
+                names.extend(rec.group_names(None));
+            }
+            let hint = if names.is_empty() {
+                "none".to_owned()
+            } else {
+                names.join(", ")
+            };
+            Err(Box::new(Applied {
+                sheets: vec![k],
+                outcome: Err(op_err(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "sheet `{}` has no group named `{name}`; its groups: {hint}",
+                        files.name(k)
+                    ),
+                    "name",
+                )),
+                refuse: false,
+            }))
+        }
+    }
+}
+
+fn apply_ungroup(at: &mut Attempt, op: &Operation, to: &AddTo, name: &str) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let LocatedGroup {
+        file,
+        row: row_opt,
+        reach,
+        canonical,
+        ..
+    } = match locate_group(at, op, to, name) {
+        Ok(v) => v,
+        Err(a) => return *a,
+    };
+    if let Some(refusal) = many_paths(files, file, op, "template") {
+        return refusal;
+    }
+    let record = match at.file(file) {
+        Ok(r) => r,
+        Err(e) => {
+            return Applied {
+                sheets: reach,
+                outcome: Err(e),
+                refuse: false,
+            }
+        }
+    };
+    let path = record.path.clone();
+    let res = match row_opt {
+        None => record.table_delete(crate::description::group::GROUPS_KEY, &canonical),
+        Some(r) => record.row_group_delete(r, &canonical),
+    };
+    if let Err(e) = res {
+        return Applied {
+            sheets: reach,
+            outcome: Err(op_err(e.code, e.message, "")),
+            refuse: false,
+        };
+    }
+    Applied {
+        sheets: reach,
+        outcome: Ok(empty_done(path, format!("ungroups `{canonical}`"))),
+        refuse: false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_edit_group(
+    at: &mut Attempt,
+    op: &Operation,
+    to: &AddTo,
+    name: &str,
+    add: &[(Target, String)],
+    remove: &[(Target, String)],
+    rename: Option<&str>,
+    description: Option<&str>,
+    selectable: Option<bool>,
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let LocatedGroup {
+        file,
+        row: row_opt,
+        reach,
+        canonical,
+        mut members,
+    } = match locate_group(at, op, to, name) {
+        Ok(v) => v,
+        Err(a) => return *a,
+    };
+    if let Some(refusal) = many_paths(files, file, op, "template") {
+        return refusal;
+    }
+    let effective_to = match file {
+        FileRef::Template(t) => AddTo::Template(files.templates[t].written.clone()),
+        FileRef::Rows(_) => to.clone(),
+    };
+    if let Some(new_name) = rename {
+        if !new_name.eq_ignore_ascii_case(&canonical) {
+            for &s in &reach {
+                let t = files.template_of[s];
+                let clash =
+                    at.template(t)
+                        .ok()
+                        .is_some_and(|r| r.group_entry(None, new_name).is_some())
+                        || {
+                            let (rf, rl) = files.row_list(s);
+                            match rl {
+                                ObjectList::Row(r) => at.file(rf).ok().is_some_and(|rec| {
+                                    rec.group_entry(Some(r), new_name).is_some()
+                                }),
+                                ObjectList::Template => false,
+                            }
+                        };
+                if clash {
+                    return Applied {
+                        sheets: reach,
+                        outcome: Err(op_err(
+                            ErrorCode::DuplicateName,
+                            format!(
+                                "group `{new_name}` already exists on sheet `{}`",
+                                files.name(s)
+                            ),
+                            "rename",
+                        )),
+                        refuse: false,
+                    };
+                }
+            }
+        }
+    }
+    if !add.is_empty() {
+        let to_add = match resolve_group_member_ids(at, op, &effective_to, add, &reach) {
+            Ok(ids) => ids,
+            Err(a) => return *a,
+        };
+        for id in to_add {
+            if !members.iter().any(|m| m.eq_ignore_ascii_case(&id)) {
+                members.push(id);
+            }
+        }
+    }
+    if !remove.is_empty() {
+        let to_remove = match resolve_group_member_ids(at, op, &effective_to, remove, &reach) {
+            Ok(ids) => ids,
+            Err(a) => return *a,
+        };
+        let sheet_name = files.name(reach[0]);
+        members.retain(|m| {
+            !to_remove.iter().any(|r| {
+                m.eq_ignore_ascii_case(r) || m.eq_ignore_ascii_case(&format!("{sheet_name}/{r}"))
+            })
+        });
+        if members.is_empty() {
+            return Applied {
+                sheets: reach,
+                outcome: Err(op_err(
+                    ErrorCode::BadValue,
+                    format!(
+                        "removing those objects leaves group `{canonical}` empty; use `ungroup` \
+                         to remove the group"
+                    ),
+                    "remove",
+                )),
+                refuse: false,
+            };
+        }
+    }
+    let mut set = Map::new();
+    if !add.is_empty() || !remove.is_empty() {
+        set.insert(
+            "objects".to_owned(),
+            Value::Array(members.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if let Some(desc) = description {
+        set.insert("description".to_owned(), Value::String(desc.to_owned()));
+    }
+    if let Some(sel) = selectable {
+        set.insert("selectable".to_owned(), Value::Bool(sel));
+    }
+    let record = match at.file(file) {
+        Ok(r) => r,
+        Err(e) => {
+            return Applied {
+                sheets: reach,
+                outcome: Err(e),
+                refuse: false,
+            }
+        }
+    };
+    let path = record.path.clone();
+    if !set.is_empty() {
+        let res = match row_opt {
+            None => record.table_change(
+                crate::description::group::GROUPS_KEY,
+                &crate::description::group::GROUP_KEYS,
+                &canonical,
+                &set,
+            ),
+            Some(r) => record.row_group_change(r, &canonical, &set),
+        };
+        if let Err(e) = res {
+            return Applied {
+                sheets: reach,
+                outcome: Err(op_err(e.code, e.message, "")),
+                refuse: false,
+            };
+        }
+    }
+    let final_name = if let Some(new_name) = rename {
+        let res = match row_opt {
+            None => {
+                record.table_rename(crate::description::group::GROUPS_KEY, &canonical, new_name)
+            }
+            Some(r) => record.row_group_rename(r, &canonical, new_name),
+        };
+        if let Err(e) = res {
+            return Applied {
+                sheets: reach,
+                outcome: Err(op_err(e.code, e.message, "rename")),
+                refuse: false,
+            };
+        }
+        new_name.to_owned()
+    } else {
+        canonical.clone()
+    };
+    Applied {
+        sheets: reach,
+        outcome: Ok(empty_done(
+            path,
+            format!(
+                "edits group `{final_name}` ({} object{})",
+                members.len(),
+                if members.len() == 1 { "" } else { "s" }
+            ),
+        )),
+        refuse: false,
+    }
+}
+
+fn apply_move_group(
+    at: &mut Attempt,
+    op: &Operation,
+    target: &Target,
+    motion: &Motion,
+    settings: &Settings,
+) -> Applied {
+    let files = at.files;
+    let units = files.units;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let found = match resolve_all(at, target, op) {
+        Ok(v) => v,
+        Err(a) => return *a,
+    };
+    let mut reach_set: BTreeSet<usize> = BTreeSet::new();
+    for f in &found {
+        reach_set.extend(at.reach(f.file, f.row));
+    }
+    let reach: Vec<usize> = reach_set.into_iter().collect();
+    for f in &found {
+        if let Some(layer) = locked_layer(at, f) {
+            return Applied {
+                sheets: reach,
+                outcome: Err(op_err(
+                    ErrorCode::Locked,
+                    format!(
+                        "`{}` sits on layer `{layer}`, which is locked; unlock it first",
+                        f.id
+                    ),
+                    "target",
+                )),
+                refuse: false,
+            };
+        }
+        if let Some(refusal) = many_paths(files, f.file, op, "target") {
+            return refusal;
+        }
+    }
+    let mut snapped: Vec<SnapResolved> = Vec::new();
+    let by = match motion {
+        Motion::By(by) => *by,
+        Motion::Between { from, to } => {
+            let snaps: Vec<&PointSnap> = [&**from, &**to]
+                .into_iter()
+                .filter_map(|p| match p {
+                    OpPoint::Snap(snap) => Some(snap),
+                    OpPoint::At(_) => None,
+                })
+                .collect();
+            let mut resolved = match snapped_points(at, op, &reach, &snaps, settings) {
+                Ok(v) => v.into_iter(),
+                Err(e) => {
+                    return Applied {
+                        sheets: reach,
+                        outcome: Err(e),
+                        refuse: false,
+                    }
+                }
+            };
+            let mut point_of = |p: &OpPoint| match p {
+                OpPoint::At(at) => *at,
+                OpPoint::Snap(_) => {
+                    let (pt, s) = resolved.next().expect("one per snap");
+                    snapped.push(s);
+                    pt
+                }
+            };
+            let (a, b) = (point_of(from), point_of(to));
+            [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+        }
+    };
+    let first_path = match at.file(found[0].file) {
+        Ok(r) => r.path.clone(),
+        Err(e) => {
+            return Applied {
+                sheets: reach,
+                outcome: Err(e),
+                refuse: false,
+            }
+        }
+    };
+    let mut transformed = Vec::with_capacity(found.len());
+    for f in &found {
+        let record = match at.file(f.file) {
+            Ok(r) => r,
+            Err(e) => {
+                return Applied {
+                    sheets: reach,
+                    outcome: Err(e),
+                    refuse: false,
+                }
+            }
+        };
+        if let Err(e) = record.move_by(f.list, f.index, by, units, op.index) {
+            return Applied {
+                sheets: reach,
+                outcome: Err(op_err(e.code, e.message, "")),
+                refuse: false,
+            };
+        }
+        transformed.push((f.id.clone(), at.reach(f.file, f.row)));
+    }
+    let by_text: Vec<String> = by
+        .iter()
+        .map(|d| crate::description::number_text(*d))
+        .collect();
+    let mut done = empty_done(
+        first_path,
+        format!(
+            "moves {} ({} object{}) by [{}] ({units}){}",
+            target.words(),
+            found.len(),
+            if found.len() == 1 { "" } else { "s" },
+            by_text.join(", "),
+            snapped_words(&snapped)
+        ),
+    );
+    done.transformed = transformed;
+    done.snapped = snapped;
+    Applied {
+        sheets: reach,
+        outcome: Ok(done),
+        refuse: false,
+    }
+}
+
+fn apply_delete_group(at: &mut Attempt, op: &Operation, target: &Target) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let found = match resolve_all(at, target, op) {
+        Ok(v) => v,
+        Err(a) => return *a,
+    };
+    let mut reach_set: BTreeSet<usize> = BTreeSet::new();
+    for f in &found {
+        reach_set.extend(at.reach(f.file, f.row));
+    }
+    let reach: Vec<usize> = reach_set.into_iter().collect();
+    for f in &found {
+        if let Some(layer) = locked_layer(at, f) {
+            return Applied {
+                sheets: reach,
+                outcome: Err(op_err(
+                    ErrorCode::Locked,
+                    format!(
+                        "`{}` sits on layer `{layer}`, which is locked; unlock it first",
+                        f.id
+                    ),
+                    "target",
+                )),
+                refuse: false,
+            };
+        }
+        if let Some(refusal) = many_paths(files, f.file, op, "target") {
+            return refusal;
+        }
+    }
+    let first_path = match at.file(found[0].file) {
+        Ok(r) => r.path.clone(),
+        Err(e) => {
+            return Applied {
+                sheets: reach,
+                outcome: Err(e),
+                refuse: false,
+            }
+        }
+    };
+    let deleted_in_order: Vec<(String, Vec<usize>)> = found
+        .iter()
+        .map(|f| (f.id.clone(), at.reach(f.file, f.row)))
+        .collect();
+    // Delete in descending index order so indices in the same list never shift
+    // before earlier targets are removed.
+    let mut order: Vec<&Found> = found.iter().collect();
+    order.sort_by_key(|f| std::cmp::Reverse(f.index));
+    let mut ids_written: Vec<String> = Vec::new();
+    for f in order {
+        let on = at.reach(f.file, f.row);
+        let deleted_refs = match at.file(f.file) {
+            Ok(rec) => deleted_member_refs(rec, f.list, f.index, files.name(f.row)),
+            Err(e) => {
+                return Applied {
+                    sheets: reach,
+                    outcome: Err(e),
+                    refuse: false,
+                }
+            }
+        };
+        let kept = match at.file(f.file) {
+            Ok(rec) => rec.delete(f.list, f.index, op.index),
+            Err(e) => {
+                return Applied {
+                    sheets: reach,
+                    outcome: Err(e),
+                    refuse: false,
+                }
+            }
+        };
+        for place in kept {
+            for &s in &on {
+                ids_written.push(format!("{}/{place}", files.name(s)));
+            }
+        }
+        prune_deleted_from_groups(at, f.file, &on, &deleted_refs);
+    }
+    let mut done = empty_done(
+        first_path,
+        format!(
+            "deletes {} ({} object{})",
+            target.words(),
+            found.len(),
+            if found.len() == 1 { "" } else { "s" }
+        ),
+    );
+    done.ids_written = ids_written;
+    done.deleted = deleted_in_order;
+    Applied {
+        sheets: reach,
+        outcome: Ok(done),
+        refuse: false,
+    }
+}
+
+fn apply_change_group(
+    at: &mut Attempt,
+    op: &Operation,
+    target: &Target,
+    set: &Map<String, Value>,
+) -> Applied {
+    let files = at.files;
+    let units = files.units;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let found = match resolve_all(at, target, op) {
+        Ok(v) => v,
+        Err(a) => return *a,
+    };
+    let mut reach_set: BTreeSet<usize> = BTreeSet::new();
+    for f in &found {
+        reach_set.extend(at.reach(f.file, f.row));
+    }
+    let reach: Vec<usize> = reach_set.into_iter().collect();
+    for f in &found {
+        if let Some(layer) = locked_layer(at, f) {
+            return Applied {
+                sheets: reach,
+                outcome: Err(op_err(
+                    ErrorCode::Locked,
+                    format!(
+                        "`{}` sits on layer `{layer}`, which is locked; unlock it first",
+                        f.id
+                    ),
+                    "target",
+                )),
+                refuse: false,
+            };
+        }
+        if let Some(refusal) = many_paths(files, f.file, op, "target") {
+            return refusal;
+        }
+    }
+    let first_path = match at.file(found[0].file) {
+        Ok(r) => r.path.clone(),
+        Err(e) => {
+            return Applied {
+                sheets: reach,
+                outcome: Err(e),
+                refuse: false,
+            }
+        }
+    };
+    let mut transformed = Vec::with_capacity(found.len());
+    for f in &found {
+        let record = match at.file(f.file) {
+            Ok(r) => r,
+            Err(e) => {
+                return Applied {
+                    sheets: reach,
+                    outcome: Err(e),
+                    refuse: false,
+                }
+            }
+        };
+        if let Err(e) = record.change(f.list, f.index, set, units, op.index) {
+            return Applied {
+                sheets: reach,
+                outcome: Err(op_err(
+                    e.code,
+                    e.message,
+                    e.field.as_deref().unwrap_or("set"),
+                )),
+                refuse: false,
+            };
+        }
+        transformed.push((f.id.clone(), at.reach(f.file, f.row)));
+    }
+    let keys: Vec<&str> = set.keys().map(String::as_str).collect();
+    let mut done = empty_done(
+        first_path,
+        format!(
+            "sets {} of {} ({} object{})",
+            keys.join(", "),
+            target.words(),
+            found.len(),
+            if found.len() == 1 { "" } else { "s" }
+        ),
+    );
+    done.transformed = transformed;
+    Applied {
+        sheets: reach,
+        outcome: Ok(done),
+        refuse: false,
     }
 }
 
@@ -5057,8 +6299,20 @@ fn found_objects<'t>(
     let mut found: Vec<(Found, &str)> = Vec::with_capacity(targets.len());
     let mut lookup: Option<Applied> = None;
     for (target, key) in targets {
-        match resolve(at, target, op) {
-            Ok(object) => found.push((object, key)),
+        let from_group = matches!(target, Target::Group { .. });
+        match resolve_all(at, target, op) {
+            Ok(objects) => {
+                for object in objects {
+                    if from_group
+                        && found.iter().any(|(g, _)| {
+                            (g.file, g.list, g.index) == (object.file, object.list, object.index)
+                        })
+                    {
+                        continue;
+                    }
+                    found.push((object, key));
+                }
+            }
             Err(applied) if applied.refuse => return Err(Box::new(keyed(*applied, op, key))),
             Err(applied) => {
                 lookup.get_or_insert_with(|| keyed(*applied, op, key));
@@ -6039,8 +7293,20 @@ fn apply_draw_order(
     let mut found: Vec<(Found, &str)> = Vec::with_capacity(targets.len());
     let mut lookup: Option<Applied> = None;
     for (target, key) in targets {
-        match resolve(at, target, op) {
-            Ok(object) => found.push((object, key)),
+        let from_group = matches!(target, Target::Group { .. });
+        match resolve_all(at, target, op) {
+            Ok(objects) => {
+                for object in objects {
+                    if from_group
+                        && found.iter().any(|(g, _)| {
+                            (g.file, g.list, g.index) == (object.file, object.list, object.index)
+                        })
+                    {
+                        continue;
+                    }
+                    found.push((object, key));
+                }
+            }
             Err(applied) if applied.refuse => return keyed(*applied, op, key),
             Err(applied) => {
                 lookup.get_or_insert_with(|| keyed(*applied, op, key));
@@ -9401,61 +10667,68 @@ fn apply_explode(
     let mut found: Vec<(Found, &str)> = Vec::with_capacity(targets.len());
     let mut all_reach: BTreeSet<usize> = BTreeSet::new();
     for (t, key) in targets {
-        let f = match resolve(at, t, op) {
-            Ok(f) => f,
+        let from_group = matches!(t, Target::Group { .. });
+        let expanded = match resolve_all(at, t, op) {
+            Ok(v) => v,
             Err(applied) => return keyed(*applied, op, key),
         };
-        let reach_f = at.reach(f.file, f.row);
-        all_reach.extend(reach_f.iter().copied());
-        if let Some(refusal) = many_paths(files, f.file, op, key) {
-            return refusal;
-        }
-        if let Some(first) = found.first() {
-            if f.row != first.0.row {
+        for f in expanded {
+            let reach_f = at.reach(f.file, f.row);
+            all_reach.extend(reach_f.iter().copied());
+            if let Some(refusal) = many_paths(files, f.file, op, key) {
+                return refusal;
+            }
+            if let Some(first) = found.first() {
+                if f.row != first.0.row {
+                    return fail(
+                        all_reach.into_iter().collect(),
+                        op_err(
+                            ErrorCode::BadValue,
+                            format!(
+                                "`{}` is on sheet `{}`, not `{}` — explode objects on one sheet at \
+                                 a time",
+                                f.id,
+                                files.name(f.row),
+                                files.name(first.0.row)
+                            ),
+                            key,
+                        ),
+                    );
+                }
+            }
+            if found.iter().any(|(prev, _)| {
+                prev.file == f.file && prev.list == f.list && prev.index == f.index
+            }) {
+                if from_group {
+                    continue;
+                }
                 return fail(
                     all_reach.into_iter().collect(),
                     op_err(
                         ErrorCode::BadValue,
+                        format!("`{}` is listed more than once to explode", f.id),
+                        key,
+                    ),
+                );
+            }
+            if let Some(layer) =
+                batch_object_locked_layer(at, files, f.row, f.file, f.list, f.index)
+            {
+                return fail(
+                    all_reach.into_iter().collect(),
+                    op_err(
+                        ErrorCode::Locked,
                         format!(
-                            "`{}` is on sheet `{}`, not `{}` — explode objects on one sheet at a \
-                             time",
-                            f.id,
-                            files.name(f.row),
-                            files.name(first.0.row)
+                            "`{}` is on layer `{layer}`, which is locked; unlock it first with \
+                             change_layer, set: {{\"locked\": false}}",
+                            f.id
                         ),
                         key,
                     ),
                 );
             }
+            found.push((f, key.as_str()));
         }
-        if found
-            .iter()
-            .any(|(prev, _)| prev.file == f.file && prev.list == f.list && prev.index == f.index)
-        {
-            return fail(
-                all_reach.into_iter().collect(),
-                op_err(
-                    ErrorCode::BadValue,
-                    format!("`{}` is listed more than once to explode", f.id),
-                    key,
-                ),
-            );
-        }
-        if let Some(layer) = batch_object_locked_layer(at, files, f.row, f.file, f.list, f.index) {
-            return fail(
-                all_reach.into_iter().collect(),
-                op_err(
-                    ErrorCode::Locked,
-                    format!(
-                        "`{}` is on layer `{layer}`, which is locked; unlock it first with \
-                         change_layer, set: {{\"locked\": false}}",
-                        f.id
-                    ),
-                    key,
-                ),
-            );
-        }
-        found.push((f, key.as_str()));
     }
 
     let reach: Vec<usize> = all_reach.into_iter().collect();
@@ -9598,6 +10871,10 @@ fn apply_explode(
 
     let mut ids_written: Vec<String> = Vec::new();
     for (file, list, idx, on) in to_delete {
+        let deleted_refs = match at.file(file) {
+            Ok(rec) => deleted_member_refs(rec, list, idx, files.name(on[0])),
+            Err(e) => return fail(reach, e),
+        };
         let rec = match at.file(file) {
             Ok(r) => r,
             Err(e) => return fail(reach, e),
@@ -9608,6 +10885,7 @@ fn apply_explode(
                 ids_written.push(format!("{}/{place}", files.name(s)));
             }
         }
+        prune_deleted_from_groups(at, file, &on, &deleted_refs);
     }
 
     let first_deleted_id = (plan.len() == 1).then(|| plan[0].full_id.clone());
@@ -10782,10 +12060,13 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         Target::Id { sheet, .. }
         | Target::Name {
             sheet: Some(sheet), ..
+        }
+        | Target::Group {
+            sheet: Some(sheet), ..
         } => files
             .sheet(sheet)
             .is_some_and(|s| s == k || files.template_of[s] == files.template_of[k]),
-        Target::Name { sheet: None, .. } => true,
+        Target::Name { sheet: None, .. } | Target::Group { sheet: None, .. } => true,
     };
     match &op.body {
         Body::Add {
@@ -10835,6 +12116,18 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::DetachXref {
             to: AddTo::Template(written),
             ..
+        }
+        | Body::AddGroup {
+            to: AddTo::Template(written),
+            ..
+        }
+        | Body::Ungroup {
+            to: AddTo::Template(written),
+            ..
+        }
+        | Body::EditGroup {
+            to: AddTo::Template(written),
+            ..
         } => files.template(written) == Some(files.template_of[k]),
         Body::BindXref {
             to: AddTo::Template(written),
@@ -10860,6 +12153,18 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
             ..
         }
         | Body::DetachXref {
+            to: AddTo::Sheet(sheet),
+            ..
+        }
+        | Body::AddGroup {
+            to: AddTo::Sheet(sheet),
+            ..
+        }
+        | Body::Ungroup {
+            to: AddTo::Sheet(sheet),
+            ..
+        }
+        | Body::EditGroup {
             to: AddTo::Sheet(sheet),
             ..
         } => files
@@ -10994,7 +12299,10 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
         Body::Table { .. }
         | Body::AttachXref { .. }
         | Body::DetachXref { .. }
-        | Body::BindXref { .. } => {
+        | Body::BindXref { .. }
+        | Body::AddGroup { .. }
+        | Body::Ungroup { .. }
+        | Body::EditGroup { .. } => {
             let key = rest.rsplit('.').next().unwrap_or("");
             if key.is_empty() {
                 "name".to_owned()
@@ -11358,6 +12666,9 @@ fn target_words(op: &Operation) -> String {
         Body::AttachXref { xref, .. } => format!("external reference `{}`", xref.name),
         Body::DetachXref { name, .. } | Body::BindXref { name, .. } => {
             format!("external reference `{name}`")
+        }
+        Body::AddGroup { name, .. } | Body::Ungroup { name, .. } | Body::EditGroup { name, .. } => {
+            format!("group `{name}`")
         }
         Body::Block {
             import: Some(import),

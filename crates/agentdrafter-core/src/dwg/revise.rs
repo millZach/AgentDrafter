@@ -2016,7 +2016,274 @@ impl RevisionSession {
                 }
             }
         }
+        // Remove the deleted entity handle from any ACAD_GROUP that referenced it
+        // so the group never carries a dangling handle.
+        let mut touched_groups: Vec<u64> = Vec::new();
+        for obj in self.drawing.objects.values_mut() {
+            if let ObjectType::Group(g) = obj {
+                let before = g.entities.len();
+                g.entities.retain(|h| *h != handle);
+                if g.entities.len() != before {
+                    touched_groups.push(g.handle.value());
+                }
+            }
+        }
+        for gh in touched_groups {
+            self.expected_non_graphical_changed.insert(gh);
+        }
         Ok(record)
+    }
+
+    /// Returns the uppercase hex handles of all entities belonging to the named
+    /// group in `ACAD_GROUP` (case-insensitive lookup), or an `UnknownName`
+    /// error listing existing group names if no such group exists.
+    pub(crate) fn group_member_handles(&self, name: &str) -> Result<(String, Vec<String>), Error> {
+        let Some((canonical, group_handle)) = super::group::find_group(&self.drawing, name) else {
+            let names = super::group::group_names(&self.drawing);
+            let available = if names.is_empty() {
+                "the drawing has no groups".to_owned()
+            } else {
+                format!("the drawing's groups: {}", names.join(", "))
+            };
+            return Err(Error::new(
+                ErrorCode::UnknownName,
+                format!("unknown group `{name}`; {available}"),
+            ));
+        };
+        let mut handles = Vec::new();
+        if let Some(ObjectType::Group(g)) = self.drawing.objects.get(&group_handle) {
+            for h in &g.entities {
+                if self.drawing.get_entity(*h).is_some() {
+                    let hex = handle_text(*h);
+                    if !handles.contains(&hex) {
+                        handles.push(hex);
+                    }
+                }
+            }
+        }
+        Ok((canonical, handles))
+    }
+
+    /// Creates a new named group in `ACAD_GROUP` containing the entities at
+    /// `member_hexes` (`GROUP` / `G`).
+    pub(crate) fn create_group(
+        &mut self,
+        name: &str,
+        description: &str,
+        selectable: bool,
+        member_hexes: &[String],
+    ) -> Result<MutationHandles, Error> {
+        if super::group::find_group(&self.drawing, name).is_some() {
+            return Err(Error::new(
+                ErrorCode::DuplicateName,
+                format!("the drawing already has a group named `{name}`"),
+            ));
+        }
+        let mut member_handles: Vec<Handle> = Vec::with_capacity(member_hexes.len());
+        for hex in member_hexes {
+            let handle = parse_hex_handle(hex)?;
+            let _ = self.ensure_sheet_entity(handle, hex)?;
+            if !member_handles.contains(&handle) {
+                member_handles.push(handle);
+            }
+        }
+        let root_dict_h = self.drawing.header.named_objects_dict_handle;
+        let had_acad_group = super::group::acad_group_dict_handle(&self.drawing);
+        let group_handle = self
+            .drawing
+            .create_group(name, &member_handles)
+            .map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not create group `{name}`: {e}"),
+                )
+            })?;
+        if let Some(ObjectType::Group(g)) = self.drawing.objects.get_mut(&group_handle) {
+            g.description = description.to_owned();
+            g.selectable = selectable;
+        }
+        if let Some(dict_h) = super::group::acad_group_dict_handle(&self.drawing) {
+            if had_acad_group.is_none() {
+                if !root_dict_h.is_null() {
+                    self.expected_non_graphical_changed
+                        .insert(root_dict_h.value());
+                }
+                self.expected_non_graphical_added.insert(dict_h.value());
+            } else {
+                self.expected_non_graphical_changed.insert(dict_h.value());
+            }
+        }
+        self.expected_non_graphical_added
+            .insert(group_handle.value());
+        let mut record = MutationHandles::default();
+        record.added.push(handle_text(group_handle));
+        // Clear raw_record on each member entity so the updated group reactor
+        // is serialized when saving R2004+ DWG revisions.
+        for &mh in &member_handles {
+            if let Some(mut ent) = self.drawing.get_entity(mh).cloned() {
+                clear_raw_record(&mut ent);
+                self.commit_edited_entity(mh, ent);
+            }
+        }
+        Ok(record)
+    }
+
+    /// Removes the named group from `ACAD_GROUP` and detaches its reactor from
+    /// all member entities without deleting any member entities (`UNGROUP`).
+    pub(crate) fn ungroup(&mut self, name: &str) -> Result<(String, MutationHandles), Error> {
+        let Some((canonical, group_handle)) = super::group::find_group(&self.drawing, name) else {
+            let names = super::group::group_names(&self.drawing);
+            let available = if names.is_empty() {
+                "the drawing has no groups".to_owned()
+            } else {
+                format!("the drawing's groups: {}", names.join(", "))
+            };
+            return Err(Error::new(
+                ErrorCode::UnknownName,
+                format!("unknown group `{name}`; {available}"),
+            ));
+        };
+        let member_handles: Vec<Handle> = match self.drawing.objects.get(&group_handle) {
+            Some(ObjectType::Group(g)) => g.entities.clone(),
+            _ => Vec::new(),
+        };
+        if let Some(dict_h) = super::group::acad_group_dict_handle(&self.drawing) {
+            if self.drawing.header.acad_group_dict_handle.is_null() {
+                self.drawing.header.acad_group_dict_handle = dict_h;
+            }
+            self.expected_non_graphical_changed.insert(dict_h.value());
+        }
+        self.expected_non_graphical_removed
+            .insert(group_handle.value());
+        self.drawing.remove_group(&canonical);
+        for mh in member_handles {
+            if let Some(mut ent) = self.drawing.get_entity(mh).cloned() {
+                ent.common_mut().reactors.retain(|r| *r != group_handle);
+                clear_raw_record(&mut ent);
+                self.commit_edited_entity(mh, ent);
+            }
+        }
+        let mut record = MutationHandles::default();
+        record.deleted.push(handle_text(group_handle));
+        Ok((canonical, record))
+    }
+
+    /// Edits a named group in `ACAD_GROUP`: adds/removes member entities,
+    /// renames it, or updates its description/selectability (`GROUPEDIT`).
+    pub(crate) fn edit_group(
+        &mut self,
+        name: &str,
+        add_hexes: &[String],
+        remove_hexes: &[String],
+        rename: Option<&str>,
+        description: Option<&str>,
+        selectable: Option<bool>,
+    ) -> Result<(String, MutationHandles), Error> {
+        let Some((canonical, group_handle)) = super::group::find_group(&self.drawing, name) else {
+            let names = super::group::group_names(&self.drawing);
+            let available = if names.is_empty() {
+                "the drawing has no groups".to_owned()
+            } else {
+                format!("the drawing's groups: {}", names.join(", "))
+            };
+            return Err(Error::new(
+                ErrorCode::UnknownName,
+                format!("unknown group `{name}`; {available}"),
+            ));
+        };
+        if let Some(new_name) = rename {
+            if !new_name.eq_ignore_ascii_case(&canonical)
+                && super::group::find_group(&self.drawing, new_name).is_some()
+            {
+                return Err(Error::new(
+                    ErrorCode::DuplicateName,
+                    format!("the drawing already has a group named `{new_name}`"),
+                ));
+            }
+        }
+        let mut to_add: Vec<Handle> = Vec::with_capacity(add_hexes.len());
+        for hex in add_hexes {
+            let h = parse_hex_handle(hex)?;
+            let _ = self.ensure_sheet_entity(h, hex)?;
+            if !to_add.contains(&h) {
+                to_add.push(h);
+            }
+        }
+        let mut to_remove: Vec<Handle> = Vec::with_capacity(remove_hexes.len());
+        for hex in remove_hexes {
+            let h = parse_hex_handle(hex)?;
+            if !to_remove.contains(&h) {
+                to_remove.push(h);
+            }
+        }
+        if let Some(dict_h) = super::group::acad_group_dict_handle(&self.drawing) {
+            if self.drawing.header.acad_group_dict_handle.is_null() {
+                self.drawing.header.acad_group_dict_handle = dict_h;
+            }
+        }
+        for &mh in &to_add {
+            self.drawing
+                .add_entity_to_group(&canonical, mh)
+                .map_err(|e| {
+                    Error::new(
+                        ErrorCode::DwgWrite,
+                        format!("could not add object to group `{canonical}`: {e}"),
+                    )
+                })?;
+            if let Some(mut ent) = self.drawing.get_entity(mh).cloned() {
+                clear_raw_record(&mut ent);
+                self.commit_edited_entity(mh, ent);
+            }
+        }
+        for &mh in &to_remove {
+            self.drawing
+                .remove_entity_from_group(&canonical, mh)
+                .map_err(|e| {
+                    Error::new(
+                        ErrorCode::DwgWrite,
+                        format!("could not remove object from group `{canonical}`: {e}"),
+                    )
+                })?;
+            if let Some(mut ent) = self.drawing.get_entity(mh).cloned() {
+                ent.common_mut().reactors.retain(|r| *r != group_handle);
+                clear_raw_record(&mut ent);
+                self.commit_edited_entity(mh, ent);
+            }
+        }
+        let final_name = if let Some(new_name) = rename {
+            if let Some(dict_h) = super::group::acad_group_dict_handle(&self.drawing) {
+                if let Some(ObjectType::Dictionary(dict)) = self.drawing.objects.get_mut(&dict_h) {
+                    if let Some((k, _)) = dict
+                        .entries
+                        .iter_mut()
+                        .find(|(k, h)| *h == group_handle || k.eq_ignore_ascii_case(&canonical))
+                    {
+                        *k = new_name.to_owned();
+                    }
+                    self.expected_non_graphical_changed.insert(dict_h.value());
+                }
+            }
+            if let Some(ObjectType::Group(g)) = self.drawing.objects.get_mut(&group_handle) {
+                g.name = new_name.to_owned();
+                g.unnamed = false;
+            }
+            new_name.to_owned()
+        } else {
+            canonical
+        };
+        if let Some(ObjectType::Group(g)) = self.drawing.objects.get_mut(&group_handle) {
+            if let Some(desc) = description {
+                g.description = desc.to_owned();
+            }
+            if let Some(sel) = selectable {
+                g.selectable = sel;
+            }
+        }
+        self.expected_non_graphical_changed
+            .insert(group_handle.value());
+        let mut record = MutationHandles::default();
+        record.touched.push(handle_text(group_handle));
+        Ok((final_name, record))
     }
 
     /// Adds a new layer to `drawing.layers`, refusing duplicates (case-insensitively)

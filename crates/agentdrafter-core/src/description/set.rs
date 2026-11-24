@@ -32,10 +32,19 @@ pub(crate) const SETTINGS_KEYS: [&str; 6] =
 pub(crate) const ROWS_FILE_KEYS: [&str; 1] = ["rows"];
 
 /// The keys a row takes.
-pub(crate) const ROW_KEYS: [&str; 4] = ["sheet", "template", "values", ROW_OBJECTS_KEY];
+pub(crate) const ROW_KEYS: [&str; 5] = [
+    "sheet",
+    "template",
+    "values",
+    ROW_OBJECTS_KEY,
+    ROW_GROUPS_KEY,
+];
 
 /// The key of a row's own objects, which are on its sheet alone.
 pub(crate) const ROW_OBJECTS_KEY: &str = "objects";
+
+/// The key of a row's own groups, which are on its sheet alone.
+pub(crate) const ROW_GROUPS_KEY: &str = super::group::GROUPS_KEY;
 
 /// The longest sheet name, in characters: with `.dwg` after it, its file
 /// name is at most 255 characters, as Windows allows.
@@ -126,6 +135,9 @@ pub(crate) struct Row {
     /// this sheet alone, after its template's objects. They are read with
     /// the sheet, since what they may name is in its template.
     pub(super) objects: Vec<Node>,
+    /// The row's own groups, on this sheet alone, referencing objects on the
+    /// sheet (from its template or from this row).
+    pub(super) groups: Vec<super::group::RawGroup>,
 }
 
 /// One value of a row: the text a template's `{row: NAME}` stands for.
@@ -633,6 +645,10 @@ fn row(
         .to_vec(),
         None => Vec::new(),
     };
+    let groups = match fields.get(ROW_GROUPS_KEY) {
+        Some(node) => super::group::read_raw_groups(node, &fields.path_of(ROW_GROUPS_KEY))?,
+        None => Vec::new(),
+    };
     Ok(Row {
         sheet,
         template: template.to_owned(),
@@ -642,6 +658,7 @@ fn row(
         at,
         values,
         objects,
+        groups,
     })
 }
 

@@ -96,7 +96,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, image_frame_key, custom_properties_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, xrefs_key, objects_key, paper_key, page_setup_key, layout_key, layouts_key] =
+    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, image_frame_key, custom_properties_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, xrefs_key, objects_key, groups_key, paper_key, page_setup_key, layout_key, layouts_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -145,6 +145,7 @@ pub fn sheet_description_schema() -> Value {
                 "type": "array",
                 "items": { "oneOf": object_choices(&OBJECT_TYPES) },
             },
+            groups_key: super::group::groups_property(),
             paper_key: super::paper::paper_property(),
             page_setup_key: { "$ref": "#/$defs/page_setup" },
             layout_key: super::layout::layout_property(),
@@ -211,6 +212,7 @@ fn sheet_defs() -> Map<String, Value> {
         .join(", ");
     defs.insert("object_space".into(), super::layout::space_property());
     defs.insert("xref".into(), super::xref::xref_def());
+    defs.insert("group".into(), super::group::group_def());
     defs.insert(
         "object_copy_of".into(),
         optional_text(json!({

@@ -47,6 +47,7 @@ mod block;
 mod dimension;
 mod dynamic_block;
 mod field;
+mod group;
 mod hatch;
 mod ids;
 mod import;
@@ -773,6 +774,14 @@ pub(crate) fn write_new_sheet_as(
                 pending.is_mtext,
             )?;
         }
+    }
+    if !sheet.groups.is_empty() {
+        let index_to_handle: Vec<Option<acadrust::types::Handle>> = record
+            .objects
+            .iter()
+            .map(|w| id_to_handle.get(&w.id.to_lowercase()).copied())
+            .collect();
+        group::write_groups(&mut drawing, &sheet.groups, &index_to_handle)?;
     }
     write_document(&drawing, format)
 }
@@ -1631,6 +1640,7 @@ fn contents(
     } else {
         crate::model::PlotStyleMode::ColorDependent
     };
+    let groups = group::read_groups(drawing, &handles);
     Ok(DrawingContents {
         dwg_version: raw_version.unwrap_or_else(|| drawing.version.to_string()),
         units,
@@ -1658,6 +1668,7 @@ fn contents(
         wipeout_frame: wipeout::read_wipeout_frame(drawing),
         image_frame: media::read_image_frame(drawing),
         custom_properties: field::read_custom_properties(drawing),
+        groups,
         layout,
         other_layouts,
         opens_on: layout::opened_on(drawing).map(|(name, _)| name),
@@ -3682,6 +3693,7 @@ mod tests {
             wipeout_frame: crate::model::WipeoutFrame::Off,
             image_frame: crate::model::WipeoutFrame::Off,
             custom_properties: std::collections::BTreeMap::new(),
+            groups: Vec::new(),
         }
     }
 
