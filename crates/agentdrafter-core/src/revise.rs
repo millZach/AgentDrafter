@@ -22,6 +22,7 @@ use crate::build::is_same_file;
 use crate::build::FileId;
 use crate::change::array::{self, At, Place};
 use crate::change::break_join::{compute_break, compute_join, BreakSpec};
+use crate::change::explode::compute_explode;
 use crate::change::fillet_chamfer::{
     compute_chamfer_polyline, compute_chamfer_two, compute_fillet_polyline, compute_fillet_two,
     ChamferSpec,
@@ -138,6 +139,8 @@ pub struct RevisionOperationOutcome {
     pub deleted: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub transformed: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub created: Vec<String>,
 }
 
 /// The active working revision a chained revision was built on top of.
@@ -1025,6 +1028,41 @@ fn objects_changed_from_outcomes(outcomes: &[RevisionOperationOutcome]) -> Vec<O
             }
             continue;
         }
+        if !outcome.created.is_empty()
+            || !outcome.deleted.is_empty()
+            || !outcome.transformed.is_empty()
+        {
+            for id in &outcome.deleted {
+                out.push(ObjectChanged {
+                    id: id.clone(),
+                    how: HowChanged::Deleted,
+                });
+            }
+            for id in &outcome.created {
+                out.push(ObjectChanged {
+                    id: id.clone(),
+                    how: HowChanged::Added,
+                });
+            }
+            for id in &outcome.transformed {
+                out.push(ObjectChanged {
+                    id: id.clone(),
+                    how: HowChanged::Changed,
+                });
+            }
+            if let Some(id) = outcome.id.as_ref() {
+                if !outcome.deleted.contains(id)
+                    && !outcome.created.contains(id)
+                    && !outcome.transformed.contains(id)
+                {
+                    out.push(ObjectChanged {
+                        id: id.clone(),
+                        how: HowChanged::Changed,
+                    });
+                }
+            }
+            continue;
+        }
         let Some(id) = outcome.id.as_ref() else {
             continue;
         };
@@ -1685,6 +1723,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::AddRevisionCloud {
@@ -1923,6 +1962,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::DrawOrder { targets, order } => {
@@ -2022,6 +2062,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::TextToFront { to, which } => {
@@ -2073,6 +2114,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::SetAttribute {
@@ -2114,6 +2156,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::SetBlockState { target, state } => {
@@ -2181,6 +2224,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::ReplaceText {
@@ -2406,6 +2450,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::SetAttributes {
@@ -2512,6 +2557,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::Offset {
@@ -2608,6 +2654,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::Trim {
@@ -2735,6 +2782,7 @@ fn apply_revision_op(
                 split_id: split_full_id,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::Extend {
@@ -2834,6 +2882,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::Fillet { mode, radius } => {
@@ -2960,6 +3009,7 @@ fn apply_revision_op(
                 split_id: split_full_id,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::Join { targets, tolerance } => {
@@ -3069,6 +3119,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: deleted_ids,
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::Stretch {
@@ -3256,6 +3307,120 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed,
+                created: Vec::new(),
+            })
+        }
+        Body::Explode { targets, id_prefix } => {
+            let loaded = ensure_record(session, cached, source, sheet_name)?;
+            let fonts = SheetFonts::find(&loaded.record.sheet, settings);
+
+            struct PendingExplodeOrig {
+                handle: String,
+                id: String,
+                space: TargetSpace,
+                pieces: Vec<Object>,
+            }
+
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut plan: Vec<PendingExplodeOrig> = Vec::with_capacity(targets.len());
+            for (target, key) in targets {
+                let found = resolve_target(session, loaded, target, sheet_name, op, key)?;
+                if !seen.insert(found.handle.clone()) {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::BadValue,
+                        format!("`{}` is listed more than once to explode", found.id),
+                        key,
+                    ));
+                }
+                check_unlocked_with_children(session, &found.handle, &found.id, op, key)?;
+                let obj_idx = (0..loaded.record.sheet.objects.len())
+                    .find(|&i| loaded.record.handle_of(i) == Some(found.handle.as_str()))
+                    .ok_or_else(|| {
+                        op_error(
+                            index,
+                            op_name,
+                            ErrorCode::UnknownName,
+                            format!("could not read `{}` to explode it", found.id),
+                            key,
+                        )
+                    })?;
+                let obj = &loaded.record.sheet.objects[obj_idx];
+                let pieces = compute_explode(obj, &loaded.record.sheet, &fonts)
+                    .map_err(|e| op_error(index, op_name, e.code, e.message, key))?;
+                let space = session.space_of_handle(&found.handle)?;
+                plan.push(PendingExplodeOrig {
+                    handle: found.handle,
+                    id: found.id,
+                    space,
+                    pieces,
+                });
+            }
+
+            let start_of = |t: &crate::text::Text| fonts.start(t);
+            let mut handles_touched = Vec::new();
+            let mut handles_added = Vec::new();
+            let mut handles_deleted = Vec::new();
+            let mut created = Vec::new();
+            let mut deleted = Vec::new();
+            let mut seq = 1usize;
+
+            for item in plan {
+                let del = session.delete_object(&item.handle)?;
+                handles_touched.extend(del.touched);
+                handles_deleted.extend(del.deleted);
+                deleted.push(item.id);
+                for piece in &item.pieces {
+                    let explicit_local = id_prefix.as_ref().map(|p| {
+                        let s = format!("{p}-{seq}");
+                        seq += 1;
+                        s
+                    });
+                    let (new_hex, added) = session.add_object(
+                        piece,
+                        &item.space,
+                        sheet_name,
+                        explicit_local.as_deref(),
+                        None,
+                        &start_of,
+                    )?;
+                    handles_touched.extend(added.touched);
+                    handles_added.extend(added.added);
+                    let new_id = match explicit_local {
+                        Some(explicit) => format!("{sheet_name}/{explicit}"),
+                        None => handle_id(sheet_name, &new_hex),
+                    };
+                    created.push(new_id);
+                }
+            }
+
+            let first_deleted = (deleted.len() == 1).then(|| deleted[0].clone());
+            let message = format!(
+                "explodes {} object{} into {} object{}",
+                deleted.len(),
+                if deleted.len() == 1 { "" } else { "s" },
+                created.len(),
+                if created.len() == 1 { "" } else { "s" }
+            );
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message,
+                id: first_deleted,
+                handle: None,
+                handles_touched,
+                handles_added,
+                handles_deleted,
+                copies: Vec::new(),
+                snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
+                split_id: None,
+                deleted,
+                transformed: Vec::new(),
+                created,
             })
         }
         Body::Change {
@@ -3334,6 +3499,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::Move { target, motion } => {
@@ -3365,6 +3531,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::Delete { target } => {
@@ -3391,6 +3558,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::Transform { targets, by } => {
@@ -3461,6 +3629,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::Copy { targets, pattern } => {
@@ -3657,6 +3826,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::Table {
@@ -3698,6 +3868,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         Body::Table {
@@ -3743,6 +3914,7 @@ fn apply_revision_op(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         _ => Err(op_error(
@@ -4226,6 +4398,7 @@ fn apply_original_corner(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
         CornerMode::TwoObjects {
@@ -4393,6 +4566,7 @@ fn apply_original_corner(
                 split_id: None,
                 deleted: Vec::new(),
                 transformed: Vec::new(),
+                created: Vec::new(),
             })
         }
     }

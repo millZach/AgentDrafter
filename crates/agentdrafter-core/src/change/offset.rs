@@ -1452,9 +1452,162 @@ pub(crate) fn object_to_record_keys(
             push_common_keys(&mut keys, &rc.layer, &rc.properties, id, name, space);
             ("revision_cloud", keys)
         }
-        _ => unreachable!(
-            "object_to_record_keys only produces curve, solid, wipeout or revision_cloud objects"
-        ),
+        Object::Donut(d) => {
+            keys.insert("center".to_owned(), pt_json(d.center));
+            keys.insert("inside_diameter".to_owned(), json!(d.inside_diameter));
+            keys.insert("outside_diameter".to_owned(), json!(d.outside_diameter));
+            push_common_keys(&mut keys, &d.layer, &d.properties, id, name, space);
+            ("donut", keys)
+        }
+        Object::Text(t) => {
+            keys.insert("contents".to_owned(), Value::String(t.contents.clone()));
+            keys.insert("position".to_owned(), pt_json(t.position));
+            keys.insert("height".to_owned(), json!(t.height));
+            if t.style != crate::text::STANDARD {
+                keys.insert("style".to_owned(), Value::String(t.style.clone()));
+            }
+            if (t.width_factor - 1.0).abs() > 1e-12 {
+                keys.insert("width_factor".to_owned(), json!(t.width_factor));
+            }
+            if t.rotation.abs() > 1e-12 {
+                keys.insert("rotation".to_owned(), json!(t.rotation));
+            }
+            if t.justify != crate::text::Justify::Left {
+                keys.insert(
+                    "justify".to_owned(),
+                    Value::String(t.justify.name().to_owned()),
+                );
+            }
+            push_common_keys(&mut keys, &t.layer, &t.properties, id, name, space);
+            ("text", keys)
+        }
+        Object::MText(t) => {
+            keys.insert("contents".to_owned(), Value::String(t.contents.clone()));
+            keys.insert("position".to_owned(), pt_json(t.position));
+            keys.insert("height".to_owned(), json!(t.height));
+            if t.width > 0.0 {
+                keys.insert("width".to_owned(), json!(t.width));
+            }
+            if t.style != crate::text::STANDARD {
+                keys.insert("style".to_owned(), Value::String(t.style.clone()));
+            }
+            if let Some(wf) = t.width_factor {
+                keys.insert("width_factor".to_owned(), json!(wf));
+            }
+            if t.rotation.abs() > 1e-12 {
+                keys.insert("rotation".to_owned(), json!(t.rotation));
+            }
+            if t.justify != crate::text::Attachment::TopLeft {
+                keys.insert(
+                    "justify".to_owned(),
+                    Value::String(t.justify.name().to_owned()),
+                );
+            }
+            push_common_keys(&mut keys, &t.layer, &t.properties, id, name, space);
+            ("mtext", keys)
+        }
+        Object::Hatch(h) => {
+            keys.insert("pattern".to_owned(), Value::String(h.pattern.name.clone()));
+            if !h.is_solid() {
+                if (h.scale - 1.0).abs() > 1e-12 {
+                    keys.insert("scale".to_owned(), json!(h.scale));
+                }
+                if h.angle.abs() > 1e-12 {
+                    keys.insert("angle".to_owned(), json!(h.angle));
+                }
+                if h.origin != [0.0, 0.0] {
+                    keys.insert("origin".to_owned(), json!(h.origin));
+                }
+            }
+            let boundary: Vec<Value> = h
+                .boundary
+                .iter()
+                .map(|lp| match lp {
+                    crate::model::HatchLoop::Polyline { points } => json!({
+                        "polyline": {
+                            "points": points.iter().map(|&p| pt_json(p)).collect::<Vec<_>>()
+                        }
+                    }),
+                    crate::model::HatchLoop::Edges(edges) => {
+                        let es: Vec<Value> = edges
+                            .iter()
+                            .map(|e| match *e {
+                                crate::model::HatchEdge::Line { from, to } => json!({
+                                    "line": { "from": pt_json(from), "to": pt_json(to) }
+                                }),
+                                crate::model::HatchEdge::Arc {
+                                    center,
+                                    radius,
+                                    start_angle,
+                                    end_angle,
+                                } => json!({
+                                    "arc": {
+                                        "center": pt_json(center),
+                                        "radius": radius,
+                                        "start_angle": start_angle,
+                                        "end_angle": end_angle
+                                    }
+                                }),
+                            })
+                            .collect();
+                        json!({ "edges": es })
+                    }
+                })
+                .collect();
+            keys.insert("boundary".to_owned(), Value::Array(boundary));
+            push_common_keys(&mut keys, &h.layer, &h.properties, id, name, space);
+            ("hatch", keys)
+        }
+        Object::Insert(ins) => {
+            keys.insert("block".to_owned(), Value::String(ins.block.clone()));
+            keys.insert("position".to_owned(), pt_json(ins.position));
+            if (ins.scale - 1.0).abs() > 1e-12 {
+                keys.insert("scale".to_owned(), json!(ins.scale));
+            }
+            if ins.rotation.abs() > 1e-12 {
+                keys.insert("rotation".to_owned(), json!(ins.rotation));
+            }
+            if ins.mirrored {
+                keys.insert("mirrored".to_owned(), Value::Bool(true));
+            }
+            if ins.readable_attributes {
+                keys.insert("readable_attributes".to_owned(), Value::Bool(true));
+            }
+            if !ins.attributes.is_empty() {
+                let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
+                for att in &ins.attributes {
+                    if let Some((_, vals)) = grouped.iter_mut().find(|(t, _)| t == &att.tag) {
+                        vals.push(att.value.clone());
+                    } else {
+                        grouped.push((att.tag.clone(), vec![att.value.clone()]));
+                    }
+                }
+                let mut att_map = Map::new();
+                for (tag, vals) in grouped {
+                    if vals.len() == 1 {
+                        att_map.insert(tag, Value::String(vals.into_iter().next().unwrap()));
+                    } else {
+                        att_map.insert(
+                            tag,
+                            Value::Array(vals.into_iter().map(Value::String).collect()),
+                        );
+                    }
+                }
+                keys.insert("attributes".to_owned(), Value::Object(att_map));
+            }
+            if !ins.state.is_empty() {
+                let mut state_map = Map::new();
+                for (k, v) in &ins.state {
+                    if let Ok(jv) = serde_json::to_value(v) {
+                        state_map.insert(k.clone(), jv);
+                    }
+                }
+                keys.insert("state".to_owned(), Value::Object(state_map));
+            }
+            push_common_keys(&mut keys, &ins.layer, &ins.properties, id, name, space);
+            ("insert", keys)
+        }
+        _ => unreachable!("object_to_record_keys only produces drawn or insert objects"),
     }
 }
 
