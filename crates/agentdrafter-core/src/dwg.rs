@@ -50,6 +50,7 @@ mod ids;
 mod import;
 mod layout;
 mod leader;
+mod page_setup;
 mod revise;
 mod table;
 mod text;
@@ -205,10 +206,19 @@ pub(crate) fn write_new_sheet(
     if has_revcloud {
         block::register_named_application(&mut drawing, REVCLOUD_APPLICATION)?;
     }
+    let has_layer_transparency = sheet.layers.iter().any(|l| l.transparency > 0);
+    if has_layer_transparency {
+        block::register_named_application(&mut drawing, page_setup::LAYER_TRANSPARENCY_APP)?;
+    }
     dimension::prepare(&mut drawing, sheet)?;
     // Layers, linetypes, text styles and applications take their handles
     // before the blocks and objects take theirs.
     drawing.assign_table_entry_handles();
+    let named_plot_styles = sheet.uses_named_plot_styles();
+    if named_plot_styles {
+        drawing.header.plotstyle_mode = false;
+        page_setup::assign_layer_plot_styles(&mut drawing, &sheet.layers);
+    }
     let has_wipeout = sheet
         .objects
         .iter()
@@ -228,6 +238,13 @@ pub(crate) fn write_new_sheet(
         for object in &master.objects {
             let mut dwg_object = dwg_object(object, start_of, &sheet.blocks)?;
             dwg_object.common_mut().owner_handle = owner;
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    dwg_object.common_mut(),
+                    &object.properties().plot_style,
+                );
+            }
             drawing.add_entity(dwg_object).map_err(|e| {
                 Error::new(
                     ErrorCode::DwgWrite,
@@ -301,6 +318,13 @@ pub(crate) fn write_new_sheet(
             t.layer.clone_into(&mut common.layer);
             set_properties(common, &t.properties);
             ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    dwg_table.common_mut(),
+                    &t.properties.plot_style,
+                );
+            }
             let handle = add_to(&mut drawing, dwg_table, paper).map_err(|e| {
                 Error::new(
                     ErrorCode::DwgWrite,
@@ -332,6 +356,13 @@ pub(crate) fn write_new_sheet(
             m.layer.clone_into(&mut common.layer);
             set_properties(common, &m.properties);
             ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    dwg_mleader.common_mut(),
+                    &m.properties.plot_style,
+                );
+            }
             let handle = add_to(&mut drawing, dwg_mleader, paper).map_err(|e| {
                 Error::new(
                     ErrorCode::DwgWrite,
@@ -364,6 +395,13 @@ pub(crate) fn write_new_sheet(
             d.layer.clone_into(&mut common.layer);
             set_properties(common, &d.properties);
             ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    dwg_dimension.common_mut(),
+                    &d.properties.plot_style,
+                );
+            }
             let handle = add_to(&mut drawing, dwg_dimension, paper).map_err(|e| {
                 Error::new(
                     ErrorCode::DwgWrite,
@@ -380,6 +418,13 @@ pub(crate) fn write_new_sheet(
             l.layer.clone_into(&mut common.layer);
             set_properties(common, &l.properties);
             ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    dwg_leader.common_mut(),
+                    &l.properties.plot_style,
+                );
+            }
             let added = |e| {
                 Error::new(
                     ErrorCode::DwgWrite,
@@ -390,6 +435,13 @@ pub(crate) fn write_new_sheet(
             if let Some(mut text) = annotation {
                 l.layer.clone_into(&mut text.common.layer);
                 set_properties(&mut text.common, &l.properties);
+                if named_plot_styles {
+                    page_setup::set_entity_plot_style(
+                        &mut drawing,
+                        &mut text.common,
+                        &l.properties.plot_style,
+                    );
+                }
                 let text = add_to(&mut drawing, EntityType::MText(Box::new(text)), paper)
                     .map_err(added)?;
                 leader::link_annotation(&mut drawing, handle, text);
@@ -423,6 +475,13 @@ pub(crate) fn write_new_sheet(
                 &written.id,
                 written.name.as_deref(),
             );
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    &mut dwg_ins.common,
+                    &insert.properties.plot_style,
+                );
+            }
             if definition.is_dynamic()
                 && (!insert.state.is_empty() || dwg_ins.block_name != insert.block)
             {
@@ -477,6 +536,13 @@ pub(crate) fn write_new_sheet(
             &written.id,
             written.name.as_deref(),
         );
+        if named_plot_styles {
+            page_setup::set_entity_plot_style(
+                &mut drawing,
+                dwg_object.common_mut(),
+                &object.properties().plot_style,
+            );
+        }
         let handle = add_to(&mut drawing, dwg_object, paper).map_err(|e| {
             Error::new(
                 ErrorCode::DwgWrite,
@@ -602,12 +668,20 @@ fn add_viewport(
             format!("could not add a viewport to layout `{layout}`: {e}"),
         )
     };
+    let named_plot_styles = !drawing.header.plotstyle_mode;
     let boundary = match &viewport.clip {
         Some(clip) => {
             let mut boundary = layout::dwg_boundary(clip);
             let common = boundary.common_mut();
             viewport.layer.clone_into(&mut common.layer);
             set_properties(common, &viewport.properties);
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    drawing,
+                    boundary.common_mut(),
+                    &viewport.properties.plot_style,
+                );
+            }
             Some(
                 drawing
                     .add_entity_to_layout(boundary, layout)
@@ -638,6 +712,13 @@ fn add_viewport(
     viewport.layer.clone_into(&mut common.layer);
     set_properties(common, &viewport.properties);
     ids::write_id_and_name(common, sheet_name, id, name);
+    if named_plot_styles {
+        page_setup::set_entity_plot_style(
+            drawing,
+            dwg_viewport.common_mut(),
+            &viewport.properties.plot_style,
+        );
+    }
     let handle = drawing
         .add_entity_to_layout(dwg_viewport, layout)
         .map_err(failed)?;
@@ -676,6 +757,9 @@ fn set_layer_properties(dwg_layer: &mut DwgLayer, layer: &Layer) {
         Some(weight) => LineWeight::Value(weight.hundredths()),
         None => LineWeight::Default,
     };
+    if layer.transparency > 0 {
+        dwg_layer.transparency = page_setup::dwg_transparency_from_percent(layer.transparency);
+    }
 }
 
 /// The DWG object for one of ours, on its layer, with its own colour,
@@ -793,12 +877,24 @@ pub(super) fn set_properties(common: &mut EntityCommon, properties: &Properties)
     if !is_one(&properties.linetype_scale) {
         common.linetype_scale = properties.linetype_scale;
     }
+    if !properties.transparency.is_by_layer() {
+        common.transparency = page_setup::dwg_entity_transparency(properties.transparency);
+    }
 }
 
-/// An object's own colour, linetype, lineweight and linetype scale as its
-/// DWG object holds them, if the core has a model for them: an index colour
-/// rather than a true colour, and a standard lineweight.
+/// An object's own colour, linetype, lineweight, linetype scale, named plot
+/// style and transparency as its DWG object holds them, if the core has a
+/// model for them: an index colour rather than a true colour, and a standard
+/// lineweight.
 pub(super) fn read_properties(common: &EntityCommon) -> Option<Properties> {
+    read_properties_in(common, false, &std::collections::HashMap::new())
+}
+
+pub(super) fn read_properties_in(
+    common: &EntityCommon,
+    named_mode: bool,
+    ps_map: &std::collections::HashMap<acadrust::types::Handle, String>,
+) -> Option<Properties> {
     let color = match common.color {
         Color::ByLayer => ObjectColor::ByLayer,
         Color::ByBlock => ObjectColor::ByBlock,
@@ -826,11 +922,15 @@ pub(super) fn read_properties(common: &EntityCommon) -> Option<Properties> {
     if !(linetype_scale.is_finite() && linetype_scale > 0.0) {
         return None;
     }
+    let plot_style = page_setup::read_entity_plot_style(common, named_mode, ps_map);
+    let transparency = page_setup::read_entity_transparency(common.transparency);
     Some(Properties {
         color,
         linetype,
         lineweight,
         linetype_scale,
+        plot_style,
+        transparency,
     })
 }
 
@@ -997,6 +1097,8 @@ fn contents(
             None => linetypes_not_read += 1,
         }
     }
+    let named_mode = !drawing.header.plotstyle_mode;
+    let ps_map = page_setup::plot_style_handle_map(drawing);
     let mut layers = Vec::new();
     let mut layers_not_read = 0;
     for dwg_layer in drawing.layers.iter() {
@@ -1004,7 +1106,7 @@ fn contents(
         if dimension::is_own_defpoints(dwg_layer) {
             continue;
         }
-        match read_layer(dwg_layer) {
+        match read_layer(dwg_layer, named_mode, &ps_map) {
             Some(layer) => layers.push(layer),
             None => layers_not_read += 1,
         }
@@ -1091,8 +1193,14 @@ fn contents(
         let mut more = false;
         for (slot, record) in read.iter_mut().zip(&records) {
             if slot.is_none() {
-                if let Some(definition) = read_block(drawing, record, &known, &ad_evaluated_blocks)
-                {
+                if let Some(definition) = read_block(
+                    drawing,
+                    record,
+                    &known,
+                    &ad_evaluated_blocks,
+                    named_mode,
+                    &ps_map,
+                ) {
                     *slot = Some(definition);
                     more = true;
                 }
@@ -1131,7 +1239,7 @@ fn contents(
     let mut annotations = Vec::new();
     for &(dwg_object, _) in &on_sheet {
         if let EntityType::Leader(l) = dwg_object {
-            let read = read_properties(&l.common)
+            let read = read_properties_in(&l.common, named_mode, &ps_map)
                 .filter(|_| !l.common.invisible)
                 .and_then(|properties| {
                     let (mut read, _) = leader::read_leader(drawing, l, layer_of(&l.common))?;
@@ -1150,7 +1258,7 @@ fn contents(
     let mut boundaries = Vec::new();
     for &(dwg_object, space) in &on_sheet {
         if let (EntityType::Viewport(v), Some(_)) = (dwg_object, space) {
-            let read = read_viewport_of(drawing, v);
+            let read = read_viewport_of(drawing, v, named_mode, &ps_map);
             if read.is_some() && !v.clip_boundary_handle.is_null() {
                 boundaries.push(v.clip_boundary_handle);
             }
@@ -1175,7 +1283,7 @@ fn contents(
                 .find(|(handle, _)| *handle == l.common.handle)
                 .and_then(|(_, read)| read.clone())
                 .map(Object::Leader),
-            EntityType::MultiLeader(m) => read_properties(&m.common)
+            EntityType::MultiLeader(m) => read_properties_in(&m.common, named_mode, &ps_map)
                 .filter(|_| !m.common.invisible)
                 .and_then(|properties| {
                     let mut read = leader::read_mleader(
@@ -1188,7 +1296,7 @@ fn contents(
                     read.properties = properties;
                     Some(Object::MLeader(read))
                 }),
-            EntityType::Dimension(d) => read_properties(&d.base().common)
+            EntityType::Dimension(d) => read_properties_in(&d.base().common, named_mode, &ps_map)
                 .filter(|_| !d.base().common.invisible)
                 .and_then(|properties| {
                     let mut read = dimension::read_dimension(
@@ -1199,7 +1307,7 @@ fn contents(
                     read.properties = properties;
                     Some(Object::Dimension(read))
                 }),
-            EntityType::Table(t) => read_properties(&t.common)
+            EntityType::Table(t) => read_properties_in(&t.common, named_mode, &ps_map)
                 .filter(|_| !t.common.invisible)
                 .and_then(|properties| {
                     let mut read =
@@ -1211,7 +1319,7 @@ fn contents(
                 .iter()
                 .find(|(h, _)| *h == v.common.handle)
                 .and_then(|(_, read)| read.clone()),
-            _ => read_object_in(Some(drawing), dwg_object, &blocks),
+            _ => read_object_in(Some(drawing), dwg_object, &blocks, named_mode, &ps_map),
         };
         match read {
             Some(object) => {
@@ -1301,12 +1409,19 @@ fn contents(
         crate::model::Layout {
             name: read.name,
             paper: read.paper,
+            page_setup: read.page_setup,
             paper_space: spaces.iter().map(|s| *s == Some(k)).collect(),
         }
     });
     let layout = layouts.next();
     let other_layouts: Vec<crate::model::Layout> = layouts.collect();
     let paper = layout.as_ref().and_then(|l| l.paper.clone());
+    let page_setup = layout::read_model_page_setup(drawing, units);
+    let plot_style_mode = if named_mode {
+        crate::model::PlotStyleMode::Named
+    } else {
+        crate::model::PlotStyleMode::ColorDependent
+    };
     Ok(DrawingContents {
         dwg_version: raw_version.unwrap_or_else(|| drawing.version.to_string()),
         units,
@@ -1336,6 +1451,8 @@ fn contents(
         other_layouts,
         opens_on: layout::opened_on(drawing).map(|(name, _)| name),
         paper,
+        page_setup,
+        plot_style_mode,
         layouts_not_read,
         handles,
         not_read: RecordsOfKind::group(not_read),
@@ -1864,8 +1981,14 @@ const UNREADABLE: &str = "UNREADABLE_RECORD";
 /// with its pen: its boundary, when it is clipped, one the core reads,
 /// drawn with the viewport's pen as a build writes it, and every layer it
 /// freezes one of the drawing's.
-fn read_viewport_of(drawing: &CadDocument, v: &acadrust::entities::Viewport) -> Option<Object> {
-    let properties = read_properties(&v.common).filter(|_| !v.common.invisible)?;
+fn read_viewport_of(
+    drawing: &CadDocument,
+    v: &acadrust::entities::Viewport,
+    named_mode: bool,
+    ps_map: &std::collections::HashMap<acadrust::types::Handle, String>,
+) -> Option<Object> {
+    let properties =
+        read_properties_in(&v.common, named_mode, ps_map).filter(|_| !v.common.invisible)?;
     let layer = layer_of(&v.common);
     let clip = if v.clip_boundary_handle.is_null() {
         None
@@ -1874,7 +1997,7 @@ fn read_viewport_of(drawing: &CadDocument, v: &acadrust::entities::Viewport) -> 
         let common = boundary.common();
         let same_pen = layer_of(common) == layer
             && !common.invisible
-            && read_properties(common).as_ref() == Some(&properties);
+            && read_properties_in(common, named_mode, ps_map).as_ref() == Some(&properties);
         if !same_pen {
             return None;
         }
@@ -1986,6 +2109,8 @@ fn read_block(
     record: &BlockRecord,
     blocks: &[Block],
     ad_evaluated: &std::collections::HashSet<String>,
+    named_mode: bool,
+    ps_map: &std::collections::HashMap<acadrust::types::Handle, String>,
 ) -> Option<ReadBlock> {
     let is_dynamic_block = dynamic_block::is_dynamic_or_evaluated(drawing, record, ad_evaluated);
     if (record.is_anonymous() && !is_dynamic_block)
@@ -2014,7 +2139,13 @@ fn read_block(
         if is_dynamic_block && dwg_object.common().invisible {
             continue;
         }
-        objects.push(read_object_in(Some(drawing), dwg_object, blocks)?);
+        objects.push(read_object_in(
+            Some(drawing),
+            dwg_object,
+            blocks,
+            named_mode,
+            ps_map,
+        )?);
         let common = dwg_object.common();
         handles.push(handle_text(common.handle));
         ids_and_names.push(IdAndName {
@@ -2059,7 +2190,11 @@ pub(super) fn layer_of(common: &EntityCommon) -> String {
 }
 
 /// A layer with an index colour and a standard or default lineweight.
-fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
+fn read_layer(
+    dwg_layer: &DwgLayer,
+    named_mode: bool,
+    ps_map: &std::collections::HashMap<acadrust::types::Handle, String>,
+) -> Option<Layer> {
     let Color::Index(color) = dwg_layer.color else {
         return None;
     };
@@ -2073,6 +2208,8 @@ fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
         color,
         linetype: dwg_layer.line_type.clone(),
         lineweight,
+        plot_style: page_setup::read_layer_plot_style(dwg_layer, named_mode, ps_map),
+        transparency: page_setup::read_layer_transparency(dwg_layer.transparency),
         on: !dwg_layer.flags.off,
         frozen: dwg_layer.flags.frozen,
         locked: dwg_layer.flags.locked,
@@ -2085,19 +2222,27 @@ fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
 /// lineweight and linetype scale have a model in the core. An insert is
 /// read only when its block is one of `blocks`.
 pub(super) fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
-    read_object_in(None, dwg_object, blocks)
+    read_object_in(
+        None,
+        dwg_object,
+        blocks,
+        false,
+        &std::collections::HashMap::new(),
+    )
 }
 
 fn read_object_in(
     drawing: Option<&CadDocument>,
     dwg_object: &EntityType,
     blocks: &[Block],
+    named_mode: bool,
+    ps_map: &std::collections::HashMap<acadrust::types::Handle, String>,
 ) -> Option<Object> {
     let common = dwg_object.common();
     if common.invisible {
         return None;
     }
-    let properties = read_properties(common)?;
+    let properties = read_properties_in(common, named_mode, ps_map)?;
     let layer = layer_of(common);
     let object = match dwg_object {
         EntityType::Line(line) => Object::Line(Line {
@@ -3127,6 +3272,7 @@ mod tests {
             blocks: Vec::new(),
             objects: Vec::new(),
             paper: None,
+            page_setup: None,
             ltscale: 1.0,
             layout: None,
             other_layouts: Vec::new(),
@@ -4205,6 +4351,7 @@ mod tests {
                 linetype: ObjectLinetype::Named("Hidden".to_owned()),
                 lineweight: ObjectLineweight::Width(Lineweight::from_hundredths(35).unwrap()),
                 linetype_scale: 0.5,
+                ..Properties::default()
             }
         );
         line.common.color = Color::ByBlock;
@@ -4232,6 +4379,7 @@ mod tests {
             linetype: ObjectLinetype::Named("Hidden".to_owned()),
             lineweight: ObjectLineweight::Default,
             linetype_scale: 2.0,
+            ..Properties::default()
         };
         set_properties(&mut common, &own);
         assert_eq!(common.color, Color::ByBlock);

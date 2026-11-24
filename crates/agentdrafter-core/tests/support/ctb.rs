@@ -83,3 +83,59 @@ pub fn ctb_file(text: &str) -> Vec<u8> {
 pub fn made_up_ctb(pens: &[(u8, i64, i64)]) -> Vec<u8> {
     ctb_file(&made_up_ctb_text(pens, ""))
 }
+
+/// The text of a made-up STB (named plot style) file. Always includes
+/// AutoCAD's `Normal` style at index 0, followed by each entry in `styles`:
+/// `(name, color, lineweight, screen)`, where `color` is `BLACK`,
+/// `OBJECT_COLOR` or `rgb(r, g, b)`, `lineweight` is 0 for object's own or
+/// `n` for place `n - 1` of `LINEWEIGHTS`, and `screen` is `0..=100`.
+pub fn made_up_stb_text(styles: &[(&str, i64, i64, u8)], extra: &str) -> String {
+    let mut text = String::from(
+        "description=\"made up STB for a test\naci_table_available=FALSE\nscale_factor=1.0\n\
+         apply_factor=FALSE\ncustom_lineweight_display_units=0\nplot_style{\n",
+    );
+    let mut all: Vec<(&str, i64, i64, u8)> = Vec::with_capacity(styles.len() + 1);
+    if !styles
+        .iter()
+        .any(|(name, ..)| name.eq_ignore_ascii_case("Normal"))
+    {
+        all.push(("Normal", OBJECT_COLOR, 0, 100));
+    }
+    all.extend_from_slice(styles);
+    for (i, (name, color, lineweight, screen)) in all.into_iter().enumerate() {
+        text.push_str(&format!(
+            " {i}{{\n  name=\"{name}\n  localized_name=\"{name}\n  description=\"\n  \
+             color={color}\n  color_policy=5\n  physical_pen_number=0\n  virtual_pen_number=0\n  \
+             screen={screen}\n  linepattern_size=0.5\n  linetype=31\n  adaptive_linetype=TRUE\n  \
+             lineweight={lineweight}\n  fill_style=73\n  end_style=4\n  join_style=5\n{extra} }}\n"
+        ));
+    }
+    text.push_str("}\ncustom_lineweight_table{\n");
+    for (i, mm) in LINEWEIGHTS.iter().enumerate() {
+        text.push_str(&format!(" {i}={mm:?}\n"));
+    }
+    text.push_str("}\n");
+    text
+}
+
+/// The bytes of an STB file holding `text`, packed as AutoCAD packs it.
+pub fn stb_file(text: &str) -> Vec<u8> {
+    let body = text.as_bytes();
+    let packed = miniz_oxide::deflate::compress_to_vec_zlib(body, 6);
+    let mut bytes = b"PIAFILEVERSION_2.0,STBVER1,compress\r\npmzlibcodec".to_vec();
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &packed {
+        a = (a + u32::from(byte)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    bytes.extend(((b << 16) | a).to_le_bytes());
+    bytes.extend(u32::try_from(body.len()).unwrap().to_le_bytes());
+    bytes.extend(u32::try_from(packed.len()).unwrap().to_le_bytes());
+    bytes.extend(packed);
+    bytes
+}
+
+/// The bytes of a made-up STB file whose named styles are `styles`.
+pub fn made_up_stb(styles: &[(&str, i64, i64, u8)]) -> Vec<u8> {
+    stb_file(&made_up_stb_text(styles, ""))
+}

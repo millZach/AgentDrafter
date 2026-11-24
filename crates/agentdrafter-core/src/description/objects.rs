@@ -192,7 +192,7 @@ impl Place<'_> {
     }
 }
 
-const LINE_KEYS: [&str; 7] = [
+const LINE_KEYS: [&str; 9] = [
     "from",
     "to",
     "layer",
@@ -200,8 +200,10 @@ const LINE_KEYS: [&str; 7] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
-const POLYLINE_KEYS: [&str; 8] = [
+const POLYLINE_KEYS: [&str; 10] = [
     "points",
     "closed",
     "width",
@@ -210,8 +212,10 @@ const POLYLINE_KEYS: [&str; 8] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
-const DONUT_KEYS: [&str; 8] = [
+const DONUT_KEYS: [&str; 10] = [
     "center",
     "inside_diameter",
     "outside_diameter",
@@ -220,16 +224,20 @@ const DONUT_KEYS: [&str; 8] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
-const SOLID_KEYS: [&str; 6] = [
+const SOLID_KEYS: [&str; 8] = [
     "corners",
     "layer",
     "color",
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
-const ARC_KEYS: [&str; 9] = [
+const ARC_KEYS: [&str; 11] = [
     "center",
     "radius",
     "start_angle",
@@ -239,8 +247,10 @@ const ARC_KEYS: [&str; 9] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
-const CIRCLE_KEYS: [&str; 7] = [
+const CIRCLE_KEYS: [&str; 9] = [
     "center",
     "radius",
     "layer",
@@ -248,8 +258,10 @@ const CIRCLE_KEYS: [&str; 7] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
-const ELLIPSE_KEYS: [&str; 10] = [
+const ELLIPSE_KEYS: [&str; 12] = [
     "center",
     "major_axis",
     "ratio",
@@ -260,8 +272,10 @@ const ELLIPSE_KEYS: [&str; 10] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
-const SPLINE_KEYS: [&str; 8] = [
+const SPLINE_KEYS: [&str; 10] = [
     "fit_points",
     "control_points",
     "degree",
@@ -270,6 +284,8 @@ const SPLINE_KEYS: [&str; 8] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
 
 /// The article an object type takes in a message: `an` for `arc`,

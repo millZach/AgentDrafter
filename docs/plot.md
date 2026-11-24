@@ -1,10 +1,10 @@
 # Plotting a sheet to PDF
 
-`agentdrafter plot` writes a PDF a plant can be issued: the sheet at its exact size, each pen's colour and lineweight from a CTB plot style, the text as AutoCAD's plot of the same DWG draws it, and that text searchable. It draws through the one drawing pipeline the PNG draws through (ADR-0011): the sheet becomes a display list, and the display list becomes a PDF. The PDF is stamped with every file it was drawn from, as the PNG is, and `agentdrafter stale` says whether any of them has moved on.
+`agentdrafter plot` writes a PDF a plant can be issued: the sheet at its exact size (or according to its `page_setup`, with paper, plot area, plot scale, centring and offset), each pen's colour, screening and lineweight from a CTB or STB plot style, transparency when enabled, the text as AutoCAD's plot of the same DWG draws it, and that text searchable. It draws through the one drawing pipeline the PNG draws through (ADR-0011): the sheet becomes a display list, and the display list becomes a PDF. The PDF is stamped with every file it was drawn from, as the PNG is, and `agentdrafter stale` says whether any of them has moved on.
 
 ```
 agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite]
-                  [--clean | --no-clean] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]
+                  [--clean | --no-clean] [--plot-style <ctb-or-stb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]
 agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]
 ```
 
@@ -28,7 +28,28 @@ A DWG drawn in model space holds no paper (the DWG is unchanged by it). A DWG Ag
 - A DWG with no unit is taken to be in millimetres, as `render` takes it.
 - A sheet with no paper that draws nothing, or nothing with both a width and a height, has no size and is refused (`bad_value`); one with paper plots a blank page, and so is one larger than 200 inches (5080 mm) a side, the largest page PDF readers open: a sheet that size has objects drawn far outside its border.
 
-The reply gives the page as `sheet_size` (`width_mm` and `height_mm` to the micrometre, `width_points` and `height_points` as the page box holds them) and `page`, with the `extents` in drawing units, the box round what the sheet draws, and `scale`, always 1.
+The reply gives the page as `sheet_size` (`width_mm` and `height_mm` to the micrometre, `width_points` and `height_points` as the page box holds them) and `page`, with the `extents` in drawing units, the box round what the sheet draws, and `scale` (1 when plotted at 1:1, or the effective plot scale factor when `page_setup` sets `scale: fit` or a ratio such as `1:2`).
+
+## Page setups and plot scale (`PAGESETUP`)
+
+A sheet description, template, or paper-space layout may declare a `page_setup` (and an existing DWG's `Layout` `PlotSettings` are read into the same model and editable with `set_page_setup` / `PAGESETUP`):
+
+```yaml
+page_setup:
+  paper: ISO A4 landscape
+  area: window            # extents | window | layout (layouts only)
+  window: [[0, 0], [200, 100]]
+  scale: 1:2              # fit | paper:drawing ratio | positive factor
+  center: true            # centre plotted area on printable paper
+  offset: [0, 0]          # plot origin offset when center is false
+  plot_style: plant.stb   # CTB or STB file name found in plot style folders
+  plot_transparency: true # whether layer/object transparency plots (default true)
+```
+
+- **Plot area.** `extents` plots the drawing's extents; `window` plots and clips to the rectangle given by `window: [[x1, y1], [x2, y2]]`; `layout` (for paper-space layouts) plots the layout paper from `(0, 0)`.
+- **Plot scale.** `fit` scales uniformly to fill the printable area (paper minus printer margins); a ratio such as `1:2` (or factor `0.5`) plots at that exact scale; without `scale`, plots at `1:1`.
+- **Centring and offset.** `center: true` centres the scaled plot area on the printable paper; otherwise `offset: [x, y]` shifts the origin from the lower-left printable corner.
+- **Transparency.** Layers take `transparency` from `0` (opaque) to `90` (written in DWG via AutoCAD's `AcCmTransparency` extended data), and objects take `ByLayer`, `ByBlock`, or `0..=90`. Transparency draws identically in PNG, PDF (through PDF `ExtGState` `/ca` and `/CA`), and the WebGL2 viewer (ADR-0011). Setting `plot_transparency: false` in `page_setup` disables transparency when plotting to PDF (and omits `ExtGState`, matching AutoCAD's Plot Transparency checkbox). Opaque sheets never emit `ExtGState`.
 
 ### On its paper, measured against AutoCAD
 
@@ -40,21 +61,25 @@ A plot leaves out every object on a layer that is off, frozen or does not plot, 
 
 ## The plot style
 
-A CTB file, AutoCAD's colour-dependent plot style table, sets each pen: for each AutoCAD colour index, the colour and the lineweight that index plots in. AutoCAD's own CTB files, such as `monochrome.ctb` and `acad.ctb`, are Autodesk's and never enter this repository, not even in a test (ADR-0008). They are read from the plot style folders, as fonts are read from the font folders: the folders `--plot-styles` names, then those the `AGENTDRAFTER_PLOT_STYLES` environment variable lists (separated as the system separates paths), such as AutoCAD's `Plot Styles` folder. There is no default folder. `--plot-style` names the CTB by its file name, found ignoring case; a path is refused, so a plot style is never read from outside its folders.
+A CTB file (colour-dependent plot style table) maps each AutoCAD colour index 1..=255 to a plotted colour, screening percentage and lineweight. An STB file (named plot style table) maps named plot styles (such as `Normal`, `Heavy`, or `Accent`) assigned on layers and objects (`PSTYLEMODE = 0`, `ACAD_PLOTSTYLENAME` / `ACDBPLACEHOLDER`) to a plotted colour, screening percentage and lineweight. AutoCAD's own CTB and STB files, such as `monochrome.ctb`, `acad.ctb` and `monochrome.stb`, are Autodesk's and never enter this repository, not even in a test (ADR-0008). They are read from the plot style folders, as fonts are read from the font folders: the folders `--plot-styles` names, then those the `AGENTDRAFTER_PLOT_STYLES` environment variable lists (separated as the system separates paths), such as AutoCAD's `Plot Styles` folder. There is no default folder. `--plot-style` names the CTB or STB by its file name, found ignoring case; a path is refused, so a plot style is never read from outside its folders.
 
-**With no plot style named**, a plot draws with the built-in monochrome style: every pen black, at its object's own lineweight. That is what AutoCAD's `monochrome.ctb` sets for every one of its pens, and what a plant's issued sheets usually are, so a machine without AutoCAD plots the usual case exactly. The reply names it `monochrome (built in)`.
+When `--plot-style` is not passed on the command line, `plot` uses:
+1. the drawing set's `plot_style` in `set.yaml`, if declared;
+2. else the sheet's or layout's `page_setup.plot_style` (from YAML or from an existing DWG's `PlotSettings`);
+3. else the built-in monochrome style: every pen black, at its object's own lineweight, reported as `monochrome (built in)`. (When an existing DWG's embedded `PlotSettings` names a table such as `monochrome.ctb` that is not present in the configured plot style folders, `plot` safely falls back to `monochrome (built in)` rather than failing; an explicitly requested `--plot-style`, `set.yaml` `plot_style`, or YAML `page_setup.plot_style` that cannot be found is an error.)
 
-A [render](render.md#through-a-plot-style-to-show-what-prints) draws through the same plot styles, to show in a PNG what will print: `--plot-style` and `--plot-styles` as here, found the same way, or `--monochrome` for the built-in style. Its pens are the ones the PDF draws with, and a layer that does not plot is left out of it too. Without either, a render draws each object in its own colour.
+A [render](render.md#through-a-plot-style-to-show-what-prints) draws through the same CTB or STB plot styles, to show in a PNG what will print: `--plot-style` and `--plot-styles` as here, found the same way, or `--monochrome` for the built-in style. Its pens are the ones the PDF draws with, and a layer that does not plot is left out of it too. Without either, a render draws each object in its own colour.
 
-What a CTB's pen sets, and what the plot follows:
+What a CTB or STB pen sets, and what the plot follows:
 
 | A pen's setting | What the plot does |
 |---|---|
-| `color` | Followed. -1 (or -1006632961) plots the object's own colour, in the colour AutoCAD plots that index in ([`render`](render.md#what-it-draws)), index 7 black. Any other value means the pen plots in a colour of its own: red, green and blue in the low three bytes of the pen's `mode_color`, where CTB writers keep a custom colour while `color` may hold another value, or of `color` when the pen has no `mode_color`. A `mode_color` of -1006632961 (or -1) plots the object's own colour. A value whose top byte is 0xC3, the kind ezdxf calls ACI, is red, green and blue like any other, not a colour index: 0xC3000003 plots red 0, green 0, blue 3, not index 3's green. AutoCAD 2026 plotted all of this through a made-up CTB ([below](#how-autocad-plots-a-pens-colour)), except a `mode_color` of -1, which it was not shown and is read like -1006632961. |
+| `color` | Followed. -1 (or -1006632961) plots the object's own colour, in the colour AutoCAD plots that index in ([`render`](render.md#what-it-draws)), index 7 black. Any other value means the pen plots in a colour of its own: red, green and blue in the low three bytes of the pen's `mode_color`, where CTB/STB writers keep a custom colour while `color` may hold another value, or of `color` when the pen has no `mode_color`. A `mode_color` of -1006632961 (or -1) plots the object's own colour. A value whose top byte is 0xC3, the kind ezdxf calls ACI, is red, green and blue like any other, not a colour index: 0xC3000003 plots red 0, green 0, blue 3, not index 3's green. AutoCAD 2026 plotted all of this through a made-up CTB ([below](#how-autocad-plots-a-pens-colour)), except a `mode_color` of -1, which it was not shown and is read like -1006632961. |
+| `screen` | Followed. An integer from `0` to `100` (default `100`): blends the pen's plotted colour towards white (`255 - round((255 - c) * screen / 100)`), so `100` is full ink, `50` is half intensity, and `0` is white. Applied identically in PDF and PNG. |
 | `lineweight` | Followed. 0 plots the object's own lineweight, its layer's or AutoCAD's default of 0.25 mm; any other value `n` plots with the lineweight at place `n - 1` of the file's `custom_lineweight_table`, counted from 0, so 1 is its first, 0 mm. AutoCAD 2026 plotted a made-up CTB's pens of `lineweight` 20 and 25 at the table's 0.9 and 1.58 mm, its places 19 and 24, not at 1 and 2 mm. |
-| `screen`, grayscale in `color_policy`, `linetype`, `end_style`, `join_style`, `fill_style`, and the table's `apply_factor` | Not followed yet. The reply's `plot_style.not_followed` lists each one a CTB sets, with what it means, what the plot does instead, and the colour indexes whose pens set it, so nothing is left out in silence. AutoCAD's `monochrome.ctb` and `acad.ctb` set none of them. |
+| grayscale in `color_policy`, `linetype`, `end_style`, `join_style`, `fill_style`, and the table's `apply_factor` | Not followed yet. The reply's `plot_style.not_followed` lists each one a CTB or STB sets, with what it means, what the plot does instead, and the colour indexes (`colors`) or named styles (`styles`) whose pens set it, so nothing is left out in silence. AutoCAD's `monochrome.ctb`, `acad.ctb` and `monochrome.stb` set none of them. |
 
-A NUL byte at the end of a CTB's text, which some writers such as ezdxf add, is ignored. A value followed by an appendix after a space, in brackets, as some files' lineweight tables carry one (`0.0076200000000 (+7.Z+"8V?S_LC )`, shown in ezdxf's issue #1069), is read as the value before it, as ezdxf reads it and as AutoCAD 2026 plotted it (below); what the appendix means is not known. Anything else after a value, not in brackets, is an error, as before. A CTB that cannot be found, or read, is an error (`read_failed`, at `plot_style`) and nothing is written. A named plot style table (STB) is refused: a sheet is plotted through a CTB.
+A NUL byte at the end of a CTB or STB's text, which some writers such as ezdxf add, is ignored. A value followed by an appendix after a space, in brackets, as some files' lineweight tables carry one (`0.0076200000000 (+7.Z+"8V?S_LC )`, shown in ezdxf's issue #1069), is read as the value before it, as ezdxf reads it and as AutoCAD 2026 plotted it (below); what the appendix means is not known. Anything else after a value, not in brackets, is an error, as before. A CTB or STB that cannot be found, or read, is an error (`read_failed`, at `plot_style`) and nothing is written. Passing an STB file with a `.ctb` name (or a CTB file with a `.stb` name) is refused.
 
 ## The text
 
@@ -137,8 +162,6 @@ What still differs: the trim line on the page's edge (above); AutoCAD writes its
 
 ## What is not offered yet
 
-- A plot scale other than 1:1 in the sheet's unit: a sheet drawn in model space plots at 1:1 onto its declared paper, or to its extents when it declares none, and one drawn in a layout plots its layout at 1:1, its scales in its viewports.
-- A layout's page setup other than the one a build writes, such as another plotter, a paper with margins, or a window: a DWG whose layout has one is plotted on its paper only when the paper reads back.
-- A plot style's screening, grayscale, linetypes, line ends and joins and fill styles (listed under `not_followed` when a CTB sets them), and named plot styles (STB).
+- A plot style's grayscale, linetypes, line ends and joins, fill styles and `apply_factor` (listed under `not_followed` when a CTB or STB sets them).
 - PDF layers from the drawing's layers, and PDF/A.
 - More than one sheet in one PDF.

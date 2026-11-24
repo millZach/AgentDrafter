@@ -19,10 +19,12 @@ use crate::units::{parse_length, LengthError, Unit};
 pub(crate) const LINETYPE_KEYS: [&str; 2] = ["description", "pattern"];
 
 /// The keys a layer takes.
-pub(crate) const LAYER_KEYS: [&str; 8] = [
+pub(crate) const LAYER_KEYS: [&str; 10] = [
     "color",
     "linetype",
     "lineweight",
+    "plot_style",
+    "transparency",
     "on",
     "frozen",
     "locked",
@@ -131,6 +133,24 @@ pub(super) fn apply_layer_fields(
             layer.lineweight = Some(lineweight(node, &fields.path_of("lineweight"))?);
         }
     }
+    if let Some(raw) = fields.get("plot_style") {
+        if allow_clear && raw.is_bare_null() {
+            layer.plot_style = None;
+        } else if let Some(node) = fields.text("plot_style") {
+            layer.plot_style = Some(super::page_setup::plot_style_name(
+                node,
+                &fields.path_of("plot_style"),
+            )?);
+        }
+    }
+    if let Some(node) = fields.get("transparency") {
+        if allow_clear && node.is_bare_null() {
+            layer.transparency = 0;
+        } else {
+            layer.transparency =
+                super::page_setup::layer_transparency(node, &fields.path_of("transparency"))?;
+        }
+    }
     for (key, state) in [
         ("on", &mut layer.on),
         ("frozen", &mut layer.frozen),
@@ -186,13 +206,21 @@ pub(super) fn validate_layer_name(name: &str, path: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// The keys every object takes for a colour, linetype, lineweight and
-/// linetype scale of its own, besides its layer.
-pub(crate) const PROPERTY_KEYS: [&str; 4] = ["color", "linetype", "lineweight", "linetype_scale"];
+/// The keys every object takes for a colour, linetype, lineweight,
+/// linetype scale, named plot style and transparency of its own, besides
+/// its layer.
+pub(crate) const PROPERTY_KEYS: [&str; 6] = [
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
+    "plot_style",
+    "transparency",
+];
 
-/// An object's own colour, linetype, lineweight and linetype scale: each
-/// `ByLayer` unless the object gives it. `linetypes` are those the
-/// object's sheet or block library defines.
+/// An object's own colour, linetype, lineweight, linetype scale, named plot
+/// style and transparency: each `ByLayer` unless the object gives it.
+/// `linetypes` are those the object's sheet or block library defines.
 pub(super) fn properties(fields: &Fields, linetypes: &[Linetype]) -> Result<Properties, Error> {
     let mut properties = Properties::default();
     if let Some(node) = fields.get("color") {
@@ -209,6 +237,14 @@ pub(super) fn properties(fields: &Fields, linetypes: &[Linetype]) -> Result<Prop
     }
     if let Some(node) = fields.get("linetype_scale") {
         properties.linetype_scale = linetype_scale(node, &fields.path_of("linetype_scale"))?;
+    }
+    if let Some(node) = fields.get("plot_style") {
+        properties.plot_style =
+            super::page_setup::object_plot_style(node, &fields.path_of("plot_style"))?;
+    }
+    if let Some(node) = fields.get("transparency") {
+        properties.transparency =
+            super::page_setup::object_transparency(node, &fields.path_of("transparency"))?;
     }
     Ok(properties)
 }

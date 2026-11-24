@@ -508,11 +508,15 @@ Drawing a sheet to a PDF at its sheet size, through a plot style, as AutoCAD plo
 _Avoid_: print, export (and a plot is the act, not the PDF: the PDF is an output)
 
 **Plot style**:
-The pens a plot draws with: for each AutoCAD colour index, the colour and the lineweight it plots in, read from a CTB file such as AutoCAD's `monochrome.ctb`. With none named, every pen plots black at its object's own lineweight.
-_Avoid_: pen table, pen settings, CTB (the CTB is the file a plot style is read from)
+The pens a plot draws with: for each AutoCAD colour index (in a CTB file such as `monochrome.ctb`) or each named plot style (in an STB file such as `plant.stb`, assigned on layers and objects when `PSTYLEMODE = 0`), the colour, screening percentage and lineweight it plots in. With none named, every pen plots black at its object's own lineweight.
+_Avoid_: pen table, pen settings, CTB (CTB and STB are the files a plot style is read from)
+
+**Page setup**:
+How a sheet or paper-space layout plots, as AutoCAD's PAGESETUP sets it: its paper, plot area (`extents`, `window` or `layout`), plot scale (`fit` or a ratio such as `1:2`), centring or offset, plot style table (CTB or STB) and whether layer/object transparency plots. Read from an existing DWG's `Layout` `PlotSettings`, declared under `page_setup` in YAML, and edited with `set_page_setup` (`PAGESETUP`).
+_Avoid_: print settings, plot config
 
 **Plot style folder**:
-A folder AgentDrafter reads CTB files from, named by a setting, such as AutoCAD's `Plot Styles` folder on a machine that has AutoCAD. There is no default.
+A folder AgentDrafter reads CTB and STB files from, named by a setting, such as AutoCAD's `Plot Styles` folder on a machine that has AutoCAD. There is no default.
 _Avoid_: plot style path, CTB directory
 
 **Display list**:

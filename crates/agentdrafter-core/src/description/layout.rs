@@ -22,14 +22,14 @@ use crate::units::{parse_length, LengthError, Unit};
 pub(crate) const LAYOUT_KEY: &str = "layout";
 
 /// The keys of a layout.
-pub(crate) const LAYOUT_KEYS: [&str; 1] = ["name"];
+pub(crate) const LAYOUT_KEYS: [&str; 2] = ["name", super::page_setup::PAGE_SETUP_KEY];
 
 /// The key a sheet description or template lists its layouts under, when
 /// it is drawn in more than one.
 pub(crate) const LAYOUTS_KEY: &str = "layouts";
 
 /// The keys of each layout of a list.
-pub(crate) const LIST_KEYS: [&str; 2] = ["name", "paper"];
+pub(crate) const LIST_KEYS: [&str; 3] = ["name", "paper", super::page_setup::PAGE_SETUP_KEY];
 
 /// The key an object of a sheet says which space it is in by.
 pub(crate) const SPACE_KEY: &str = "space";
@@ -41,7 +41,7 @@ pub(crate) const MODEL: &str = "model";
 pub(crate) const PAPER: &str = "paper";
 
 /// The keys a viewport takes.
-pub(crate) const VIEWPORT_KEYS: [&str; 13] = [
+pub(crate) const VIEWPORT_KEYS: [&str; 15] = [
     "center",
     "width",
     "height",
@@ -55,6 +55,8 @@ pub(crate) const VIEWPORT_KEYS: [&str; 13] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
 
 /// The keys a viewport's clipping boundary takes: a closed polyline's
@@ -74,15 +76,16 @@ const NOT_IN_A_NAME: &str = "<>/\\\":;?*|,=`";
 /// The name of the model-space tab, which no layout takes.
 const MODEL_TAB: &str = "Model";
 
-/// The name of the layout `node` declares, on a sheet in `units` whose
-/// paper is `paper`, declared at `paper_node`: a layout's paper is a
-/// standard size by name, and its unit millimetres or inches.
+/// The name and optional page setup of the layout `node` declares, on a
+/// sheet in `units` whose paper is `paper`, declared at `paper_node`: a
+/// layout's paper is a standard size by name, and its unit millimetres or
+/// inches.
 pub(super) fn layout(
     node: &Node,
     path: &str,
     units: Unit,
     paper: Option<(&Paper, &Node)>,
-) -> Result<String, Error> {
+) -> Result<(String, Option<crate::model::PageSetup>), Error> {
     let fields = Fields::of(node, path, &LAYOUT_KEYS, "a layout")?;
     let name_node = fields.require_text("name")?;
     let name_path = fields.path_of("name");
@@ -104,6 +107,15 @@ pub(super) fn layout(
             ),
         ));
     }
+    let setup = match fields.get(super::page_setup::PAGE_SETUP_KEY) {
+        Some(ps_node) => Some(super::page_setup::page_setup(
+            ps_node,
+            &fields.path_of(super::page_setup::PAGE_SETUP_KEY),
+            units,
+            true,
+        )?),
+        None => None,
+    };
     match paper {
         None => Err(at(
             Error::new(
@@ -120,20 +132,21 @@ pub(super) fn layout(
             "a sheet drawn in a layout declares a standard paper by name, such as `ISO A3 \
              landscape`, which AutoCAD's DWG To PDF plotter has, to plot whole",
         )),
-        Some(_) => Ok(name.to_owned()),
+        Some(_) => Ok((name.to_owned(), setup)),
     }
 }
 
-/// The layouts `node` lists, each with its name and paper, on a sheet in
-/// `units` whose own paper, if it declares one, is `paper`: two or more,
-/// each named once, whatever the case, as AutoCAD names its tabs, and
-/// each on a standard paper by name, its own or the sheet's.
+/// The layouts `node` lists, each with its name, paper and optional page
+/// setup, on a sheet in `units` whose own paper, if it declares one, is
+/// `paper`: two or more, each named once, whatever the case, as AutoCAD
+/// names its tabs, and each on a standard paper by name, its own or the
+/// sheet's.
 pub(super) fn layouts(
     node: &Node,
     path: &str,
     units: Unit,
     paper: Option<&Paper>,
-) -> Result<Vec<(String, Paper)>, Error> {
+) -> Result<Vec<(String, Paper, Option<crate::model::PageSetup>)>, Error> {
     let items = super::sequence(node, path, "a list of layouts, each with its name")?;
     if items.len() < 2 {
         return Err(bad_value(
@@ -155,7 +168,8 @@ pub(super) fn layouts(
             ),
         ));
     }
-    let mut out: Vec<(String, Paper)> = Vec::with_capacity(items.len());
+    let mut out: Vec<(String, Paper, Option<crate::model::PageSetup>)> =
+        Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let at_path = super::strict_yaml::index_path(path, i);
         let fields = Fields::of(item, &at_path, &LIST_KEYS, "a layout")?;
@@ -169,7 +183,7 @@ pub(super) fn layouts(
         if let Some(problem) = name_problem(name) {
             return Err(bad_value(name_node, &name_path, problem));
         }
-        if let Some((other, _)) = out.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+        if let Some((other, _, _)) = out.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(name)) {
             return Err(at(
                 Error::new(
                     ErrorCode::DuplicateName,
@@ -219,7 +233,16 @@ pub(super) fn layouts(
                     }
                 },
             };
-        out.push((name.to_owned(), own));
+        let setup = match fields.get(super::page_setup::PAGE_SETUP_KEY) {
+            Some(ps_node) => Some(super::page_setup::page_setup(
+                ps_node,
+                &fields.path_of(super::page_setup::PAGE_SETUP_KEY),
+                units,
+                true,
+            )?),
+            None => None,
+        };
+        out.push((name.to_owned(), own, setup));
     }
     Ok(out)
 }
@@ -614,6 +637,7 @@ pub(crate) fn layout_property() -> Value {
         "additionalProperties": false,
         "properties": {
             "name": name_schema(),
+            "page_setup": { "$ref": "#/$defs/page_setup" },
         }
     })
 }
@@ -665,6 +689,7 @@ pub(crate) fn layouts_property() -> Value {
                         .map(|(name, ..)| name)
                         .collect::<Vec<_>>(),
                 },
+                "page_setup": { "$ref": "#/$defs/page_setup" },
             },
         },
     })

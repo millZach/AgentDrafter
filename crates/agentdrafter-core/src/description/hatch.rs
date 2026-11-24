@@ -24,7 +24,7 @@ pub(crate) const HATCH_PATTERN_KEYS: [&str; 1] = ["lines"];
 pub(crate) const PATTERN_LINE_KEYS: [&str; 4] = ["angle", "origin", "delta", "dashes"];
 
 /// The keys a hatch takes.
-pub(crate) const HATCH_KEYS: [&str; 10] = [
+pub(crate) const HATCH_KEYS: [&str; 12] = [
     "pattern",
     "scale",
     "angle",
@@ -35,6 +35,8 @@ pub(crate) const HATCH_KEYS: [&str; 10] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
 
 /// The kinds of loop a hatch's boundary holds.

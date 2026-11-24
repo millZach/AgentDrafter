@@ -104,6 +104,10 @@ pub(crate) enum Kind {
     /// Attaches, updates, or clears an AutoCAD field on a text, mtext, or
     /// insert attribute: AutoCAD's FIELD.
     SetField,
+    /// Sets a sheet's or layout's page setup (`PAGESETUP`): paper, plot area,
+    /// plot scale, centring, offset, plot style table (CTB or STB) and
+    /// transparency plotting.
+    SetPageSetup,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -332,7 +336,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 81] = [
+pub(crate) const SPECS: [Spec; 82] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -506,6 +510,11 @@ pub(crate) const SPECS: [Spec; 81] = [
         name: "set_field",
         alias: "FIELD",
         kind: Kind::SetField,
+    },
+    Spec {
+        name: "set_page_setup",
+        alias: "PAGESETUP",
+        kind: Kind::SetPageSetup,
     },
     grid("set_cell", "TABLEDIT", GridOp::SetCell),
     grid("add_row", "", GridOp::Add(Axis::Row)),
@@ -1147,6 +1156,16 @@ fn does(spec: &Spec) -> String {
                            `sheet_number`, `custom_property`, `object_property`, or `code`) or a \
                            multi-field `{template, items}`, or `field: null` to convert the host \
                            back to plain text. AutoCAD's FIELD."
+            .to_owned(),
+        Kind::SetPageSetup => "Sets keys of a template's or layout's page setup (`PAGESETUP`): \
+                               `paper`, `area` (`extents`, `window`, or `layout`), `window`, \
+                               `scale` (`fit` or a ratio such as `1:2`), `center`, `offset`, \
+                               `plot_style` (CTB or STB file name), and `plot_transparency`. \
+                               Each key under `set` takes its new value as a sheet description \
+                               writes it, and `null` clears a key back to its default. Name \
+                               `layout` to target a specific layout tab (or `Model` on a DWG), or \
+                               omit it for the template's top-level page setup (or the first \
+                               layout on a DWG). AutoCAD's PAGESETUP."
             .to_owned(),
     }
 }
@@ -2758,6 +2777,51 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                 },
             },
         }),
+        Kind::SetPageSetup => {
+            let mut schema = json!({
+                "type": "object",
+                "required": ["set"],
+                "additionalProperties": false,
+                "properties": {
+                    "sheet": {
+                        "description": "A sheet built from the template to edit: the template is \
+                                        that sheet's. Give sheet or template (optional on an \
+                                        original DWG).",
+                        "$ref": "#/$defs/sheet_name",
+                    },
+                    "template": {
+                        "description": "The template to edit. Give sheet or template.",
+                        "$ref": "#/$defs/template_path",
+                    },
+                    "layout": {
+                        "description": "Optional layout tab name whose page setup to edit (or \
+                                        `Model` on a DWG). Omit for the sheet's top-level page \
+                                        setup (or the first paper-space layout on a DWG).",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "set": {
+                        "description": format!(
+                            "Page setup keys to set, each to its new value as a sheet \
+                             description writes it; null clears a key back to its default. \
+                             Keys: {}.",
+                            crate::description::page_setup::PAGE_SETUP_KEYS.join(", ")
+                        ),
+                        "type": "object",
+                        "minProperties": 1,
+                        "propertyNames": {
+                            "enum": crate::description::page_setup::PAGE_SETUP_KEYS,
+                        },
+                    },
+                },
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
@@ -4005,6 +4069,12 @@ pub(crate) enum Body {
         occurrence: Option<usize>,
         field: Option<crate::model::TextField>,
         value: Option<String>,
+    },
+    /// Sets a sheet's or layout's page setup: AutoCAD's PAGESETUP.
+    SetPageSetup {
+        to: AddTo,
+        layout: Option<String>,
+        set: Map<String, Value>,
     },
     /// Sets an attribute on every insert matching a query selection: AutoCAD's
     /// GATTE.
@@ -5529,6 +5599,104 @@ fn operation(
                 field,
                 value,
             }
+        }
+        Kind::SetPageSetup => {
+            keys(&["sheet", "template", "layout", "set"])?;
+            let to =
+                match (map.get("sheet"), map.get("template")) {
+                    (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
+                    (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
+                    (Some(_), Some(_)) => {
+                        return Err(fail(
+                            ErrorCode::Usage,
+                            "give sheet or template, not both: either names the template to edit"
+                                .to_owned(),
+                            "",
+                        ))
+                    }
+                    (None, None) => match default_sheet {
+                        Some(sheet) => AddTo::Sheet(sheet.to_owned()),
+                        None => return Err(fail(
+                            ErrorCode::MissingKey,
+                            "missing key `template`: name the template to edit, or a sheet built \
+                             from it with sheet"
+                                .to_owned(),
+                            "template",
+                        )),
+                    },
+                    (Some(_), None) => {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected a sheet's name".to_owned(),
+                            "sheet",
+                        ))
+                    }
+                    (None, Some(_)) => {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected a template's path".to_owned(),
+                            "template",
+                        ))
+                    }
+                };
+            let layout = match map.get("layout") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`layout` cannot be empty".to_owned(),
+                        "layout",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `layout`, a layout tab name".to_owned(),
+                        "layout",
+                    ))
+                }
+            };
+            let set = match map.get("set") {
+                Some(Value::Object(keys)) if !keys.is_empty() => {
+                    for k in keys.keys() {
+                        if !crate::description::page_setup::PAGE_SETUP_KEYS.contains(&k.as_str()) {
+                            return Err(fail(
+                                ErrorCode::UnknownKey,
+                                format!(
+                                    "unknown page_setup key `{k}`; expected one of: {}",
+                                    crate::description::page_setup::PAGE_SETUP_KEYS.join(", ")
+                                ),
+                                &format!("set.{k}"),
+                            ));
+                        }
+                    }
+                    keys.clone()
+                }
+                Some(Value::Object(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`set` cannot be empty; give at least one page_setup key to change"
+                            .to_owned(),
+                        "set",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `set`, a mapping of page_setup keys".to_owned(),
+                        "set",
+                    ))
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `set`: give the page_setup keys to change".to_owned(),
+                        "set",
+                    ))
+                }
+            };
+            Body::SetPageSetup { to, layout, set }
         }
         Kind::SetAttributes => {
             keys(&[

@@ -383,6 +383,7 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("stretch", "STRETCH"),
             ("explode", "EXPLODE"),
             ("set_field", "FIELD"),
+            ("set_page_setup", "PAGESETUP"),
             ("set_cell", "TABLEDIT"),
             ("add_row", ""),
             ("delete_row", ""),
@@ -467,6 +468,7 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "S", "sheet": "S", "box": [[10, 0], [50, 40]], "by": [10, 0, 0]}),
         json!({"op": "X", "target": {"id": "S/valve"}, "id_prefix": "part"}),
         json!({"op": "FIELD", "target": {"id": "S/title"}, "field": {"kind": "filename", "format": "%fn6"}}),
+        json!({"op": "PAGESETUP", "sheet": "S", "set": {"paper": "ISO A4 landscape", "area": "extents", "scale": "1:2", "center": true}}),
         json!({"op": "tabledit", "target": {"id": "S/cables"}, "cell": [2, 1], "set": {"text": "JB-9", "merge": null}}),
         json!({"op": "add_row", "target": {"id": "S/cables"}, "at": 2, "height": "6 mm", "cells": ["A", "", {"text": "B", "justify": "middle_left"}]}),
         json!({"op": "delete_row", "target": {"name": "cables", "sheet": "S"}, "row": 3}),
@@ -756,7 +758,7 @@ fn a_failed_operation_names_itself_and_lists_the_valid_choices() {
     assert_eq!(e.code, ErrorCode::UnknownKey);
     assert!(
         e.message
-            .contains("from, to, layer, color, linetype, lineweight, linetype_scale, id, name"),
+            .contains("from, to, layer, color, linetype, lineweight, linetype_scale, plot_style, transparency, id, name"),
         "{}",
         e.message
     );

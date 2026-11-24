@@ -174,6 +174,17 @@ fn layout_mut<'a>(drawing: &'a mut CadDocument, name: &str) -> Option<&'a mut Dw
 /// leaves the drawing as it is.
 pub(super) fn prepare(drawing: &mut CadDocument, sheet: &Sheet) -> Result<(), Error> {
     let Some(layout) = &sheet.layout else {
+        if let Some(ps) = &sheet.page_setup {
+            if let Some(model_layout) = layout_mut(drawing, "Model") {
+                super::page_setup::apply_page_setup(
+                    model_layout,
+                    ps,
+                    sheet.paper.as_ref(),
+                    sheet.units,
+                    true,
+                );
+            }
+        }
         return Ok(());
     };
     let failed = |why: String| Error::new(ErrorCode::DwgWrite, why);
@@ -186,7 +197,25 @@ pub(super) fn prepare(drawing: &mut CadDocument, sheet: &Sheet) -> Result<(), Er
         .ok_or_else(|| failed(format!("the drawing has no `{FIRST_LAYOUT}` to draw in")))?;
     let handle = dwg_layout.handle;
     layout.name.clone_into(&mut dwg_layout.name);
-    set_page_setup(dwg_layout, paper, sheet.units)?;
+    let has_transparency = sheet.layers.iter().any(|l| l.transparency > 0)
+        || sheet
+            .objects
+            .iter()
+            .chain(sheet.blocks.iter().flat_map(|b| b.objects.iter()))
+            .any(|o| {
+                matches!(
+                    o.properties().transparency,
+                    crate::model::ObjectTransparency::Percent(p) if p > 0
+                )
+            });
+    if let Some(ps) = layout.page_setup.as_ref().or(sheet.page_setup.as_ref()) {
+        super::page_setup::apply_page_setup(dwg_layout, ps, Some(paper), sheet.units, false);
+    } else {
+        set_page_setup(dwg_layout, paper, sheet.units)?;
+        if has_transparency {
+            dwg_layout.plot_flags.unknown_bits |= super::page_setup::PLOT_TRANSPARENCY_BIT;
+        }
+    }
     if let Some(ObjectType::Dictionary(entries)) = drawing.objects.get_mut(&dictionary) {
         entries.remove_entry(FIRST_LAYOUT);
         entries.add_entry(&layout.name, handle);
@@ -211,7 +240,14 @@ pub(super) fn prepare(drawing: &mut CadDocument, sheet: &Sheet) -> Result<(), Er
             .map_err(|e| failed(format!("could not add layout `{}`: {e}", other.name)))?;
         let dwg_layout = layout_mut(drawing, &other.name)
             .ok_or_else(|| failed(format!("layout `{}` was not added", other.name)))?;
-        set_page_setup(dwg_layout, paper, sheet.units)?;
+        if let Some(ps) = &other.page_setup {
+            super::page_setup::apply_page_setup(dwg_layout, ps, Some(paper), sheet.units, false);
+        } else {
+            set_page_setup(dwg_layout, paper, sheet.units)?;
+            if has_transparency {
+                dwg_layout.plot_flags.unknown_bits |= super::page_setup::PLOT_TRANSPARENCY_BIT;
+            }
+        }
         // acadrust adds the layout's overall viewport; it is set as the
         // first layout's is.
         let overall = dwg_layout.viewport;
@@ -416,7 +452,26 @@ pub(super) struct ReadLayout {
     pub(super) name: String,
     pub(super) block: Handle,
     pub(super) paper: Option<Paper>,
+    pub(super) page_setup: Option<crate::model::PageSetup>,
     pub(super) setup: DwgLayoutSetup,
+}
+
+/// Reads the `"Model"` layout's page setup, if configured on `drawing`.
+pub(super) fn read_model_page_setup(
+    drawing: &CadDocument,
+    units: Option<Unit>,
+) -> Option<crate::model::PageSetup> {
+    let model = drawing.header.model_space_block_handle;
+    let layout = drawing.objects.values().find_map(|o| match o {
+        ObjectType::Layout(l)
+            if (l.block_record == model && !model.is_null())
+                || l.name.eq_ignore_ascii_case("Model") =>
+        {
+            Some(l)
+        }
+        _ => None,
+    })?;
+    super::page_setup::read_page_setup(layout, units, true)
 }
 
 /// The layouts of `drawing`, in `units` (when declared), the core reads, in
@@ -480,10 +535,12 @@ pub(super) fn read_layouts(
             }
             not_read += 1;
         }
+        let page_setup = super::page_setup::read_page_setup(layout, units, false);
         read.push(ReadLayout {
             name: layout.name.clone(),
             block,
             paper,
+            page_setup,
             setup,
         });
     }

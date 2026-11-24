@@ -96,7 +96,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, custom_properties_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, objects_key, paper_key, layout_key, layouts_key] =
+    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, custom_properties_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, objects_key, paper_key, page_setup_key, layout_key, layouts_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -139,6 +139,7 @@ pub fn sheet_description_schema() -> Value {
                 "items": { "oneOf": object_choices(&OBJECT_TYPES) },
             },
             paper_key: super::paper::paper_property(),
+            page_setup_key: { "$ref": "#/$defs/page_setup" },
             layout_key: super::layout::layout_property(),
             layouts_key: super::layout::layouts_property(),
         },
@@ -576,6 +577,8 @@ fn defs() -> Map<String, Value> {
                         { "type": "string", "pattern": format!("^({lineweight_pattern})( ?mm)?$") },
                     ],
                 },
+                "plot_style": { "$ref": "#/$defs/layer_plot_style" },
+                "transparency": { "$ref": "#/$defs/layer_transparency" },
                 "on": {
                     "description": "Whether the layer is on: an object on a layer that is off \
                                     draws nothing, and counts towards the extents. Without it, \
@@ -670,6 +673,7 @@ fn defs() -> Map<String, Value> {
             ],
         }),
     );
+    super::page_setup::add_page_setup_defs(&mut defs);
     defs.insert(
         "line".into(),
         object_def(
@@ -1169,6 +1173,8 @@ pub(super) fn object_def(description: &str, required: &[&str], properties: Value
         "object_linetype",
         "object_lineweight",
         "linetype_scale",
+        "object_plot_style",
+        "object_transparency",
     ]) {
         properties[key] = json!({ "$ref": format!("#/$defs/{def}") });
     }
@@ -1229,6 +1235,10 @@ mod tests {
             sorted(&LINETYPE_KEYS)
         );
         assert_eq!(keys(&defs["layer"]["properties"]), sorted(&LAYER_KEYS));
+        assert_eq!(
+            keys(&defs["page_setup"]["properties"]),
+            sorted(&crate::description::page_setup::PAGE_SETUP_KEYS)
+        );
         assert_eq!(
             keys(&defs["text_style"]["properties"]),
             sorted(&TEXT_STYLE_KEYS)

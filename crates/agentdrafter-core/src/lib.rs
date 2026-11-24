@@ -188,6 +188,10 @@ pub use model::{Cell, Clip, Layout, Paper, Viewport};
 pub use model::{FieldItem, FieldKind, TextField, DEFAULT_FIELD_TEMPLATE, UNEVALUATED_FIELD};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use model::{
+    ObjectPlotStyle, ObjectTransparency, PageSetup, PlotArea, PlotScale, PlotStyleMode,
+    MAX_TRANSPARENCY, NORMAL_PLOT_STYLE,
+};
+pub use model::{
     RevisionCloud, RevisionCloudBoundary, RevisionCloudStyle, MOST_REVCLOUD_ARCS,
     REVCLOUD_APPLICATION, REVCLOUD_BULGE, REVCLOUD_CALLIGRAPHY_WIDTH_FACTOR,
 };

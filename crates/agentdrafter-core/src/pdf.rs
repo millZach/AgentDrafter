@@ -55,6 +55,12 @@ pub(crate) struct Page {
     pub width: f64,
     /// The page's height in points.
     pub height: f64,
+    /// Optional clipping box in drawing units (for `area: window` or
+    /// printer margins). None clips only at the page box itself.
+    pub clip_window: Option<Bounds>,
+    /// Whether layer and object transparency is plotted (via PDF
+    /// `ExtGState` `/ca` and `/CA`).
+    pub plot_transparency: bool,
 }
 
 impl Page {
@@ -131,6 +137,25 @@ pub(crate) fn pdf_pages(
         })
         .collect();
 
+    // Collect any distinct transparency percentages used on pages with
+    // `plot_transparency` enabled so we only emit ExtGState resources when
+    // transparency is actually present (keeping opaque PDFs byte-identical).
+    let mut transparencies: Vec<u8> = Vec::new();
+    for (list, page) in sheets {
+        if page.plot_transparency && list.items.iter().any(|i| i.transparency > 0) {
+            if !transparencies.contains(&0) {
+                transparencies.push(0);
+            }
+            for item in &list.items {
+                if !transparencies.contains(&item.transparency) {
+                    transparencies.push(item.transparency);
+                }
+            }
+        }
+    }
+    transparencies.sort_unstable();
+    let gs_refs: Vec<(u8, Ref)> = transparencies.iter().map(|&t| (t, next())).collect();
+
     let mut writer = Pdf::new();
     writer.catalog(catalog).pages(pages);
     let count = i32::try_from(sheets.len()).expect("a PDF of few pages");
@@ -139,6 +164,8 @@ pub(crate) fn pdf_pages(
         .kids(ids.iter().map(|(page_id, _)| *page_id))
         .count(count);
     for ((list, page), (page_id, content_id)) in sheets.iter().zip(&ids) {
+        let page_has_transparency =
+            page.plot_transparency && list.items.iter().any(|i| i.transparency > 0);
         {
             let mut sheet = writer.page(*page_id);
             sheet
@@ -146,15 +173,30 @@ pub(crate) fn pdf_pages(
                 .parent(pages)
                 .contents(*content_id);
             let mut resources = sheet.resources();
-            let mut named = resources.fonts();
-            for (i, (font, _, _)) in fonts.iter().enumerate() {
-                named.pair(Name(font_name(i).as_bytes()), *font);
+            {
+                let mut named = resources.fonts();
+                for (i, (font, _, _)) in fonts.iter().enumerate() {
+                    named.pair(Name(font_name(i).as_bytes()), *font);
+                }
+            }
+            if page_has_transparency {
+                let mut states = resources.ext_g_states();
+                for &(t, gs_ref) in &gs_refs {
+                    states.pair(Name(format!("GS{t}").as_bytes()), gs_ref);
+                }
             }
         }
-        let content = drawing(list, page, style, &codes);
+        let content = drawing(list, page, style, &codes, page_has_transparency);
         writer
             .stream(*content_id, &pack(&content))
             .filter(Filter::FlateDecode);
+    }
+    for &(t, gs_ref) in &gs_refs {
+        let alpha = (100.0 - f32::from(t)) / 100.0;
+        writer
+            .ext_graphics(gs_ref)
+            .non_stroking_alpha(alpha)
+            .stroking_alpha(alpha);
     }
 
     for (i, (font, map, drawings)) in fonts.iter().enumerate() {
@@ -218,13 +260,29 @@ pub(crate) fn pdf_pages(
 
 /// The page's content: the display list drawn, then its text written
 /// invisibly on top.
-fn drawing(list: &DisplayList, page: &Page, style: &PlotStyle, codes: &Codes) -> Vec<u8> {
+fn drawing(
+    list: &DisplayList,
+    page: &Page,
+    style: &PlotStyle,
+    codes: &Codes,
+    use_transparency: bool,
+) -> Vec<u8> {
     let mut content = Content::new();
+    if let Some(win) = page.clip_window {
+        let (x0, y0) = page.at(win.min);
+        let (x1, y1) = page.at(win.max);
+        content.save_state();
+        content
+            .rect(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
+            .clip_nonzero()
+            .end_path();
+    }
     content
         .set_line_cap(LineCapStyle::RoundCap)
         .set_line_join(LineJoinStyle::RoundJoin);
     let mut stroke: Option<([u8; 3], f32)> = None;
     let mut fill: Option<[u8; 3]> = None;
+    let mut gs_transparency: Option<u8> = None;
     let unit = |c: u8| f32::from(c) / 255.0;
     // The box the items drawn now are cut at: a viewport's window, a
     // clipping path its items draw inside, as AutoCAD 2026's plot cuts a
@@ -237,11 +295,12 @@ fn drawing(list: &DisplayList, page: &Page, style: &PlotStyle, codes: &Codes) ->
         let cut = item.clip.map(|clip| (clip, item.clip_boundary));
         if cut != clipped {
             if clipped.is_some() {
-                // Restoring the state forgets the pen and the fill set
-                // inside it.
+                // Restoring the state forgets the pen, fill and graphics
+                // state set inside it.
                 content.restore_state();
                 stroke = None;
                 fill = None;
+                gs_transparency = None;
             }
             match (
                 item.clip,
@@ -270,10 +329,24 @@ fn drawing(list: &DisplayList, page: &Page, style: &PlotStyle, codes: &Codes) ->
             }
             clipped = cut;
         }
-        let rgb = style.color(item.color);
+        if use_transparency {
+            let target_t = match &item.shape {
+                Shape::Mask { .. } => 0,
+                _ => item.transparency,
+            };
+            if gs_transparency != Some(target_t) {
+                let gs_name = format!("GS{target_t}");
+                content.set_parameters(Name(gs_name.as_bytes()));
+                gs_transparency = Some(target_t);
+            }
+        }
+        let rgb = style.color_for(item.color, item.plot_style.as_deref());
         match &item.shape {
             Shape::Stroke { lineweight, runs } => {
-                let width = snap(style.lineweight(item.color, *lineweight) * POINTS_PER_MILLIMETRE);
+                let width = snap(
+                    style.lineweight_for(item.color, item.plot_style.as_deref(), *lineweight)
+                        * POINTS_PER_MILLIMETRE,
+                );
                 let mut drawn = false;
                 for run in runs {
                     let points: Vec<(f32, f32)> = run.iter().map(|&p| page.at(p)).collect();
@@ -365,6 +438,9 @@ fn drawing(list: &DisplayList, page: &Page, style: &PlotStyle, codes: &Codes) ->
         }
     }
     if clipped.is_some() {
+        content.restore_state();
+    }
+    if page.clip_window.is_some() {
         content.restore_state();
     }
     if !list.text.is_empty() {
@@ -1252,6 +1328,8 @@ pub(crate) mod tests {
                     points_per_unit: 1.0,
                     width: 10.0,
                     height: 10.0,
+                    clip_window: None,
+                    plot_transparency: true,
                 },
             )],
             &PlotStyle::monochrome(),

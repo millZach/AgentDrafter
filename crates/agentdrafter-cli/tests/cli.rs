@@ -291,7 +291,7 @@ fn operations_are_listed_and_a_change_set_is_applied_from_a_file() {
     let (code, json) = agentdrafter(&["operations"], &dir);
     assert_eq!(code, 0, "{json}");
     let listed = json["result"]["operations"].as_array().unwrap();
-    assert_eq!(listed.len(), 81);
+    assert_eq!(listed.len(), 82);
     assert_eq!(listed[11]["name"], "add_revision_cloud");
     assert_eq!(listed[11]["alias"], "REVCLOUD");
     assert_eq!(listed[12]["name"], "add_wipeout");
@@ -352,6 +352,8 @@ fn operations_are_listed_and_a_change_set_is_applied_from_a_file() {
     assert_eq!(listed[52]["other_aliases"], serde_json::json!(["X"]));
     assert_eq!(listed[53]["name"], "set_field");
     assert_eq!(listed[53]["alias"], "FIELD");
+    assert_eq!(listed[54]["name"], "set_page_setup");
+    assert_eq!(listed[54]["alias"], "PAGESETUP");
     assert_eq!(listed[31]["alias"], "MOVE");
     assert!(listed[31]["schema"]["$defs"]["point"].is_object());
     let (code, json) = agentdrafter(&["schema", "change-set"], &dir);

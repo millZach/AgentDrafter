@@ -102,7 +102,7 @@ out vec2 v_at;
 flat out vec2 v_a;
 flat out vec2 v_b;
 flat out float v_half;
-flat out vec3 v_color;
+flat out vec4 v_color;
 flat out vec4 v_clip;
 void main() {
   vec2 a = a_segment.xy * u_scale + u_offset;
@@ -128,7 +128,7 @@ void main() {
   v_a = a;
   v_b = b;
   v_half = half_width;
-  v_color = a_color.rgb;
+  v_color = a_color;
   // A later item is nearer, so it covers an earlier one.
   float depth = 1.0 - 2.0 * (a_item + 1.0) / (u_items + 1.0);
   gl_Position = vec4(p.x / u_size.x * 2.0 - 1.0, 1.0 - p.y / u_size.y * 2.0, depth, 1.0);
@@ -141,7 +141,7 @@ in vec2 v_at;
 flat in vec2 v_a;
 flat in vec2 v_b;
 flat in float v_half;
-flat in vec3 v_color;
+flat in vec4 v_color;
 flat in vec4 v_clip;
 uniform bool u_multisampled;
 out vec4 o_color;
@@ -155,7 +155,7 @@ void main() {
   // Beside the segment, the quad's own edges are the pen's: every sample
   // the quad covers is ink.
   if (t >= 0.0 && t <= 1.0) {
-    o_color = vec4(v_color, 1.0);
+    o_color = v_color;
     return;
   }
   // At a round end, the share of the pixel the pen covers, by its distance.
@@ -163,7 +163,7 @@ void main() {
   float coverage = clamp(v_half + 0.5 - d, 0.0, 1.0);
   // Without samples to share out, a pixel is the pen's when it covers half.
   if (coverage <= 0.0 || (!u_multisampled && coverage < 0.5)) discard;
-  o_color = vec4(v_color, coverage);
+  o_color = vec4(v_color.rgb, v_color.a * coverage);
 }
 "#;
 
@@ -176,10 +176,10 @@ uniform vec2 u_scale;
 uniform vec2 u_offset;
 uniform vec2 u_size;
 uniform float u_items;
-flat out vec3 v_color;
+flat out vec4 v_color;
 void main() {
   vec2 p = a_point * u_scale + u_offset;
-  v_color = a_color.rgb;
+  v_color = a_color;
   float depth = 1.0 - 2.0 * (a_item + 1.0) / (u_items + 1.0);
   gl_Position = vec4(p.x / u_size.x * 2.0 - 1.0, 1.0 - p.y / u_size.y * 2.0, depth, 1.0);
 }
@@ -187,10 +187,10 @@ void main() {
 
 const FILL_FRAGMENT: &str = r#"#version 300 es
 precision highp float;
-flat in vec3 v_color;
+flat in vec4 v_color;
 out vec4 o_color;
 void main() {
-  o_color = vec4(v_color, 1.0);
+  o_color = v_color;
 }
 "#;
 
@@ -403,6 +403,8 @@ struct Loaded {
     millimetres_per_unit: f64,
     /// How many items the display list holds, which sets each one's depth.
     items: f32,
+    /// Whether any item on the sheet has transparency > 0.
+    has_transparency: bool,
     runs: Vec<Run>,
     spans: Vec<Span>,
     /// Each clipped viewport's boundary's fan: its first triangle and how
@@ -978,6 +980,11 @@ impl Viewer {
         gl.uniform1f(self.stroke.at("u_pixels_per_mm"), per_mm as f32);
         // The finest pen is one CSS pixel wide, as a PNG's is one pixel.
         gl.uniform1f(self.stroke.at("u_finest"), ratio as f32);
+        let blend = sheet.has_transparency;
+        if blend {
+            gl.enable(Gl::BLEND);
+            gl.blend_func(Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA);
+        }
         let draw = |kind: Kind, first: u32, count: u32| match kind {
             Kind::Fills => {
                 gl.use_program(Some(&self.fill.program));
@@ -992,14 +999,18 @@ impl Viewer {
             Kind::Strokes => {
                 gl.use_program(Some(&self.stroke.program));
                 gl.bind_vertex_array(Some(&sheet.strokes));
-                gl.enable(Gl::SAMPLE_ALPHA_TO_COVERAGE);
+                if !blend {
+                    gl.enable(Gl::SAMPLE_ALPHA_TO_COVERAGE);
+                }
                 gl.draw_elements_with_i32(
                     Gl::TRIANGLES,
                     (count * 6) as i32,
                     Gl::UNSIGNED_INT,
                     (first * 6 * 4) as i32,
                 );
-                gl.disable(Gl::SAMPLE_ALPHA_TO_COVERAGE);
+                if !blend {
+                    gl.disable(Gl::SAMPLE_ALPHA_TO_COVERAGE);
+                }
             }
         };
         // Sets the stencil inside the clipped viewport's boundary `b`, and
@@ -1027,7 +1038,7 @@ impl Viewer {
             gl.stencil_func(Gl::EQUAL, 0xff, 0xff);
             gl.stencil_op(Gl::KEEP, Gl::KEEP, Gl::KEEP);
         };
-        if sheet.runs.len() <= MOST_RUNS {
+        if blend || sheet.runs.len() <= MOST_RUNS {
             // Run after run, as the display list orders them: what is drawn
             // later covers what was drawn before, within a draw call and
             // across them.
@@ -2044,6 +2055,7 @@ impl Viewer {
             paper: mesh.paper,
             millimetres_per_unit,
             items: mesh.items as f32,
+            has_transparency: mesh.has_transparency,
             runs: mesh.runs.clone(),
             spans: mesh.spans.clone(),
             stencils: mesh.stencils.clone(),

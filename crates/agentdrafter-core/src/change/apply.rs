@@ -1267,8 +1267,16 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::Table {
                 to: AddTo::Sheet(sheet),
                 ..
+            }
+            | Body::SetPageSetup {
+                to: AddTo::Sheet(sheet),
+                ..
             } => (sheet, "sheet"),
             Body::Table {
+                to: AddTo::Template(written),
+                ..
+            }
+            | Body::SetPageSetup {
                 to: AddTo::Template(written),
                 ..
             } => {
@@ -1812,6 +1820,10 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         );
     }
 
+    if let Body::SetPageSetup { to, layout, set } = &op.body {
+        return apply_page_setup(at, op, to, layout.as_deref(), set);
+    }
+
     if let Body::Block {
         library,
         import: Some(import),
@@ -1883,6 +1895,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Join { .. }
         | Body::Stretch { .. }
         | Body::Explode { .. }
+        | Body::SetPageSetup { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2368,6 +2381,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Join { .. }
         | Body::Stretch { .. }
         | Body::Explode { .. }
+        | Body::SetPageSetup { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2901,6 +2915,74 @@ fn locked_layer(at: &mut Attempt, found: &Found) -> Option<String> {
         .ok()?
         .table_value(Table::Layer.key(), &layer, "locked");
     (locked.as_deref() == Some("true")).then_some(layer)
+}
+
+/// Applies `set_page_setup` (`PAGESETUP`) to a template's top-level or named
+/// layout `page_setup`.
+fn apply_page_setup(
+    at: &mut Attempt,
+    op: &Operation,
+    to: &AddTo,
+    layout: Option<&str>,
+    set: &serde_json::Map<String, serde_json::Value>,
+) -> Applied {
+    let files = at.files;
+    let t = match to {
+        AddTo::Template(written) => files.template(written).expect("checked before"),
+        AddTo::Sheet(sheet) => files.template_of[files.sheet(sheet).expect("checked before")],
+    };
+    let sheets = files.templates[t].sheets.clone();
+    let fail = |code: ErrorCode, message: String, field: &str| Applied {
+        sheets: sheets.clone(),
+        outcome: Err(op_error(op.index, op.spec.name, code, message, field)),
+        refuse: false,
+    };
+    if let Some(refusal) = many_paths(files, FileRef::Template(t), op, "template") {
+        return refusal;
+    }
+    let written = files.templates[t].written.clone();
+    let record = match at.template(t) {
+        Ok(record) => record,
+        Err(e) => return fail(e.code, e.message, ""),
+    };
+    let path = record.path.clone();
+    let target_label = match record.set_page_setup(layout, set) {
+        Ok(label) => label,
+        Err(e) => {
+            let field = e.field.as_deref().unwrap_or("");
+            return fail(e.code, e.message, field);
+        }
+    };
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: None,
+            before: None,
+            after: None,
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
+            split_id: None,
+            deleted: Vec::new(),
+            created: Vec::new(),
+            snapped: Vec::new(),
+            message: format!(
+                "updates {target_label} in template `{written}`, so on {}",
+                every_sheet(&files.names(&sheets))
+            ),
+        }),
+        sheets,
+        refuse: false,
+    }
 }
 
 /// Applies a table operation: adds, changes, renames or deletes the entry
@@ -10132,11 +10214,19 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::Table {
             to: AddTo::Template(written),
             ..
+        }
+        | Body::SetPageSetup {
+            to: AddTo::Template(written),
+            ..
         } => files.template(written) == Some(files.template_of[k]),
         Body::AddRevisionCloud {
             to: None, around, ..
         } => around.iter().any(|(t, _)| reaches(t)),
         Body::Table {
+            to: AddTo::Sheet(sheet),
+            ..
+        }
+        | Body::SetPageSetup {
             to: AddTo::Sheet(sheet),
             ..
         } => files
@@ -10245,7 +10335,8 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
             op: TableOp::Change,
             keys,
             ..
-        } => {
+        }
+        | Body::SetPageSetup { set: keys, .. } => {
             let key = rest.rsplit('.').next().unwrap_or("");
             if keys.contains_key(key) {
                 format!("set.{key}")
@@ -10598,6 +10689,26 @@ fn target_words(op: &Operation) -> String {
             to: AddTo::Sheet(s),
             ..
         } => format!("the {} `{name}` of sheet `{s}`'s template", table.word()),
+        Body::SetPageSetup {
+            layout: Some(layout),
+            to: AddTo::Template(t),
+            ..
+        } => format!("layout `{layout}`'s page setup in template `{t}`"),
+        Body::SetPageSetup {
+            layout: Some(layout),
+            to: AddTo::Sheet(s),
+            ..
+        } => format!("layout `{layout}`'s page setup in sheet `{s}`'s template"),
+        Body::SetPageSetup {
+            layout: None,
+            to: AddTo::Template(t),
+            ..
+        } => format!("the page setup of template `{t}`"),
+        Body::SetPageSetup {
+            layout: None,
+            to: AddTo::Sheet(s),
+            ..
+        } => format!("the page setup of sheet `{s}`'s template"),
         Body::Block {
             import: Some(import),
             ..

@@ -34,6 +34,7 @@ mod leader;
 mod leader_schema;
 mod mark;
 mod objects;
+pub(crate) mod page_setup;
 pub(crate) mod paper;
 pub(crate) mod parts;
 mod polyline;
@@ -87,7 +88,7 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 16] = [
+pub(crate) const SHEET_KEYS: [&str; 17] = [
     "units",
     "block_library",
     "ltscale",
@@ -102,6 +103,7 @@ pub(crate) const SHEET_KEYS: [&str; 16] = [
     "dimension_styles",
     "objects",
     paper::PAPER_KEY,
+    page_setup::PAGE_SETUP_KEY,
     layout::LAYOUT_KEY,
     layout::LAYOUTS_KEY,
 ];
@@ -428,33 +430,46 @@ fn sheet_and_records(
         Some(node) => Some(paper::paper(node, paper::PAPER_KEY, units)?),
         None => None,
     };
-    // The layouts the sheet is drawn in, each with its name and paper: one
-    // under `layout`, on the sheet's paper, or two or more under `layouts`.
-    let layouts: Vec<(String, Paper)> =
-        match (fields.get(layout::LAYOUT_KEY), fields.get(layout::LAYOUTS_KEY)) {
-            (Some(_), Some(node)) => {
-                return Err(bad_value(
-                    node,
-                    layout::LAYOUTS_KEY,
-                    "a sheet is drawn in one layout, under `layout`, or in several, under                      `layouts`, not both",
-                ))
-            }
-            (Some(node), None) => {
-                let name = layout::layout(
-                    node,
-                    layout::LAYOUT_KEY,
-                    units,
-                    paper.as_ref().zip(fields.get(paper::PAPER_KEY)),
-                )?;
-                let paper = paper.clone().expect("a layout's paper is declared");
-                vec![(name, paper)]
-            }
-            (None, Some(node)) => {
-                layout::layouts(node, layout::LAYOUTS_KEY, units, paper.as_ref())?
-            }
-            (None, None) => Vec::new(),
-        };
-    let layout_names: Vec<String> = layouts.iter().map(|(name, _)| name.clone()).collect();
+    let has_layout =
+        fields.get(layout::LAYOUT_KEY).is_some() || fields.get(layout::LAYOUTS_KEY).is_some();
+    let sheet_page_setup = match fields.get(page_setup::PAGE_SETUP_KEY) {
+        Some(node) => Some(page_setup::page_setup(
+            node,
+            page_setup::PAGE_SETUP_KEY,
+            units,
+            has_layout,
+        )?),
+        None => None,
+    };
+    // The layouts the sheet is drawn in, each with its name, paper and
+    // optional page setup: one under `layout`, on the sheet's paper, or
+    // two or more under `layouts`.
+    let layouts: Vec<(String, Paper, Option<crate::model::PageSetup>)> = match (
+        fields.get(layout::LAYOUT_KEY),
+        fields.get(layout::LAYOUTS_KEY),
+    ) {
+        (Some(_), Some(node)) => {
+            return Err(bad_value(
+                node,
+                layout::LAYOUTS_KEY,
+                "a sheet is drawn in one layout, under `layout`, or in several, under \
+                     `layouts`, not both",
+            ))
+        }
+        (Some(node), None) => {
+            let (name, layout_ps) = layout::layout(
+                node,
+                layout::LAYOUT_KEY,
+                units,
+                paper.as_ref().zip(fields.get(paper::PAPER_KEY)),
+            )?;
+            let paper = paper.clone().expect("a layout's paper is declared");
+            vec![(name, paper, layout_ps)]
+        }
+        (None, Some(node)) => layout::layouts(node, layout::LAYOUTS_KEY, units, paper.as_ref())?,
+        (None, None) => Vec::new(),
+    };
+    let layout_names: Vec<String> = layouts.iter().map(|(name, _, _)| name.clone()).collect();
     let list = sequence(fields.require("objects")?, "objects", "a list of objects")?;
     let tables = Tables {
         units,
@@ -516,9 +531,10 @@ fn sheet_and_records(
     let mut layouts = layouts
         .into_iter()
         .enumerate()
-        .map(|(k, (name, paper))| Layout {
+        .map(|(k, (name, paper, layout_ps))| Layout {
             name,
             paper: Some(paper),
+            page_setup: layout_ps,
             paper_space: spaces.iter().map(|s| *s == Some(k)).collect(),
         });
     let layout = layouts.next();
@@ -536,6 +552,7 @@ fn sheet_and_records(
         objects,
         // A sheet drawn in layouts is on its first layout's paper.
         paper: layout.as_ref().and_then(|l| l.paper.clone()).or(paper),
+        page_setup: sheet_page_setup,
         ltscale,
         layout,
         other_layouts,
@@ -1030,6 +1047,38 @@ pub(crate) fn parse_linetype_scale_json(
     }
     let node = json_to_node(value);
     layers::linetype_scale(&node, path).map_err(strip_zero_pos)
+}
+
+pub(crate) fn parse_object_plot_style_json(
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<crate::model::ObjectPlotStyle, Error> {
+    if value.is_null() {
+        return Ok(crate::model::ObjectPlotStyle::ByLayer);
+    }
+    let node = json_to_node(value);
+    page_setup::object_plot_style(&node, path).map_err(strip_zero_pos)
+}
+
+pub(crate) fn parse_object_transparency_json(
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<crate::model::ObjectTransparency, Error> {
+    if value.is_null() {
+        return Ok(crate::model::ObjectTransparency::ByLayer);
+    }
+    let node = json_to_node(value);
+    page_setup::object_transparency(&node, path).map_err(strip_zero_pos)
+}
+
+pub(crate) fn parse_page_setup_json(
+    value: &serde_json::Value,
+    path: &str,
+    units: Unit,
+    is_layout: bool,
+) -> Result<crate::model::PageSetup, Error> {
+    let node = json_to_node(value);
+    page_setup::page_setup(&node, path, units, is_layout).map_err(strip_zero_pos)
 }
 
 pub(crate) fn parse_point_json(

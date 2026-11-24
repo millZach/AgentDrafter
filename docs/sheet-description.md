@@ -56,8 +56,9 @@ Keys are spelled as AutoCAD spells them: `color`, `center`.
 | `dimension_styles` | no | The sheet's dimension styles: a mapping from each style's name to what its dimensions draw with. See [Dimension styles](#dimension-styles). |
 | `objects` | yes | A list of objects, which may be empty, in drawing order. Each object is a mapping with one key, its type. |
 | `paper` | no | The paper the sheet is drawn on, which the checker holds it to. See [Paper](#paper). |
-| `layout` | no | The paper-space layout the sheet is drawn in, with its name. See [Layouts and viewports](#layouts-and-viewports). |
-| `layouts` | no | The paper-space layouts the sheet is drawn in, when it is drawn in more than one, each with its name and paper. Not with `layout`. See [Several layouts](#several-layouts). |
+| `page_setup` | no | The sheet's [page setup](plot.md#page-setups-and-plot-scale-pagesetup) (`PAGESETUP`): `paper`, `area` (`extents`, `window`, or `layout` on a paper-space layout), `window`, `scale` (`fit` or ratio such as `1:2`), `center`, `offset`, `plot_style` (CTB or STB file name), and `plot_transparency`. |
+| `layout` | no | The paper-space layout the sheet is drawn in, with its `name` and optional `page_setup`. See [Layouts and viewports](#layouts-and-viewports). |
+| `layouts` | no | The paper-space layouts the sheet is drawn in, when it is drawn in more than one, each with its `name`, `paper`, and optional `page_setup`. Not with `layout`. See [Several layouts](#several-layouts). |
 
 ### Linetypes
 
@@ -77,6 +78,8 @@ A layer is a named group of objects that draw with its colour, linetype and line
 | `color` | no | An AutoCAD colour index from 1 to 255, or one of `red` (1), `yellow` (2), `green` (3), `cyan` (4), `blue` (5), `magenta` (6) or `white` (7). Without it, 7. |
 | `linetype` | no | `Continuous`, or a name under `linetypes` written exactly as it is there. Without it, `Continuous`. |
 | `lineweight` | no | The pen width the layer plots with, in millimetres, with or without `mm`, written out as digits with a `.` and digits if any, such as `0.35` or `0.50`, with no sign or exponent: one of AutoCAD's standard lineweights, 0, 0.05, 0.09, 0.13, 0.15, 0.18, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.53, 0.6, 0.7, 0.8, 0.9, 1, 1.06, 1.2, 1.4, 1.58, 2 or 2.11. Without it, AutoCAD's default lineweight. |
+| `plot_style` | no | The named plot style this layer plots with in an STB drawing (such as `Normal` or `Heavy`, setting `PSTYLEMODE = 0` in the DWG). Leave out in a colour-dependent (CTB) drawing. Objects also accept `plot_style` (`ByLayer`, `ByBlock`, or a named style). |
+| `transparency` | no | Layer transparency percentage, a whole number from `0` (opaque, default) to `90`, written in DWG via AutoCAD's `AcCmTransparency` extended data and drawn across PNG, PDF and viewer. Objects also accept `transparency` (`ByLayer`, `ByBlock`, or `0..=90`). |
 | `on` | no | Whether the layer is on, `true` or `false`. An object on a layer that is off draws nothing, in the PNG, the PDF or the viewer, and still counts towards the extents, as in AutoCAD. Without it, `true`. |
 | `frozen` | no | Whether the layer is frozen. An object on a frozen layer draws nothing and does not count towards the extents, as in AutoCAD. Without it, `false`. |
 | `locked` | no | Whether the layer is locked against editing, as AutoCAD locks it. It changes nothing a sheet draws; a [change set](change-sets.md#the-operations) does not edit an object on it. Without it, `false`. |
@@ -274,6 +277,8 @@ Every object, an insert and a block's objects and attribute definitions among th
 | `linetype` | `ByLayer`, `ByBlock`, `Continuous`, or a name under `linetypes`, written exactly as it is there. Without it, `ByLayer`. |
 | `lineweight` | `ByLayer`, `ByBlock`, `Default` (AutoCAD's default lineweight, 0.25 mm as installed), or a standard lineweight in millimetres as a layer takes it. Without it, `ByLayer`. |
 | `linetype_scale` | What the object's linetype is enlarged by, on top of the sheet's `ltscale`: a number more than 0, with no unit. Without it, 1. |
+| `plot_style` | `ByLayer`, `ByBlock`, or a named plot style from an STB table (such as `Normal` or `Heavy`). Without it, `ByLayer`. |
+| `transparency` | `ByLayer`, `ByBlock`, or a transparency percentage from `0` (opaque) to `90`. Without it, `ByLayer`. |
 
 `ByLayer`, `ByBlock` and `Default` are written as here, in that case. A true colour is not offered yet ([#106](https://github.com/millZach/AgentDrafter/issues/106)).
 

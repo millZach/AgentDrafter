@@ -471,6 +471,174 @@ impl RecordFile {
         Ok(())
     }
 
+    /// Sets keys of the template's or named layout's `page_setup` (`PAGESETUP`):
+    /// each key of `set` takes its new value, and `null` takes a key away.
+    pub(crate) fn set_page_setup(
+        &mut self,
+        layout: Option<&str>,
+        set: &Map<String, Value>,
+    ) -> Result<String, Error> {
+        use super::page_setup::{PAGE_SETUP_KEY, PAGE_SETUP_KEYS};
+        fn apply_patch(entries: &mut Vec<Entry>, set: &Map<String, Value>) {
+            // Switching away from `window` drops a carried `window`; setting
+            // `center: true` clears a carried non-zero `offset`.
+            if matches!(
+                set.get("area").and_then(Value::as_str),
+                Some("extents" | "layout")
+            ) && !set.contains_key("window")
+            {
+                entries.retain(|e| e.key != "window");
+            }
+            if set.get("center") == Some(&Value::Bool(true)) && !set.contains_key("offset") {
+                entries.retain(|e| e.key != "offset");
+            }
+            for (key, value) in set {
+                let pos = entries.iter().position(|e| e.key == *key);
+                match (value, pos) {
+                    (Value::Null, Some(p)) => {
+                        entries.remove(p);
+                    }
+                    (Value::Null, None) => {}
+                    (value, Some(p)) => entries[p].value = node_of(value),
+                    (value, None) => entries.push(new_entry(key, node_of(value))),
+                }
+            }
+            entries.sort_by_key(|k| {
+                PAGE_SETUP_KEYS
+                    .iter()
+                    .position(|o| *o == k.key)
+                    .unwrap_or(PAGE_SETUP_KEYS.len())
+            });
+        }
+        let Some(target_layout) = layout else {
+            let entries = self.table_mut(PAGE_SETUP_KEY)?;
+            apply_patch(entries, set);
+            self.note_rewrite(PAGE_SETUP_KEY);
+            return Ok("page setup".to_owned());
+        };
+        let path = self.path.clone();
+        let Kind::Mapping(root_entries) = &mut self.root.kind else {
+            return Err(record_shape_in("a mapping", &path));
+        };
+        if let Some(layouts_entry) = root_entries.iter_mut().find(|e| e.key == "layouts") {
+            let Kind::Sequence(items) = &mut layouts_entry.value.kind else {
+                return Err(record_shape_in("a list under `layouts`", &path));
+            };
+            let mut names = Vec::new();
+            let mut found = None;
+            for (i, item) in items.iter().enumerate() {
+                let item_name = match &item.kind {
+                    Kind::Scalar(s) => Some(s.as_str()),
+                    Kind::Mapping(m) => scalar_of(m, "name"),
+                    _ => None,
+                };
+                if let Some(n) = item_name {
+                    names.push(n.to_owned());
+                    if n.eq_ignore_ascii_case(target_layout) {
+                        found = Some((i, n.to_owned()));
+                    }
+                }
+            }
+            let Some((idx, resolved)) = found else {
+                return Err(Error::new(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "the template has no layout `{target_layout}`; its layouts: {}",
+                        names.join(", ")
+                    ),
+                )
+                .at_field("layout"));
+            };
+            if let Kind::Scalar(s) = &items[idx].kind {
+                let owned = s.clone();
+                items[idx] = Node::new(Kind::Mapping(vec![new_entry(
+                    "name",
+                    Node::new(Kind::Scalar(owned)),
+                )]));
+            }
+            let Kind::Mapping(layout_map) = &mut items[idx].kind else {
+                return Err(record_shape_in("a layout mapping", &path));
+            };
+            if !layout_map.iter().any(|e| e.key == PAGE_SETUP_KEY) {
+                layout_map.push(new_entry(
+                    PAGE_SETUP_KEY,
+                    Node::new(Kind::Mapping(Vec::new())),
+                ));
+            }
+            let ps_entry = layout_map
+                .iter_mut()
+                .find(|e| e.key == PAGE_SETUP_KEY)
+                .expect("just made");
+            if ps_entry.value.is_bare_null() || !matches!(ps_entry.value.kind, Kind::Mapping(_)) {
+                ps_entry.value = Node::new(Kind::Mapping(Vec::new()));
+            }
+            let Kind::Mapping(ps_entries) = &mut ps_entry.value.kind else {
+                unreachable!()
+            };
+            apply_patch(ps_entries, set);
+            self.note_rewrite("layouts");
+            return Ok(format!("layout `{resolved}`'s page setup"));
+        }
+        if let Some(layout_entry) = root_entries.iter_mut().find(|e| e.key == "layout") {
+            let existing_name = match &layout_entry.value.kind {
+                Kind::Scalar(s) => Some(s.clone()),
+                Kind::Mapping(m) => scalar_of(m, "name").map(str::to_owned),
+                _ => None,
+            };
+            let Some(resolved) = existing_name else {
+                return Err(record_shape_in(
+                    "a layout name or mapping under `layout`",
+                    &path,
+                ));
+            };
+            if !resolved.eq_ignore_ascii_case(target_layout) {
+                return Err(Error::new(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "the template has no layout `{target_layout}`; its layout is `{resolved}`"
+                    ),
+                )
+                .at_field("layout"));
+            }
+            if matches!(layout_entry.value.kind, Kind::Scalar(_)) {
+                layout_entry.value = Node::new(Kind::Mapping(vec![new_entry(
+                    "name",
+                    Node::new(Kind::Scalar(resolved.clone())),
+                )]));
+            }
+            let Kind::Mapping(layout_map) = &mut layout_entry.value.kind else {
+                unreachable!()
+            };
+            if !layout_map.iter().any(|e| e.key == PAGE_SETUP_KEY) {
+                layout_map.push(new_entry(
+                    PAGE_SETUP_KEY,
+                    Node::new(Kind::Mapping(Vec::new())),
+                ));
+            }
+            let ps_entry = layout_map
+                .iter_mut()
+                .find(|e| e.key == PAGE_SETUP_KEY)
+                .expect("just made");
+            if ps_entry.value.is_bare_null() || !matches!(ps_entry.value.kind, Kind::Mapping(_)) {
+                ps_entry.value = Node::new(Kind::Mapping(Vec::new()));
+            }
+            let Kind::Mapping(ps_entries) = &mut ps_entry.value.kind else {
+                unreachable!()
+            };
+            apply_patch(ps_entries, set);
+            self.note_rewrite("layout");
+            return Ok(format!("layout `{resolved}`'s page setup"));
+        }
+        Err(Error::new(
+            ErrorCode::UnknownName,
+            format!(
+                "the template has no layout `{target_layout}`; it is drawn in model space alone \
+                 (omit `layout` to set the sheet's model-space page setup)"
+            ),
+        )
+        .at_field("layout"))
+    }
+
     /// Renames the entry `name` of `table` to `to`.
     pub(crate) fn table_rename(&mut self, table: &str, name: &str, to: &str) -> Result<(), Error> {
         let entries = self.table_mut(table)?;
@@ -1116,26 +1284,41 @@ impl RecordFile {
         }
         let nl = self.newline;
         let emitter = self.emitter();
-        let Kind::Mapping(entries) = &entry.value.kind else {
-            return Err(record_shape_in(
-                &format!("a mapping under `{table}`"),
-                &self.path,
-            ));
-        };
-        let render = |column: usize| -> String {
+        let render = |column: usize| -> Result<String, Error> {
             let indent = " ".repeat(column);
-            if entries.is_empty() {
-                return format!("{indent}{table}: {{}}{nl}");
+            match &entry.value.kind {
+                Kind::Mapping(entries) => {
+                    if entries.is_empty() {
+                        return Ok(format!("{indent}{table}: {{}}{nl}"));
+                    }
+                    let mut with = format!("{indent}{table}:{nl}");
+                    for e in entries {
+                        with.push_str(&" ".repeat(column + 2));
+                        with.push_str(&scalar_text(&e.key, Context::Flow, column + 2, nl));
+                        with.push_str(": ");
+                        with.push_str(&emitter.flow(&e.value));
+                        with.push_str(nl);
+                    }
+                    Ok(with)
+                }
+                Kind::Sequence(items) => {
+                    if items.is_empty() {
+                        return Ok(format!("{indent}{table}: []{nl}"));
+                    }
+                    let mut with = format!("{indent}{table}:{nl}");
+                    for item in items {
+                        with.push_str(&" ".repeat(column + 2));
+                        with.push_str("- ");
+                        with.push_str(&emitter.flow(item));
+                        with.push_str(nl);
+                    }
+                    Ok(with)
+                }
+                _ => Err(record_shape_in(
+                    &format!("a mapping or list under `{table}`"),
+                    &self.path,
+                )),
             }
-            let mut with = format!("{indent}{table}:{nl}");
-            for e in entries {
-                with.push_str(&" ".repeat(column + 2));
-                with.push_str(&scalar_text(&e.key, Context::Flow, column + 2, nl));
-                with.push_str(": ");
-                with.push_str(&emitter.flow(&e.value));
-                with.push_str(nl);
-            }
-            with
         };
         if entry.key_end > 0 {
             let column = entry.key_at.column.saturating_sub(1);
@@ -1160,7 +1343,7 @@ impl RecordFile {
                 )
                 .in_file(&self.path));
             }
-            let mut with = render(column);
+            let mut with = render(column)?;
             if end == self.text.len() && !self.text.ends_with('\n') {
                 with.truncate(with.len() - nl.len());
             }
@@ -1173,12 +1356,12 @@ impl RecordFile {
         match root.iter().find(|e| e.key == "objects" && e.key_end > 0) {
             Some(objects) => {
                 let at = line_start(&self.text, objects.key_end);
-                Ok((at, at, render(column)))
+                Ok((at, at, render(column)?))
             }
             None => {
                 let at = self.text.len();
                 let lead = if self.text.ends_with('\n') { "" } else { nl };
-                Ok((at, at, format!("{lead}{}", render(column))))
+                Ok((at, at, format!("{lead}{}", render(column)?)))
             }
         }
     }

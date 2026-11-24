@@ -46,48 +46,96 @@ use crate::draw::Color;
 /// The heading every CTB file starts with, before its three numbers.
 const CTB_HEADING: &[u8] = b"PIAFILEVERSION_2.0,CTBVER1,compress\r\npmzlibcodec";
 
-/// The heading of a named plot style table, which this does not read.
+/// The heading of a named plot style table (STB).
 const STB_HEADING: &[u8] = b"PIAFILEVERSION_2.0,STBVER1,compress\r\npmzlibcodec";
 
 /// How many bytes come before the packed text.
 const BEFORE_TEXT: usize = 60;
 
-/// The most bytes the packed text may unpack to. AutoCAD's own CTB files
-/// unpack to under 100 kB.
+/// The most bytes the packed text may unpack to. AutoCAD's own CTB/STB
+/// files unpack to under 100 kB.
 const MOST_TEXT: usize = 16 * 1024 * 1024;
 
 /// The colours that mean a pen plots the object's own colour.
 const OBJECT_COLORS: [i64; 2] = [-1, -1_006_632_961];
 
-/// What a plot style sets for one colour index.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// What a plot style sets for one pen (one colour index in a CTB, or one
+/// named style in an STB).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Pen {
-    /// The colour the index plots in; none for the object's own colour.
+    /// The colour the pen plots in; none for the object's own colour.
     pub color: Option<[u8; 3]>,
-    /// The lineweight in millimetres the index plots with; none for the
+    /// The lineweight in millimetres the pen plots with; none for the
     /// object's own lineweight.
     pub lineweight: Option<f64>,
+    /// Screening percentage (`0..=100`): `100` is full ink strength, `0`
+    /// is white (no ink), values in between lighten the pen's colour toward
+    /// white on paper.
+    pub screen: u8,
+}
+
+impl Default for Pen {
+    fn default() -> Self {
+        Self {
+            color: None,
+            lineweight: None,
+            screen: 100,
+        }
+    }
+}
+
+/// Which kind of plot style table a [`PlotStyle`] holds.
+#[derive(Clone, Debug, PartialEq)]
+enum Table {
+    /// Colour-dependent plot style (CTB): pens indexed by AutoCAD colour
+    /// index `0..=255` (index 0 is never drawn).
+    Ctb(Vec<Pen>),
+    /// Named plot style (STB): `(name, localized_name, pen)` entries plus
+    /// the fallback `Normal` pen.
+    Stb {
+        entries: Vec<(String, Option<String>, Pen)>,
+        normal: Pen,
+    },
 }
 
 /// The pens a plot draws with.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PlotStyle {
-    /// Pens by colour index; index 0 is never drawn.
-    pens: Vec<Pen>,
+    table: Table,
     /// The pen settings this plot style sets that are not followed yet.
     pub not_followed: Vec<NotFollowed>,
 }
 
 /// A pen setting a plot style sets that AgentDrafter does not follow yet,
-/// and the colour indexes whose pens set it.
+/// and the colour indexes (for a CTB) or style names (for an STB) whose
+/// pens set it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct NotFollowed {
-    /// The setting, as the CTB file names it, such as `screen`.
+    /// The setting, as the CTB/STB file names it, such as `linetype`.
     pub setting: String,
     /// What it is, in words, and what the plot does instead.
     pub meaning: String,
-    /// The colour indexes whose pens set it.
+    /// The colour indexes whose pens set it (CTB).
     pub colors: Vec<u8>,
+    /// The named plot styles whose pens set it (STB).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub styles: Vec<String>,
+}
+
+/// Applies AutoCAD screening (`0..=100`) to an RGB ink colour on white paper:
+/// `100` keeps full strength, `0` is white, and `s` blends `s%` ink with
+/// `(100 - s)%` white.
+pub(crate) fn apply_screen(rgb: [u8; 3], screen: u8) -> [u8; 3] {
+    if screen >= 100 {
+        return rgb;
+    }
+    let s = f64::from(screen) / 100.0;
+    let w = 255.0 * (1.0 - s);
+    [
+        (f64::from(rgb[0]) * s + w).round().clamp(0.0, 255.0) as u8,
+        (f64::from(rgb[1]) * s + w).round().clamp(0.0, 255.0) as u8,
+        (f64::from(rgb[2]) * s + w).round().clamp(0.0, 255.0) as u8,
+    ]
 }
 
 impl PlotStyle {
@@ -95,43 +143,108 @@ impl PlotStyle {
     /// own lineweight, as AutoCAD's `monochrome.ctb` plots.
     pub(crate) fn monochrome() -> PlotStyle {
         PlotStyle {
-            pens: vec![
+            table: Table::Ctb(vec![
                 Pen {
                     color: Some([0, 0, 0]),
                     lineweight: None,
+                    screen: 100,
                 };
                 256
-            ],
+            ]),
             not_followed: Vec::new(),
         }
     }
 
-    /// The colour an object of colour index `color` plots in.
+    /// Whether this plot style table is a named plot style table (STB).
+    #[cfg(test)]
+    pub(crate) fn is_stb(&self) -> bool {
+        matches!(self.table, Table::Stb { .. })
+    }
+
+    /// The colour an object of colour index `color` (and optional named
+    /// plot style `style_name` for an STB) plots in, with screening applied.
+    pub(crate) fn color_for(&self, color: Color, style_name: Option<&str>) -> [u8; 3] {
+        let pen = self.pen_for(color, style_name);
+        let base = pen.color.unwrap_or_else(|| color.on_paper());
+        apply_screen(base, pen.screen)
+    }
+
+    /// The colour an object of colour index `color` plots in (CTB or STB
+    /// `Normal`).
+    #[cfg(test)]
     pub(crate) fn color(&self, color: Color) -> [u8; 3] {
-        self.pen(color).color.unwrap_or_else(|| color.on_paper())
+        self.color_for(color, None)
+    }
+
+    /// The lineweight in millimetres an object of colour index `color` (and
+    /// optional named plot style `style_name` for an STB) and lineweight
+    /// `own` plots with.
+    pub(crate) fn lineweight_for(&self, color: Color, style_name: Option<&str>, own: f64) -> f64 {
+        self.pen_for(color, style_name).lineweight.unwrap_or(own)
     }
 
     /// The lineweight in millimetres an object of colour index `color` and
     /// lineweight `own` plots with.
+    #[cfg(test)]
     pub(crate) fn lineweight(&self, color: Color, own: f64) -> f64 {
-        self.pen(color).lineweight.unwrap_or(own)
+        self.lineweight_for(color, None, own)
     }
 
-    fn pen(&self, color: Color) -> Pen {
-        self.pens[usize::from(color.0)]
-    }
-
-    /// Reads a CTB file's bytes. The error says why they cannot be read.
-    pub(crate) fn parse_ctb(bytes: &[u8]) -> Result<PlotStyle, String> {
-        if bytes.starts_with(STB_HEADING) {
-            return Err(
-                "it is a named plot style table (STB); a plot reads a colour-dependent \
-                        one (CTB)"
-                    .to_owned(),
-            );
+    fn pen_for(&self, color: Color, style_name: Option<&str>) -> Pen {
+        match &self.table {
+            Table::Ctb(pens) => pens[usize::from(color.0)],
+            Table::Stb { entries, normal } => {
+                let Some(wanted) = style_name.filter(|s| !s.is_empty()) else {
+                    return *normal;
+                };
+                entries
+                    .iter()
+                    .find(|(name, loc, _)| {
+                        name.eq_ignore_ascii_case(wanted)
+                            || loc
+                                .as_deref()
+                                .is_some_and(|l| l.eq_ignore_ascii_case(wanted))
+                    })
+                    .map_or(*normal, |(_, _, pen)| *pen)
+            }
         }
-        if !bytes.starts_with(CTB_HEADING) || bytes.len() < BEFORE_TEXT {
-            return Err("it is not a CTB plot style table: it does not start as one".to_owned());
+    }
+
+    /// Reads a CTB or STB file's bytes. When `expect_stb` is `Some(true)`,
+    /// requires an STB header; when `Some(false)`, requires a CTB header;
+    /// when `None`, accepts either.
+    pub(crate) fn parse(bytes: &[u8], expect_stb: Option<bool>) -> Result<PlotStyle, String> {
+        let is_stb = if bytes.starts_with(CTB_HEADING) {
+            if expect_stb == Some(true) {
+                return Err(
+                    "it is a colour-dependent plot style table (CTB), not a named plot style \
+                     table (STB)"
+                        .to_owned(),
+                );
+            }
+            false
+        } else if bytes.starts_with(STB_HEADING) {
+            if expect_stb == Some(false) {
+                return Err(
+                    "it is a named plot style table (STB), not a colour-dependent one (CTB)"
+                        .to_owned(),
+                );
+            }
+            true
+        } else {
+            let expected = match expect_stb {
+                Some(true) => "an STB",
+                Some(false) => "a CTB",
+                None => "a CTB or STB",
+            };
+            return Err(format!(
+                "it is not {expected} plot style table: it does not start as one"
+            ));
+        };
+        if bytes.len() < BEFORE_TEXT {
+            return Err(
+                "it is not a complete plot style table: it ends before its packed text".to_owned(),
+            );
         }
         let packed = &bytes[BEFORE_TEXT..];
         let text = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(packed, MOST_TEXT)
@@ -143,11 +256,23 @@ impl PlotStyle {
             .map_or(0, |last| last + 1);
         // The text is single-byte; names may hold bytes above 127.
         let text: String = text[..end].iter().map(|&b| char::from(b)).collect();
-        PlotStyle::from_text(&text)
+        PlotStyle::from_text(&text, is_stb)
     }
 
-    /// Reads a CTB file's unpacked text.
-    fn from_text(text: &str) -> Result<PlotStyle, String> {
+    /// Reads a CTB file's bytes. The error says why they cannot be read.
+    #[cfg(test)]
+    pub(crate) fn parse_ctb(bytes: &[u8]) -> Result<PlotStyle, String> {
+        PlotStyle::parse(bytes, Some(false))
+    }
+
+    /// Reads an STB file's bytes. The error says why they cannot be read.
+    #[cfg(test)]
+    pub(crate) fn parse_stb(bytes: &[u8]) -> Result<PlotStyle, String> {
+        PlotStyle::parse(bytes, Some(true))
+    }
+
+    /// Reads a CTB or STB file's unpacked text.
+    fn from_text(text: &str, is_stb: bool) -> Result<PlotStyle, String> {
         let root = Section::parse(text)?;
         let styles = root
             .section("plot_style")
@@ -171,28 +296,40 @@ impl PlotStyle {
             .value("apply_factor")
             .is_some_and(|v| v.eq_ignore_ascii_case("TRUE"));
 
-        let mut style = PlotStyle {
-            pens: vec![Pen::default(); 256],
-            not_followed: Vec::new(),
+        let mut ctb_pens = if is_stb {
+            Vec::new()
+        } else {
+            vec![Pen::default(); 256]
         };
-        let mut unfollowed: Vec<(&'static str, &'static str, Vec<u8>)> = Vec::new();
-        let mut note = |setting: &'static str, meaning: &'static str, color: u8| match unfollowed
-            .iter_mut()
-            .find(|(s, _, _)| *s == setting)
-        {
-            Some((_, _, colors)) => colors.push(color),
-            None => unfollowed.push((setting, meaning, vec![color])),
+        let mut stb_entries: Vec<(String, Option<String>, Pen)> = Vec::new();
+        let mut stb_normal = Pen::default();
+        let mut unfollowed: Vec<(&'static str, &'static str, Vec<u8>, Vec<String>)> = Vec::new();
+        let mut note = |setting: &'static str,
+                        meaning: &'static str,
+                        color: Option<u8>,
+                        style: Option<String>| {
+            match unfollowed.iter_mut().find(|(s, _, _, _)| *s == setting) {
+                Some((_, _, colors, names)) => {
+                    if let Some(c) = color {
+                        colors.push(c);
+                    }
+                    if let Some(n) = style {
+                        names.push(n);
+                    }
+                }
+                None => unfollowed.push((
+                    setting,
+                    meaning,
+                    color.into_iter().collect(),
+                    style.into_iter().collect(),
+                )),
+            }
         };
-        for (key, pen) in styles.sections() {
-            let place: usize = key
-                .parse()
-                .ok()
-                .filter(|p| *p < 255)
-                .ok_or_else(|| format!("its pens run from 0 to 254, and one is `{key}`"))?;
-            let index = place + 1;
-            let color = u8::try_from(index).expect("a colour index is at most 255");
+
+        for (key, pen_section) in styles.sections() {
             let number = |name: &str| -> Result<Option<i64>, String> {
-                pen.value(name)
+                pen_section
+                    .value(name)
                     .map(|v| {
                         v.trim().parse::<i64>().map_err(|_| {
                             format!("pen {key} has `{name}={v}`, which is not a whole number")
@@ -231,24 +368,65 @@ impl PlotStyle {
                     Some(mm)
                 }
             };
-            style.pens[index] = Pen {
+            let screen = match number("screen")? {
+                None => 100,
+                Some(v) if (0..=100).contains(&v) => u8::try_from(v).expect("0..=100"),
+                Some(v) => {
+                    return Err(format!(
+                        "pen {key} has `screen={v}`, which must be a whole number from 0 to 100"
+                    ));
+                }
+            };
+            let pen = Pen {
                 color: plotted,
                 lineweight,
+                screen,
             };
+
+            let style_name = if is_stb {
+                let name = pen_section
+                    .value("name")
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("STB pen {key} has no `name`"))?;
+                let localized = pen_section
+                    .value("localized_name")
+                    .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(&name))
+                    .map(str::to_owned);
+                if name.eq_ignore_ascii_case("Normal") {
+                    stb_normal = pen;
+                }
+                stb_entries.push((name.clone(), localized, pen));
+                Some(name)
+            } else {
+                let place: usize = key
+                    .parse()
+                    .ok()
+                    .filter(|p| *p < 255)
+                    .ok_or_else(|| format!("its pens run from 0 to 254, and one is `{key}`"))?;
+                let index = place + 1;
+                ctb_pens[index] = pen;
+                None
+            };
+
+            let color_idx = if is_stb {
+                0
+            } else {
+                let place: usize = key.parse().expect("validated above");
+                u8::try_from(place + 1).expect("a colour index is at most 255")
+            };
+
             let policy = number("color_policy")?.unwrap_or(1);
             if policy & 2 != 0 {
-                note(
-                    "color_policy",
-                    "grayscale: the pen plots its colour as a grey; here it plots in its colour",
-                    color,
-                );
+                let meaning =
+                    "grayscale: the pen plots its colour as a grey; here it plots in its colour";
+                if let Some(ref name) = style_name {
+                    note("color_policy", meaning, None, Some(name.clone()));
+                } else {
+                    note("color_policy", meaning, Some(color_idx), None);
+                }
             }
-            let checks: [(&'static str, i64, &'static str); 5] = [
-                (
-                    "screen",
-                    100,
-                    "screening: the pen plots its colour lightened; here it plots at full strength",
-                ),
+            let checks: [(&'static str, i64, &'static str); 4] = [
                 (
                     "linetype",
                     31,
@@ -260,7 +438,11 @@ impl PlotStyle {
             ];
             for (setting, object, meaning) in checks {
                 if number(setting)?.is_some_and(|v| v != object) {
-                    note(setting, meaning, color);
+                    if let Some(ref name) = style_name {
+                        note(setting, meaning, None, Some(name.clone()));
+                    } else {
+                        note(setting, meaning, Some(color_idx), None);
+                    }
                 }
             }
         }
@@ -269,21 +451,34 @@ impl PlotStyle {
                 "apply_factor",
                 "the plot style's scale factor for linetypes and fill patterns; here they keep \
                  their own sizes",
-                0,
+                None,
+                None,
             );
         }
-        style.not_followed = unfollowed
+        let not_followed = unfollowed
             .into_iter()
-            .map(|(setting, meaning, mut colors)| {
+            .map(|(setting, meaning, mut colors, styles)| {
                 colors.retain(|&c| c != 0);
                 NotFollowed {
                     setting: setting.to_owned(),
                     meaning: meaning.to_owned(),
                     colors,
+                    styles,
                 }
             })
             .collect();
-        Ok(style)
+        let table = if is_stb {
+            Table::Stb {
+                entries: stb_entries,
+                normal: stb_normal,
+            }
+        } else {
+            Table::Ctb(ctb_pens)
+        };
+        Ok(PlotStyle {
+            table,
+            not_followed,
+        })
     }
 }
 
@@ -396,7 +591,7 @@ mod ctb;
 
 #[cfg(test)]
 mod tests {
-    use super::ctb::{ctb_file, made_up_ctb_text, rgb, BLACK, OBJECT_COLOR};
+    use super::ctb::{ctb_file, made_up_ctb_text, made_up_stb, rgb, BLACK, OBJECT_COLOR};
     use super::*;
 
     #[test]
@@ -434,7 +629,10 @@ mod tests {
         for index in 1..=255u8 {
             assert_eq!(style.color(Color(index)), [0, 0, 0]);
             assert_eq!(style.lineweight(Color(index), 0.13), 0.13);
-            assert_eq!(ctb.pen(Color(index)), style.pen(Color(index)));
+            assert_eq!(
+                ctb.pen_for(Color(index), None),
+                style.pen_for(Color(index), None)
+            );
         }
     }
 
@@ -548,15 +746,48 @@ mod tests {
     }
 
     #[test]
-    fn settings_not_followed_are_named_with_their_pens() {
-        let text = made_up_ctb_text(&[], "  screen=50\n").replacen(
-            "  screen=100\n  linepattern_size=0.5\n",
-            "  linepattern_size=0.5\n",
-            255,
+    fn screening_lightens_a_pens_colour_toward_white() {
+        let text = made_up_ctb_text(&[(1, BLACK, 0), (2, rgb(0, 0, 200), 0)], "")
+            .replacen("  screen=100\n", "  screen=50\n", 1)
+            .replacen("  screen=100\n", "  screen=25\n", 1);
+        let style = PlotStyle::parse_ctb(&ctb_file(&text)).unwrap();
+        // Screening is now followed, not reported under `not_followed`.
+        assert_eq!(style.not_followed, Vec::new());
+        // Black at 50% screening -> mid grey (128, 128, 128).
+        assert_eq!(style.color(Color(1)), [128, 128, 128]);
+        // (0, 0, 200) at 25% screening -> (191, 191, 241).
+        assert_eq!(style.color(Color(2)), [191, 191, 241]);
+        assert_eq!(apply_screen([0, 0, 0], 0), [255, 255, 255]);
+        assert_eq!(apply_screen([12, 34, 56], 100), [12, 34, 56]);
+    }
+
+    #[test]
+    fn an_stb_resolves_named_styles_with_screening_and_normal_fallback() {
+        let stb = made_up_stb(&[
+            ("Heavy", BLACK, 21, 100),
+            ("Screened", rgb(0, 0, 255), 14, 50),
+        ]);
+        let style = PlotStyle::parse_stb(&stb).unwrap();
+        assert!(style.is_stb());
+        assert_eq!(style.not_followed, Vec::new());
+        assert_eq!(style.color_for(Color(1), Some("Heavy")), [0, 0, 0]);
+        assert_eq!(style.lineweight_for(Color(1), Some("heavy"), 0.25), 1.0);
+        assert_eq!(style.color_for(Color(1), Some("Screened")), [128, 128, 255]);
+        assert_eq!(style.lineweight_for(Color(1), Some("Screened"), 0.25), 0.5);
+        // Unknown or omitted style falls back to Normal (object colour & own lineweight).
+        assert_eq!(
+            style.color_for(Color(1), Some("Unknown")),
+            Color(1).on_paper()
         );
+        assert_eq!(style.lineweight_for(Color(1), None, 0.35), 0.35);
+    }
+
+    #[test]
+    fn settings_not_followed_are_named_with_their_pens() {
+        let text = made_up_ctb_text(&[], "").replace("  end_style=4\n", "  end_style=0\n");
         let style = PlotStyle::parse_ctb(&ctb_file(&text)).unwrap();
         assert_eq!(style.not_followed.len(), 1, "{:?}", style.not_followed);
-        assert_eq!(style.not_followed[0].setting, "screen");
+        assert_eq!(style.not_followed[0].setting, "end_style");
         assert_eq!(style.not_followed[0].colors.len(), 255);
     }
 

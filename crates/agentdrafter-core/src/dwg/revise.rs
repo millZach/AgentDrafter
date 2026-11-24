@@ -27,20 +27,22 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::{
-    block, contents, dwg_object, handle_text, ids, kind_of, layer_of, panic_message, point,
-    raw_dwg_version, read_drawing_bytes_with_stats, read_layer, read_properties,
-    set_layer_properties, set_properties, text, vector,
+    block, contents, dwg_object, handle_text, ids, kind_of, layer_of, page_setup, panic_message,
+    point, raw_dwg_version, read_drawing_bytes_with_stats, read_layer, read_properties,
+    set_layer_properties, set_properties, text, unit, vector,
 };
 use crate::description::{
     normalize_degrees, parse_angle_json, parse_length_json, parse_linetype_scale_json,
-    parse_object_color_json, parse_object_lineweight_json, parse_plain_number_json,
+    parse_object_color_json, parse_object_lineweight_json, parse_object_plot_style_json,
+    parse_object_transparency_json, parse_page_setup_json, parse_plain_number_json,
     parse_point_json, sin_cos_degrees,
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::block::{attribute_text, readable};
 use crate::model::{
     Block, DecodeReport, DrawingContents, Layer, Linetype, Object, ObjectColor, ObjectLineweight,
-    Point3, Properties, BY_BLOCK, BY_LAYER, CONTINUOUS, LAYER_ZERO,
+    ObjectPlotStyle, PageSetup, PlotArea, PlotScale, Point3, Properties, BY_BLOCK, BY_LAYER,
+    CONTINUOUS, LAYER_ZERO,
 };
 use crate::text::{Attachment, Justify, Text as TextObject, TextStyle, STANDARD, WIDTH_FACTORS};
 use crate::units::Unit;
@@ -200,6 +202,7 @@ pub(crate) struct RevisionSession {
     expected_non_graphical_removed: HashSet<u64>,
     app_registered: bool,
     revcloud_app_registered: bool,
+    transparency_app_registered: bool,
 }
 
 impl RevisionSession {
@@ -253,6 +256,7 @@ impl RevisionSession {
             expected_non_graphical_removed: HashSet::new(),
             app_registered: false,
             revcloud_app_registered: false,
+            transparency_app_registered: false,
         })
     }
 
@@ -311,12 +315,14 @@ impl RevisionSession {
     /// (including entries the core cannot fully model) so `add_*` and `change`
     /// can reference any existing layer, linetype, text style, layout, or block.
     pub(crate) fn tables_for_parsing(&self) -> RevisionTables {
+        let named_mode = !self.drawing.header.plotstyle_mode;
+        let ps_map = page_setup::plot_style_handle_map(&self.drawing);
         let layers: Vec<Layer> = self
             .drawing
             .layers
             .iter()
             .map(|l| {
-                read_layer(l).unwrap_or_else(|| {
+                read_layer(l, named_mode, &ps_map).unwrap_or_else(|| {
                     let mut fallback = Layer::new(l.name.clone());
                     fallback.on = !l.flags.off;
                     fallback.frozen = l.flags.frozen;
@@ -823,6 +829,34 @@ impl RevisionSession {
             self.revcloud_app_registered = true;
         }
         Ok(())
+    }
+
+    fn ensure_transparency_application_registered(&mut self) -> Result<(), Error> {
+        if !self.drawing.app_ids.iter().any(|a| {
+            a.name
+                .eq_ignore_ascii_case(page_setup::LAYER_TRANSPARENCY_APP)
+        }) {
+            block::register_named_application(
+                &mut self.drawing,
+                page_setup::LAYER_TRANSPARENCY_APP,
+            )?;
+            self.drawing.assign_table_entry_handles();
+            self.transparency_app_registered = true;
+        }
+        Ok(())
+    }
+
+    fn ensure_plot_style_tracked(&mut self, name: &str) -> Handle {
+        self.drawing.header.plotstyle_mode = false;
+        let (handle, changed_dict, added_ph) =
+            page_setup::ensure_plot_style_tracked(&mut self.drawing, name);
+        if let Some(d) = changed_dict {
+            self.expected_non_graphical_changed.insert(d);
+        }
+        if let Some(p) = added_ph {
+            self.expected_non_graphical_added.insert(p);
+        }
+        handle
     }
 
     /// Switches the dynamic block visibility state on the `Insert` at `hex`,
@@ -1530,6 +1564,35 @@ impl RevisionSession {
                     updated.common_mut().linetype_scale = scale;
                     changed_keys.push("linetype_scale".to_owned());
                 }
+                "plot_style" => {
+                    let ps = parse_object_plot_style_json(value, "set.plot_style")?;
+                    match ps {
+                        ObjectPlotStyle::ByLayer => {
+                            let common = updated.common_mut();
+                            common.plotstyle_flags = 0;
+                            common.plotstyle_handle = None;
+                        }
+                        ObjectPlotStyle::ByBlock => {
+                            let common = updated.common_mut();
+                            common.plotstyle_flags = 1;
+                            common.plotstyle_handle = None;
+                        }
+                        ObjectPlotStyle::Named(name) => {
+                            let h = self.ensure_plot_style_tracked(&name);
+                            let common = updated.common_mut();
+                            if !h.is_null() {
+                                common.plotstyle_flags = 3;
+                                common.plotstyle_handle = Some(h);
+                            }
+                        }
+                    }
+                    changed_keys.push("plot_style".to_owned());
+                }
+                "transparency" => {
+                    let tr = parse_object_transparency_json(value, "set.transparency")?;
+                    updated.common_mut().transparency = page_setup::dwg_entity_transparency(tr);
+                    changed_keys.push("transparency".to_owned());
+                }
                 "name" => {
                     let new_name = if value.is_null() {
                         None
@@ -1890,8 +1953,22 @@ impl RevisionSession {
                 format!("the drawing already has a layer named `{}`", layer.name),
             ));
         }
+        if layer.transparency > 0 {
+            self.ensure_transparency_application_registered()?;
+        }
+        let plot_style_handle = match &layer.plot_style {
+            Some(style) => {
+                let h = self.ensure_plot_style_tracked(style);
+                (!h.is_null()).then_some((h, style.clone()))
+            }
+            None => None,
+        };
         let mut dwg_layer = DwgLayer::new(layer.name.clone());
         set_layer_properties(&mut dwg_layer, layer);
+        if let Some((h, style)) = plot_style_handle {
+            dwg_layer.plotstyle_handle = h;
+            dwg_layer.plot_style = style;
+        }
         dwg_layer.set_handle(self.drawing.allocate_handle());
         let handle = dwg_layer.handle;
         self.drawing.layers.add(dwg_layer).map_err(|e| {
@@ -1930,13 +2007,17 @@ impl RevisionSession {
                 ),
             ));
         };
-        Ok(read_layer(found).unwrap_or_else(|| {
+        let named_mode = !self.drawing.header.plotstyle_mode;
+        let ps_map = page_setup::plot_style_handle_map(&self.drawing);
+        Ok(read_layer(found, named_mode, &ps_map).unwrap_or_else(|| {
             let mut fallback = Layer::new(found.name.clone());
             fallback.on = !found.flags.off;
             fallback.frozen = found.flags.frozen;
             fallback.locked = found.flags.locked;
             fallback.plot = found.is_plottable;
             fallback.description = found.description.clone();
+            fallback.plot_style = page_setup::read_layer_plot_style(found, named_mode, &ps_map);
+            fallback.transparency = page_setup::read_layer_transparency(found.transparency);
             fallback
         }))
     }
@@ -1949,6 +2030,23 @@ impl RevisionSession {
         updated: &Layer,
         keys: &Map<String, Value>,
     ) -> Result<MutationHandles, Error> {
+        if keys.contains_key("transparency") && updated.transparency > 0 {
+            self.ensure_transparency_application_registered()?;
+        }
+        let resolved_plot_style = if keys.contains_key("plot_style") {
+            match &updated.plot_style {
+                Some(style) => {
+                    let h = self.ensure_plot_style_tracked(style);
+                    Some(((!h.is_null()).then_some(h), Some(style.clone())))
+                }
+                None => {
+                    let normal = page_setup::normal_plot_style_handle(&self.drawing);
+                    Some(((!normal.is_null()).then_some(normal), None))
+                }
+            }
+        } else {
+            None
+        };
         let Some(existing) = self
             .drawing
             .layers
@@ -1974,6 +2072,18 @@ impl RevisionSession {
                         None => LineWeight::Default,
                     };
                 }
+                "plot_style" => {
+                    if let Some((handle_opt, name_opt)) = &resolved_plot_style {
+                        if let Some(h) = *handle_opt {
+                            existing.plotstyle_handle = h;
+                        }
+                        existing.plot_style = name_opt.clone().unwrap_or_default();
+                    }
+                }
+                "transparency" => {
+                    existing.transparency =
+                        page_setup::dwg_transparency_from_percent(updated.transparency);
+                }
                 "on" => existing.flags.off = !updated.on,
                 "frozen" => existing.flags.frozen = updated.frozen,
                 "locked" => existing.flags.locked = updated.locked,
@@ -1989,6 +2099,85 @@ impl RevisionSession {
             touched: vec![handle_text(handle)],
             ..Default::default()
         })
+    }
+
+    /// Updates the embedded `PlotSettings` of a layout (or `"Model"`) in place,
+    /// preserving all other layouts, entities and non-graphical objects.
+    pub(crate) fn set_page_setup(
+        &mut self,
+        layout_name: Option<&str>,
+        set: &Map<String, Value>,
+    ) -> Result<(String, MutationHandles), Error> {
+        let model_block = self
+            .drawing
+            .block_records
+            .iter()
+            .find(|r| r.is_model_space())
+            .map(|r| r.handle)
+            .unwrap_or(Handle::NULL);
+        let mut layouts: Vec<(Handle, String, i16, bool)> = self
+            .drawing
+            .objects
+            .iter()
+            .filter_map(|(&h, obj)| match obj {
+                ObjectType::Layout(l) => Some((
+                    h,
+                    l.name.clone(),
+                    l.tab_order,
+                    l.name.eq_ignore_ascii_case("Model") || l.block_record == model_block,
+                )),
+                _ => None,
+            })
+            .collect();
+        layouts.sort_by_key(|(_, _, order, _)| *order);
+        let (target_handle, resolved_name, is_model) = match layout_name {
+            Some(wanted) => layouts
+                .iter()
+                .find(|(_, name, _, _)| name.eq_ignore_ascii_case(wanted))
+                .map(|(h, name, _, is_m)| (*h, name.clone(), *is_m))
+                .ok_or_else(|| {
+                    let choices: Vec<&str> =
+                        layouts.iter().map(|(_, n, _, _)| n.as_str()).collect();
+                    Error::new(
+                        ErrorCode::UnknownName,
+                        format!(
+                            "unknown layout `{wanted}`; the drawing's layouts: {}",
+                            choices.join(", ")
+                        ),
+                    )
+                    .at_field("layout")
+                })?,
+            None => layouts
+                .iter()
+                .find(|(_, _, _, is_m)| !*is_m)
+                .or_else(|| layouts.first())
+                .map(|(h, name, _, is_m)| (*h, name.clone(), *is_m))
+                .ok_or_else(|| {
+                    Error::new(ErrorCode::BadValue, "the drawing has no layout records")
+                })?,
+        };
+        let drawing_units = unit(self.drawing.header.insertion_units).unwrap_or(Unit::Mm);
+        let existing = match self.drawing.objects.get(&target_handle) {
+            Some(ObjectType::Layout(dwg_layout)) => {
+                page_setup::read_page_setup(dwg_layout, Some(drawing_units), !is_model)
+                    .unwrap_or_default()
+            }
+            _ => PageSetup::default(),
+        };
+        let merged = merge_page_setup(&existing, set, drawing_units, !is_model)?;
+        if let Some(ObjectType::Layout(dwg_layout)) = self.drawing.objects.get_mut(&target_handle) {
+            page_setup::apply_page_setup(dwg_layout, &merged, None, drawing_units, !is_model);
+            dwg_layout.raw_plot_settings_codes = None;
+        }
+        self.expected_non_graphical_changed
+            .insert(target_handle.value());
+        Ok((
+            format!("updated page setup on layout `{resolved_name}`"),
+            MutationHandles {
+                touched: vec![handle_text(target_handle)],
+                ..Default::default()
+            },
+        ))
     }
 
     fn commit_edited_entity(&mut self, handle: Handle, updated: EntityType) -> MutationHandles {
@@ -2290,6 +2479,7 @@ impl RevisionSession {
             &after.app_ids,
             self.app_registered,
             self.revcloud_app_registered,
+            self.transparency_app_registered,
             &mut unexpected,
         );
         diff_named_table("UCS", &before.ucss, &after.ucss, &mut unexpected);
@@ -3938,6 +4128,7 @@ fn diff_app_id_table(
     after: &BTreeMap<String, String>,
     app_registered: bool,
     revcloud_app_registered: bool,
+    transparency_app_registered: bool,
     out: &mut Vec<UnexpectedChange>,
 ) {
     for (key, orig) in before {
@@ -3961,7 +4152,9 @@ fn diff_app_id_table(
         let name = key.rsplit_once('#').map(|(n, _)| n).unwrap_or(key.as_str());
         let is_expected_app = (app_registered && name.eq_ignore_ascii_case(block::APPLICATION))
             || (revcloud_app_registered
-                && name.eq_ignore_ascii_case(crate::model::REVCLOUD_APPLICATION));
+                && name.eq_ignore_ascii_case(crate::model::REVCLOUD_APPLICATION))
+            || (transparency_app_registered
+                && name.eq_ignore_ascii_case(page_setup::LAYER_TRANSPARENCY_APP));
         if !before.contains_key(key) && !is_expected_app {
             out.push(UnexpectedChange {
                 kind: "APPID".to_owned(),
@@ -4160,6 +4353,96 @@ fn snapshot_non_graphical(drawing: &CadDocument) -> BTreeMap<u64, NonGraphicalDi
         }
     }
     non_graphical
+}
+
+/// Merges a `set_page_setup` JSON patch onto an existing `PageSetup` and
+/// validates the result through the sheet description's parser.
+fn merge_page_setup(
+    existing: &PageSetup,
+    patch: &Map<String, Value>,
+    units: Unit,
+    is_layout: bool,
+) -> Result<PageSetup, Error> {
+    let mut map = Map::new();
+    if let Some(paper) = &existing.paper {
+        let p = match &paper.name {
+            Some(name) => Value::String(name.clone()),
+            None => serde_json::json!([paper.width, paper.height]),
+        };
+        map.insert("paper".into(), p);
+    }
+    match existing.area {
+        Some(PlotArea::Extents) => {
+            map.insert("area".into(), Value::String("extents".into()));
+        }
+        Some(PlotArea::Layout) => {
+            map.insert("area".into(), Value::String("layout".into()));
+        }
+        Some(PlotArea::Window { min, max }) => {
+            map.insert("area".into(), Value::String("window".into()));
+            map.insert("window".into(), serde_json::json!([min, max]));
+        }
+        None => {}
+    }
+    match existing.scale {
+        PlotScale::Fit => {
+            map.insert("scale".into(), Value::String("fit".into()));
+        }
+        PlotScale::Ratio {
+            numerator,
+            denominator,
+        } => {
+            map.insert(
+                "scale".into(),
+                Value::String(format!("{numerator}:{denominator}")),
+            );
+        }
+    }
+    if existing.center {
+        map.insert("center".into(), Value::Bool(true));
+    }
+    if existing.offset != [0.0, 0.0] {
+        map.insert("offset".into(), serde_json::json!(existing.offset));
+    }
+    if let Some(style) = &existing.plot_style {
+        if !existing.plot_style_from_dwg
+            || crate::description::page_setup::is_plot_style_file(style)
+        {
+            map.insert("plot_style".into(), Value::String(style.clone()));
+        }
+    }
+    if !existing.plot_transparency {
+        map.insert("plot_transparency".into(), Value::Bool(false));
+    }
+    // Apply the patch: switching away from `window` drops a carried `window`,
+    // setting `center: true` clears a carried non-zero `offset`, and `null`
+    // clears any key back to its default.
+    if matches!(
+        patch.get("area").and_then(Value::as_str),
+        Some("extents" | "layout")
+    ) && !patch.contains_key("window")
+    {
+        map.remove("window");
+    }
+    if patch.get("center") == Some(&Value::Bool(true)) && !patch.contains_key("offset") {
+        map.remove("offset");
+    }
+    for (k, v) in patch {
+        if v.is_null() {
+            map.remove(k);
+        } else {
+            map.insert(k.clone(), v.clone());
+        }
+    }
+    let mut parsed = parse_page_setup_json(&Value::Object(map), "set", units, is_layout)?;
+    parsed.margins_mm = existing.margins_mm;
+    parsed.plotter = existing.plotter.clone();
+    if patch.contains_key("plot_style") {
+        parsed.plot_style_from_dwg = false;
+    } else {
+        parsed.plot_style_from_dwg = existing.plot_style_from_dwg;
+    }
+    Ok(parsed)
 }
 
 fn non_graphical_digest(obj: &ObjectType) -> NonGraphicalDigest {

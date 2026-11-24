@@ -144,6 +144,7 @@ pub(crate) fn rasterize(
     list: &DisplayList,
     view: &View,
     style: Option<&PlotStyle>,
+    plot_transparency: bool,
 ) -> Option<Pixmap> {
     let mut pixmap = Pixmap::new(view.width, view.height)?;
     pixmap.fill(tiny_skia::Color::WHITE);
@@ -171,9 +172,19 @@ pub(crate) fn rasterize(
             // A box no pixel is inside draws nothing.
             continue;
         }
-        let [r, g, b] = style.map_or_else(|| item.color.on_paper(), |s| s.color(item.color));
+        let [r, g, b] = style.map_or_else(
+            || item.color.on_paper(),
+            |s| s.color_for(item.color, item.plot_style.as_deref()),
+        );
+        let alpha = if plot_transparency && item.transparency > 0 {
+            ((100.0 - f64::from(item.transparency)) * 2.55)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        } else {
+            255
+        };
         let mut paint = Paint::default();
-        paint.set_color_rgba8(r, g, b, 255);
+        paint.set_color_rgba8(r, g, b, alpha);
         paint.anti_alias = true;
         match &item.shape {
             Shape::Stroke { lineweight, runs } => {
@@ -182,8 +193,9 @@ pub(crate) fn rasterize(
                 // pen with a width draws that width, one thinner than a
                 // pixel as a lighter line, so thin pens differ as they do in
                 // the PDF; lineweight 0 still draws one pixel.
-                let lineweight =
-                    style.map_or(*lineweight, |s| s.lineweight(item.color, *lineweight));
+                let lineweight = style.map_or(*lineweight, |s| {
+                    s.lineweight_for(item.color, item.plot_style.as_deref(), *lineweight)
+                });
                 let exact = lineweight * view.pixels_per_millimetre;
                 let width = if style.is_some() && exact > 0.0 {
                     exact as f32
@@ -361,12 +373,12 @@ objects:
         let list = draw_sheet(&sheet, &fonts, 0.01, MOST_HATCH_DASHES);
         assert_eq!(list.text.len(), 3);
         let view = View::around(list.extents().unwrap(), 20.0, 6.0, 10.0, None);
-        let with = rasterize(&list, &view, None).unwrap();
+        let with = rasterize(&list, &view, None, true).unwrap();
         let without = DisplayList {
             text: Vec::new(),
             ..list.clone()
         };
-        let without = rasterize(&without, &view, None).unwrap();
+        let without = rasterize(&without, &view, None, true).unwrap();
         assert_eq!(with.data(), without.data());
         assert!(
             with.data().iter().any(|&c| c < 128),

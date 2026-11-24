@@ -335,6 +335,7 @@ pub(crate) fn dwg_loaded_from_drawing(
         blocks: drawing.blocks,
         objects: drawing.objects,
         paper: drawing.paper.or(built_paper),
+        page_setup: drawing.page_setup,
         ltscale: drawing.ltscale,
         layout: drawing.layout,
         other_layouts: drawing.other_layouts,

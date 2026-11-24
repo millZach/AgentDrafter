@@ -3918,6 +3918,34 @@ fn apply_revision_op(
                 created: Vec::new(),
             })
         }
+        Body::SetPageSetup { to, layout, set } => {
+            check_add_target_sheet(to, sheet_name, op)?;
+            let (msg, handles) = session
+                .set_page_setup(layout.as_deref(), set)
+                .map_err(|e| {
+                    let f = e.field.as_deref().unwrap_or("set");
+                    op_error(index, op_name, e.code, e.message, f)
+                })?;
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message: msg,
+                id: None,
+                handle: handles.touched.first().cloned(),
+                handles_touched: handles.touched,
+                handles_added: handles.added,
+                handles_deleted: handles.deleted,
+                copies: Vec::new(),
+                snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
+                split_id: None,
+                deleted: Vec::new(),
+                transformed: Vec::new(),
+                created: Vec::new(),
+            })
+        }
         Body::Table {
             op: TableOp::Add,
             table: Table::Layer,

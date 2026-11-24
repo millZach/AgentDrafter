@@ -36,7 +36,7 @@ pub(crate) const MLEADER_STYLE_KEYS: [&str; 9] = [
 ];
 
 /// The keys a multileader takes.
-pub(crate) const MLEADER_KEYS: [&str; 12] = [
+pub(crate) const MLEADER_KEYS: [&str; 14] = [
     "leaders",
     "content",
     "landing",
@@ -49,6 +49,8 @@ pub(crate) const MLEADER_KEYS: [&str; 12] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
 
 /// The keys a multileader's text content takes.
@@ -72,7 +74,7 @@ pub(crate) const CONTENT_KEYS: [&str; 9] = [
 ];
 
 /// The keys an older leader takes.
-pub(crate) const LEADER_KEYS: [&str; 10] = [
+pub(crate) const LEADER_KEYS: [&str; 12] = [
     "points",
     "arrowhead",
     "arrow_size",
@@ -83,6 +85,8 @@ pub(crate) const LEADER_KEYS: [&str; 10] = [
     "linetype",
     "lineweight",
     "linetype_scale",
+    "plot_style",
+    "transparency",
 ];
 
 /// The keys an older leader's annotation takes.
