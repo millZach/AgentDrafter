@@ -49,6 +49,7 @@ fn reads_one_line() {
             paper: None,
             ltscale: 1.0,
             wipeout_frame: Default::default(),
+            custom_properties: Default::default(),
             layout: None,
             other_layouts: Vec::new(),
         }

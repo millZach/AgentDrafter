@@ -73,7 +73,9 @@ fn text_reads_every_key() {
             width_factor: 1.2,
             rotation: 270.0,
             justify: Justify::MiddleCenter,
-            layer: "0".into(), properties: Default::default(),
+            layer: "0".into(),
+            field: None,
+            properties: Default::default(),
         })
     );
 }
@@ -127,6 +129,7 @@ fn mtext_reads_every_key_and_drops_line_breaks_at_the_end() {
             rotation: 45.0,
             justify: Attachment::BottomRight,
             layer: "0".into(),
+            field: None,
             properties: Default::default(),
         })
     );
@@ -404,7 +407,7 @@ fn an_unknown_key_lists_the_keys_text_takes() {
         &e,
         ErrorCode::UnknownKey,
         "objects[0].text.oblique",
-        &["a text takes contents, position, height, style, width_factor, rotation, justify, layer"],
+        &["a text takes contents, field, position, height, style, width_factor, rotation, justify, layer"],
     );
     let e = object_error("mtext: {contents: A, position: [0, 0, 0], height: 1, columns: 2}");
     assert_names(

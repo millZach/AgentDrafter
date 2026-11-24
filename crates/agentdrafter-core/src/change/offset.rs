@@ -1461,6 +1461,12 @@ pub(crate) fn object_to_record_keys(
         }
         Object::Text(t) => {
             keys.insert("contents".to_owned(), Value::String(t.contents.clone()));
+            if let Some(tf) = &t.field {
+                keys.insert(
+                    "field".to_owned(),
+                    crate::description::field::text_field_to_json(tf),
+                );
+            }
             keys.insert("position".to_owned(), pt_json(t.position));
             keys.insert("height".to_owned(), json!(t.height));
             if t.style != crate::text::STANDARD {
@@ -1483,6 +1489,12 @@ pub(crate) fn object_to_record_keys(
         }
         Object::MText(t) => {
             keys.insert("contents".to_owned(), Value::String(t.contents.clone()));
+            if let Some(tf) = &t.field {
+                keys.insert(
+                    "field".to_owned(),
+                    crate::description::field::text_field_to_json(tf),
+                );
+            }
             keys.insert("position".to_owned(), pt_json(t.position));
             keys.insert("height".to_owned(), json!(t.height));
             if t.width > 0.0 {
@@ -1594,6 +1606,43 @@ pub(crate) fn object_to_record_keys(
                     }
                 }
                 keys.insert("attributes".to_owned(), Value::Object(att_map));
+                if ins.attributes.iter().any(|a| a.field.is_some()) {
+                    let mut grouped_fields: Vec<(String, Vec<Option<Value>>)> = Vec::new();
+                    for att in &ins.attributes {
+                        let fv = att
+                            .field
+                            .as_ref()
+                            .map(crate::description::field::text_field_to_json);
+                        if let Some((_, vals)) =
+                            grouped_fields.iter_mut().find(|(t, _)| t == &att.tag)
+                        {
+                            vals.push(fv);
+                        } else {
+                            grouped_fields.push((att.tag.clone(), vec![fv]));
+                        }
+                    }
+                    let mut af_map = Map::new();
+                    for (tag, vals) in grouped_fields {
+                        if !vals.iter().any(Option::is_some) {
+                            continue;
+                        }
+                        if vals.len() == 1 {
+                            if let Some(v) = vals.into_iter().next().flatten() {
+                                af_map.insert(tag, v);
+                            }
+                        } else {
+                            af_map.insert(
+                                tag,
+                                Value::Array(
+                                    vals.into_iter().map(|o| o.unwrap_or(Value::Null)).collect(),
+                                ),
+                            );
+                        }
+                    }
+                    if !af_map.is_empty() {
+                        keys.insert("attribute_fields".to_owned(), Value::Object(af_map));
+                    }
+                }
             }
             if !ins.state.is_empty() {
                 let mut state_map = Map::new();

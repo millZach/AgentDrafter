@@ -250,7 +250,7 @@ fn a_change_sets_keys_and_takes_them_away() {
         .unwrap_err();
     assert!(
         unknown.message.contains(
-            "contents, position, height, style, width_factor, rotation, justify, layer, color, linetype, lineweight, linetype_scale, name"
+            "contents, field, position, height, style, width_factor, rotation, justify, layer, color, linetype, lineweight, linetype_scale, name"
         ),
         "{}",
         unknown.message

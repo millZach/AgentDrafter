@@ -22,6 +22,7 @@ mod dimension_schema;
 pub(crate) mod dynamic_block;
 pub(crate) mod edit;
 mod emit;
+pub(crate) mod field;
 mod hatch;
 mod hatch_schema;
 pub(crate) mod ids;
@@ -86,11 +87,12 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 15] = [
+pub(crate) const SHEET_KEYS: [&str; 16] = [
     "units",
     "block_library",
     "ltscale",
     "wipeout_frame",
+    field::CUSTOM_PROPERTIES_KEY,
     "linetypes",
     "layers",
     "hatch_patterns",
@@ -167,7 +169,8 @@ pub(crate) fn sheet_description_at(
     path: &Path,
 ) -> Result<(Sheet, Option<LibraryFile>), Error> {
     let mut library = None;
-    let sheet = on_its_own(text, &mut library_beside(path, &mut library))
+    let stem = path.file_stem().and_then(|s| s.to_str());
+    let sheet = on_its_own_named(text, &mut library_beside(path, &mut library), stem)
         .map_err(|e| e.or_in_file(path))?;
     Ok((sheet, library))
 }
@@ -178,7 +181,15 @@ fn on_its_own(
     text: &str,
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
 ) -> Result<Sheet, Error> {
-    on_its_own_with_records(text, load, &mut Vec::new()).map(|(sheet, _)| sheet)
+    on_its_own_named(text, load, None)
+}
+
+fn on_its_own_named(
+    text: &str,
+    load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
+    sheet_name: Option<&str>,
+) -> Result<Sheet, Error> {
+    on_its_own_with_records(text, load, sheet_name, &mut Vec::new()).map(|(sheet, _)| sheet)
 }
 
 /// Reads a sheet description built on its own as [`on_its_own`] does, with
@@ -187,11 +198,12 @@ fn on_its_own(
 fn on_its_own_with_records(
     text: &str,
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
+    sheet_name: Option<&str>,
     noticed: &mut Vec<blocks::Noticed>,
 ) -> Result<(Sheet, Vec<ObjectRecord>), Error> {
     let mut root = strict_yaml::read(text)?;
     template::refuse_row_values(root.as_mut())?;
-    sheet_and_records(root, load, None, None, noticed)
+    sheet_and_records(root, load, None, None, sheet_name, noticed)
 }
 
 /// A row's own objects, which a sheet of a drawing set holds after its
@@ -293,7 +305,7 @@ fn sheet(
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
     set_units: Option<Unit>,
 ) -> Result<Sheet, Error> {
-    sheet_and_records(root, load, set_units, None, &mut Vec::new()).map(|(sheet, _)| sheet)
+    sheet_and_records(root, load, set_units, None, None, &mut Vec::new()).map(|(sheet, _)| sheet)
 }
 
 /// Reads a sheet description, or a template once a row has filled it in,
@@ -313,6 +325,7 @@ fn sheet_and_records(
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
     set_units: Option<Unit>,
     row_objects: Option<RowObjects>,
+    sheet_name: Option<&str>,
     noticed: &mut Vec<blocks::Noticed>,
 ) -> Result<(Sheet, Vec<ObjectRecord>), Error> {
     let Some(root) = root else {
@@ -406,6 +419,10 @@ fn sheet_and_records(
     let wipeout_frame = match fields.get("wipeout_frame") {
         Some(node) => wipeout::wipeout_frame(node, "wipeout_frame")?,
         None => crate::model::WipeoutFrame::Off,
+    };
+    let custom_properties = match fields.get(field::CUSTOM_PROPERTIES_KEY) {
+        Some(node) => field::custom_properties(node)?,
+        None => std::collections::BTreeMap::new(),
     };
     let paper = match fields.get(paper::PAPER_KEY) {
         Some(node) => Some(paper::paper(node, paper::PAPER_KEY, units)?),
@@ -523,10 +540,12 @@ fn sheet_and_records(
         layout,
         other_layouts,
         wipeout_frame,
+        custom_properties,
     };
     if let Some(library) = &library {
         blocks::take_from_library(&mut sheet, library, &fields)?;
     }
+    field::resolve_sheet_fields(&mut sheet, &records, sheet_name)?;
     Ok((sheet, records))
 }
 

@@ -2065,6 +2065,297 @@ impl RecordFile {
         self.touch(list, index, operation, Touch::Keys(touched));
         Ok(())
     }
+}
+
+/// Updates or removes one attribute slot under an insert's `attributes` mapping.
+fn set_insert_attr_entry(
+    keys: &mut Vec<Entry>,
+    capitals: &str,
+    slot: Option<usize>,
+    value: Option<&str>,
+) {
+    match value {
+        Some(v) => {
+            let att_pos = match keys.iter().position(|e| e.key == "attributes") {
+                Some(p) => p,
+                None => {
+                    keys.push(new_entry(
+                        "attributes",
+                        Node::new(Kind::Mapping(Vec::new())),
+                    ));
+                    keys.len() - 1
+                }
+            };
+            let Kind::Mapping(entries) = &mut keys[att_pos].value.kind else {
+                return;
+            };
+            let existing = entries
+                .iter()
+                .position(|e| tag_in_capitals(&e.key) == capitals);
+            let scalar_node = Node::new(Kind::Scalar(v.to_owned()));
+            match slot {
+                None => match existing {
+                    Some(p) => entries[p].value = scalar_node,
+                    None => entries.push(new_entry(capitals, scalar_node)),
+                },
+                Some(s) => {
+                    let seq_pos = match existing {
+                        Some(p) => p,
+                        None => {
+                            entries
+                                .push(new_entry(capitals, Node::new(Kind::Sequence(Vec::new()))));
+                            entries.len() - 1
+                        }
+                    };
+                    if !matches!(entries[seq_pos].value.kind, Kind::Sequence(_)) {
+                        entries[seq_pos].value = Node::new(Kind::Sequence(Vec::new()));
+                    }
+                    if let Kind::Sequence(seq) = &mut entries[seq_pos].value.kind {
+                        while seq.len() <= s {
+                            seq.push(Node::bare_null());
+                        }
+                        seq[s] = scalar_node;
+                    }
+                }
+            }
+        }
+        None => {
+            let Some(att_pos) = keys.iter().position(|e| e.key == "attributes") else {
+                return;
+            };
+            let mut remove_att = false;
+            if let Kind::Mapping(entries) = &mut keys[att_pos].value.kind {
+                if let Some(p) = entries
+                    .iter()
+                    .position(|e| tag_in_capitals(&e.key) == capitals)
+                {
+                    match slot {
+                        None => {
+                            entries.remove(p);
+                        }
+                        Some(s) => {
+                            if let Kind::Sequence(seq) = &mut entries[p].value.kind {
+                                if s < seq.len() {
+                                    seq[s] = Node::bare_null();
+                                }
+                                while seq.last().is_some_and(Node::is_bare_null) {
+                                    seq.pop();
+                                }
+                                if seq.is_empty() {
+                                    entries.remove(p);
+                                }
+                            }
+                        }
+                    }
+                }
+                remove_att = entries.is_empty();
+            }
+            if remove_att {
+                keys.remove(att_pos);
+            }
+        }
+    }
+}
+
+impl RecordFile {
+    /// Attaches, replaces, or clears an AutoCAD field (`FIELD`) on the object
+    /// of `list` at `index`: `field` on a `text` or `mtext`, or
+    /// `attribute_fields.<TAG>` on an `insert`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn set_field(
+        &mut self,
+        list: ObjectList,
+        index: usize,
+        tag: Option<&str>,
+        slot: Option<usize>,
+        field: Option<&crate::model::TextField>,
+        value: Option<&str>,
+        fallback_text: Option<&str>,
+        operation: usize,
+    ) -> Result<(), Error> {
+        self.state(list);
+        let items = self.items_mut(list)?;
+        let item = &mut items[index];
+        let kind = object_parts(item).0.unwrap_or_default().to_owned();
+        let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
+
+        match kind.as_str() {
+            "text" | "mtext" => {
+                if tag.is_some() {
+                    return Err(Error::new(
+                        ErrorCode::BadValue,
+                        "`tag` belongs to an insert's attribute, not a text or mtext",
+                    )
+                    .at_field("tag"));
+                }
+                let mut touched = vec!["field".to_owned()];
+                match field {
+                    Some(tf) => {
+                        let node = node_of(&super::field::text_field_to_json(tf));
+                        if let Some(p) = keys.iter().position(|e| e.key == "field") {
+                            keys[p].value = node;
+                        } else {
+                            keys.push(new_entry("field", node));
+                        }
+                        if let Some(v) = value {
+                            let val_node = Node::new(Kind::Scalar(v.to_owned()));
+                            if let Some(p) = keys.iter().position(|e| e.key == "contents") {
+                                keys[p].value = val_node;
+                            } else {
+                                keys.push(new_entry("contents", val_node));
+                            }
+                            touched.push("contents".to_owned());
+                        } else if let Some(p) = keys.iter().position(|e| e.key == "contents") {
+                            keys.remove(p);
+                            touched.push("contents".to_owned());
+                        }
+                    }
+                    None => {
+                        if let Some(p) = keys.iter().position(|e| e.key == "field") {
+                            keys.remove(p);
+                        }
+                        let new_contents = value.or_else(|| {
+                            if keys.iter().any(|e| e.key == "contents") {
+                                None
+                            } else {
+                                fallback_text
+                            }
+                        });
+                        if let Some(v) = new_contents {
+                            let val_node = Node::new(Kind::Scalar(v.to_owned()));
+                            if let Some(p) = keys.iter().position(|e| e.key == "contents") {
+                                keys[p].value = val_node;
+                            } else {
+                                keys.push(new_entry("contents", val_node));
+                            }
+                            touched.push("contents".to_owned());
+                        }
+                    }
+                }
+                self.touch(list, index, operation, Touch::Keys(touched));
+                Ok(())
+            }
+            "insert" => {
+                let Some(tag) = tag else {
+                    return Err(Error::new(
+                        ErrorCode::MissingKey,
+                        "setting a field on an insert requires `tag`, the attribute tag to attach \
+                         the field to",
+                    )
+                    .at_field("tag"));
+                };
+                let capitals = tag_in_capitals(tag);
+                let mut touched = vec![key_path("attribute_fields", &capitals)];
+                match field {
+                    Some(tf) => {
+                        let node = node_of(&super::field::text_field_to_json(tf));
+                        let af_pos = match keys.iter().position(|e| e.key == "attribute_fields") {
+                            Some(p) => p,
+                            None => {
+                                keys.push(new_entry(
+                                    "attribute_fields",
+                                    Node::new(Kind::Mapping(Vec::new())),
+                                ));
+                                keys.len() - 1
+                            }
+                        };
+                        let Kind::Mapping(entries) = &mut keys[af_pos].value.kind else {
+                            return Err(record_shape(&kind));
+                        };
+                        let existing_pos = entries
+                            .iter()
+                            .position(|e| tag_in_capitals(&e.key) == capitals);
+                        match slot {
+                            None => match existing_pos {
+                                Some(p) => entries[p].value = node,
+                                None => entries.push(new_entry(&capitals, node)),
+                            },
+                            Some(s) => {
+                                let seq_pos = match existing_pos {
+                                    Some(p) => p,
+                                    None => {
+                                        entries.push(new_entry(
+                                            &capitals,
+                                            Node::new(Kind::Sequence(Vec::new())),
+                                        ));
+                                        entries.len() - 1
+                                    }
+                                };
+                                if !matches!(entries[seq_pos].value.kind, Kind::Sequence(_)) {
+                                    entries[seq_pos].value = Node::new(Kind::Sequence(Vec::new()));
+                                }
+                                if let Kind::Sequence(seq) = &mut entries[seq_pos].value.kind {
+                                    while seq.len() <= s {
+                                        seq.push(Node::bare_null());
+                                    }
+                                    seq[s] = node;
+                                }
+                            }
+                        }
+                        // Update or clear explicit static attribute value.
+                        if let Some(v) = value {
+                            set_insert_attr_entry(keys, &capitals, slot, Some(v));
+                            touched.push(key_path("attributes", &capitals));
+                        } else {
+                            set_insert_attr_entry(keys, &capitals, slot, None);
+                            touched.push(key_path("attributes", &capitals));
+                        }
+                    }
+                    None => {
+                        if let Some(af_pos) = keys.iter().position(|e| e.key == "attribute_fields")
+                        {
+                            let mut remove_af = false;
+                            if let Kind::Mapping(entries) = &mut keys[af_pos].value.kind {
+                                if let Some(p) = entries
+                                    .iter()
+                                    .position(|e| tag_in_capitals(&e.key) == capitals)
+                                {
+                                    match slot {
+                                        None => {
+                                            entries.remove(p);
+                                        }
+                                        Some(s) => {
+                                            if let Kind::Sequence(seq) = &mut entries[p].value.kind
+                                            {
+                                                if s < seq.len() {
+                                                    seq[s] = Node::bare_null();
+                                                }
+                                                while seq.last().is_some_and(Node::is_bare_null) {
+                                                    seq.pop();
+                                                }
+                                                if seq.is_empty() {
+                                                    entries.remove(p);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                remove_af = entries.is_empty();
+                            }
+                            if remove_af {
+                                keys.remove(af_pos);
+                            }
+                        }
+                        if let Some(v) = value.or(fallback_text) {
+                            set_insert_attr_entry(keys, &capitals, slot, Some(v));
+                            touched.push(key_path("attributes", &capitals));
+                        }
+                    }
+                }
+                self.touch(list, index, operation, Touch::Keys(touched));
+                Ok(())
+            }
+            _ => Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "the object is {} {kind}; `set_field` works on a text, mtext, or insert \
+                     attribute",
+                    article(&kind)
+                ),
+            )
+            .at_field("target")),
+        }
+    }
 
     /// Edits the grid of the table of `list` at `index`, as operation
     /// `operation`: sets a cell's keys, or adds or deletes a row or a

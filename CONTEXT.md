@@ -392,6 +392,10 @@ _Avoid_: resize (alone), pull, drag
 Turning a compound object — an insert (into its evaluated block's objects and its visible attributes as single-line text), a polyline, donut or revision cloud (into lines and arcs), or a hatch, dimension, multileader, leader or table — into the simpler objects that draw it, as AutoCAD's EXPLODE (`X`) does; the source object is deleted (`deleted`) and each new object gets its own ID, listed under `created`.
 _Avoid_: ungroup, unpack, flatten (alone)
 
+**Field**:
+A live text value attached to a single-line text, multiline text or block insert attribute (`FIELD`) — such as the drawing's file name, save/plot/create/current date, layout tab name, a custom drawing property (`DWGPROPS`), a property of another object on the sheet, or a raw AutoCAD field code — written as AutoCAD's `ACAD_FIELD` / `FIELD` / `FIELDLIST` records so AutoCAD updates it live, drawn with its current evaluated value through the one drawing pipeline, and kept unchanged when an existing DWG is revised.
+_Avoid_: formula (for non-table fields), placeholder, macro
+
 **Change set**:
 Operations sent together as one request. Each sheet takes its part of a change set fully or not at all.
 _Avoid_: batch, transaction, commit

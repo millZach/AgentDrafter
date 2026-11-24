@@ -256,13 +256,17 @@ pub(crate) fn read_sheet_record_noting(
     let text = read_file(path, "the sheet description")?;
     let mut library = None;
     let mut noticed = Vec::new();
-    let (sheet, objects) =
-        on_its_own_with_records(&text, &mut library_beside(path, &mut library), &mut noticed)
-            .map_err(|e| e.or_in_file(path))?;
     let name = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let (sheet, objects) = on_its_own_with_records(
+        &text,
+        &mut library_beside(path, &mut library),
+        Some(&name),
+        &mut noticed,
+    )
+    .map_err(|e| e.or_in_file(path))?;
     let written = path.display().to_string();
     let from_library = library.map(|l| l.noticed).unwrap_or_default();
     notices.extend(notices_of(from_library, &name, &written, path));

@@ -1300,6 +1300,7 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::Delete { target }
             | Body::SetAttribute { target, .. }
             | Body::SetBlockState { target, .. }
+            | Body::SetField { target, .. }
             | Body::Offset { target, .. }
             | Body::Break { target, .. }
             | Body::TableEdit { target, .. }
@@ -1864,6 +1865,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
         | Body::SetBlockState { target, .. }
+        | Body::SetField { target, .. }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. } => target,
         Body::Add { .. }
@@ -1972,7 +1974,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
     // carries as its library holds it now, so that the operation can tell
     // which of a tag the block defines more than once it sets.
     let carried = match &op.body {
-        Body::SetAttribute { .. } => {
+        Body::SetAttribute { .. } | Body::SetField { tag: Some(_), .. } => {
             let block = at
                 .file(file)
                 .ok()
@@ -2246,6 +2248,64 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 .collect::<Vec<_>>()
                 .join(", ");
             done.message = format!("sets block state ({summary}) of `{id}`{template_note}");
+        }
+        Body::SetField {
+            tag,
+            occurrence,
+            field,
+            value,
+            ..
+        } => {
+            let slot = match tag {
+                Some(t) => {
+                    let capitals = tag_in_capitals(t);
+                    match set_which(
+                        &capitals,
+                        *occurrence,
+                        carried.as_ref(),
+                        record,
+                        list,
+                        index,
+                    ) {
+                        Ok(item) => item,
+                        Err((code, message)) => {
+                            return fail(reach, op_err(code, message, "occurrence"))
+                        }
+                    }
+                }
+                None => None,
+            };
+            let fallback_text = if field.is_none() && value.is_none() {
+                Some(crate::model::UNEVALUATED_FIELD.to_owned())
+            } else {
+                None
+            };
+            if let Err(e) = record.set_field(
+                list,
+                index,
+                tag.as_deref(),
+                slot,
+                field.as_ref(),
+                value.as_deref(),
+                fallback_text.as_deref(),
+                op.index,
+            ) {
+                let field_name = e.field.as_deref().unwrap_or("target");
+                return fail(reach, op_err(e.code, e.message, field_name));
+            }
+            if let Some(refusal) = many_paths(files, file, op, "target") {
+                return refusal;
+            }
+            done.message = match (field.is_some(), tag) {
+                (true, Some(t)) => {
+                    format!("sets field on attribute `{t}` of `{id}`{template_note}")
+                }
+                (true, None) => format!("sets field of `{id}`{template_note}"),
+                (false, Some(t)) => {
+                    format!("clears field on attribute `{t}` of `{id}`{template_note}")
+                }
+                (false, None) => format!("clears field of `{id}`{template_note}"),
+            };
         }
         Body::TableEdit { edit, .. } => match record.table_edit(list, index, edit, op.index) {
             Ok(edited) => {
@@ -10087,6 +10147,7 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
         | Body::SetBlockState { target, .. }
+        | Body::SetField { target, .. }
         | Body::Offset { target, .. }
         | Body::Trim { target, .. }
         | Body::Extend { target, .. }
@@ -10251,6 +10312,15 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
                 rest.to_owned()
             } else {
                 "state".to_owned()
+            }
+        }
+        Body::SetField { .. } => {
+            if rest.starts_with("field") || rest.starts_with("attribute_fields") {
+                "field".to_owned()
+            } else if code == ErrorCode::UnknownName {
+                "tag".to_owned()
+            } else {
+                "field".to_owned()
             }
         }
         Body::ReplaceText { .. } => "replace".to_owned(),
@@ -10440,6 +10510,7 @@ fn target_words(op: &Operation) -> String {
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
         | Body::SetBlockState { target, .. }
+        | Body::SetField { target, .. }
         | Body::Offset { target, .. }
         | Body::Trim { target, .. }
         | Body::Extend { target, .. }

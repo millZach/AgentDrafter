@@ -215,6 +215,7 @@ pub(super) fn read_text(dwg_text: &DwgText, layer: String) -> Option<Text> {
         rotation: normalize_degrees(dwg_text.rotation.to_degrees()),
         justify,
         layer,
+        field: None,
         properties: Default::default(),
     })
 }
@@ -250,6 +251,7 @@ pub(super) fn read_mtext(dwg_text: &DwgMText, layer: String) -> Option<MText> {
         rotation: normalize_degrees(dwg_text.rotation.to_degrees()),
         justify,
         layer,
+        field: None,
         properties: Default::default(),
     })
 }
@@ -435,6 +437,7 @@ mod tests {
             rotation: 0.0,
             justify: Justify::Right,
             layer: "0".into(),
+            field: None,
             properties: Default::default(),
         };
         let start = Point3::new(7.5, 20.0, 1.0);

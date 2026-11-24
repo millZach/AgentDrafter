@@ -104,8 +104,9 @@ pub(crate) const ATTDEF_KEYS: [&str; 20] = [
 
 /// The keys a single line of text takes in a block: a sheet's, and its
 /// cell.
-pub(crate) const BLOCK_TEXT_KEYS: [&str; 13] = [
+pub(crate) const BLOCK_TEXT_KEYS: [&str; 14] = [
     "contents",
+    "field",
     "position",
     "height",
     "style",
@@ -121,7 +122,7 @@ pub(crate) const BLOCK_TEXT_KEYS: [&str; 13] = [
 ];
 
 /// The keys an insert takes, besides those every object on a sheet takes.
-pub(crate) const INSERT_KEYS: [&str; 13] = [
+pub(crate) const INSERT_KEYS: [&str; 14] = [
     "block",
     "position",
     "scale",
@@ -129,6 +130,7 @@ pub(crate) const INSERT_KEYS: [&str; 13] = [
     "mirrored",
     "readable_attributes",
     "attributes",
+    "attribute_fields",
     "state",
     "layer",
     "color",
@@ -408,7 +410,44 @@ fn block(
     let mut cells = Vec::new();
     for (i, item) in items.iter().enumerate() {
         let path = index_path(&objects_path, i);
-        objects.push(object(item, &path, tables, &mut place)?);
+        let mut obj = object(item, &path, tables, &mut place)?;
+        // Evaluate any field with omitted contents inside a block definition so
+        // its display text is always non-empty.
+        let empty_props = std::collections::BTreeMap::new();
+        let ctx = crate::model::field::EvalContext {
+            sheet_name: None,
+            layout_name: None,
+            custom_properties: &empty_props,
+            objects: &[],
+            object_ids: &[],
+            object_handles: &[],
+        };
+        match &mut obj {
+            Object::Text(t) if t.contents.is_empty() => {
+                if let Some(tf) = &t.field {
+                    let (_, display) = crate::model::field::evaluate_text_field(tf, &ctx);
+                    t.contents = display.replace(['\r', '\n'], " ");
+                }
+            }
+            Object::MText(t) if t.contents.is_empty() => {
+                if let Some(tf) = &t.field {
+                    let (_, display) = crate::model::field::evaluate_text_field(tf, &ctx);
+                    t.contents = display;
+                }
+            }
+            Object::Insert(ins) => {
+                for att in &mut ins.attributes {
+                    if att.value.is_empty() {
+                        if let Some(tf) = &att.field {
+                            let (_, display) = crate::model::field::evaluate_text_field(tf, &ctx);
+                            att.value = display.replace(['\r', '\n'], " ");
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        objects.push(obj);
         if let Some(cell) = cell(item, &path, i, tables.units)? {
             cells.push(cell);
         }
@@ -827,14 +866,24 @@ pub(super) fn attributes(
             }
         }
     }
-    Ok(definitions
+    let explicit_values: Vec<bool> = values.iter().map(Option::is_some).collect();
+    let mut built: Vec<Attribute> = definitions
         .iter()
         .zip(values)
         .map(|(definition, value)| Attribute {
             tag: definition.tag.clone(),
             value: value.unwrap_or_else(|| definition.default.clone()),
+            field: None,
         })
-        .collect())
+        .collect();
+    super::field::parse_attribute_fields(
+        fields,
+        block,
+        &definitions,
+        &mut built,
+        &explicit_values,
+    )?;
+    Ok(built)
 }
 
 /// The attributes an insert of `block` carries, for an error: each tag

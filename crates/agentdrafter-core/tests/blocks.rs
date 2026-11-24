@@ -466,6 +466,7 @@ objects:
     let given = |tag: &str, value: &str| Attribute {
         tag: tag.into(),
         value: value.into(),
+        field: None,
     };
     let Object::Insert(first) = &sheet.objects[0] else {
         panic!("an insert");

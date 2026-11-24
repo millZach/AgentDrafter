@@ -1290,6 +1290,7 @@ impl<'a> Drawer<'a> {
                             rotation: laid.text.rotation,
                             justify: crate::text::Justify::Left,
                             layer: laid.text.layer.clone(),
+                            field: None,
                             properties: laid.text.properties.clone(),
                         };
                         let lettering =

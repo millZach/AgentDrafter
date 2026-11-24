@@ -106,7 +106,8 @@ fn block_content_reads_with_its_attribute_values() {
         boxa.attributes,
         [Attribute {
             tag: "TAG".into(),
-            value: "R1".into()
+            value: "R1".into(),
+            field: None,
         }]
     );
     assert_eq!((boxa.scale, boxa.rotation), (1.0, 0.0));

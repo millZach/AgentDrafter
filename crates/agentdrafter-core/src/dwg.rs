@@ -44,6 +44,7 @@ use crate::units::Unit;
 mod block;
 mod dimension;
 mod dynamic_block;
+mod field;
 mod hatch;
 mod ids;
 mod import;
@@ -160,6 +161,7 @@ pub(crate) fn write_new_sheet(
         .summary_info
         .custom_properties
         .push((BUILD_MARK.to_owned(), mark_value(mark)));
+    field::write_custom_properties(&mut drawing, &sheet.custom_properties);
     for linetype in &sheet.linetypes {
         drawing
             .line_types
@@ -247,22 +249,41 @@ pub(crate) fn write_new_sheet(
     // its page setup and adds its overall viewport before its objects.
     layout::prepare(&mut drawing, sheet)?;
     let mut dimensions = 0;
+    let mut id_to_handle: std::collections::HashMap<String, acadrust::types::Handle> =
+        std::collections::HashMap::with_capacity(sheet.objects.len());
+    // Deferred fields to attach once every sheet object has its handle (so
+    // `object_property` can reference any object regardless of order).
+    struct PendingField<'a> {
+        host: acadrust::types::Handle,
+        field: &'a crate::model::TextField,
+        display_text: &'a str,
+        width_factor: Option<f64>,
+        is_mtext: bool,
+        layout_name: Option<&'a str>,
+    }
+    let mut pending_fields: Vec<PendingField<'_>> = Vec::new();
+    let default_layout_name = sheet.layout.as_ref().map(|l| l.name.as_str());
     for (i, (object, written)) in sheet.objects.iter().zip(&record.objects).enumerate() {
         // The space it is in: model space, the first layout's paper space,
         // AutoCAD's `*Paper_Space`, or another layout's, by its name.
+        let layout_name = sheet
+            .layout_of(i)
+            .map(|l| l.name.as_str())
+            .or(default_layout_name);
         let paper = match sheet.layout_of(i) {
             None => Space::Model,
             Some(_) if sheet.in_paper_space(i) => Space::Paper,
             Some(other) => Space::Layout(&other.name),
         };
         if let (Object::Viewport(v), Some(on)) = (object, sheet.layout_of(i)) {
-            add_viewport(
+            let handle = add_viewport(
                 &mut drawing,
                 sheet,
                 v,
                 &on.name,
                 (&record.name, &written.id, written.name.as_deref()),
             )?;
+            id_to_handle.insert(written.id.to_lowercase(), handle);
             continue;
         }
         if let Object::Table(t) = object {
@@ -287,6 +308,7 @@ pub(crate) fn write_new_sheet(
                 )
             })?;
             table::fill_block(&mut drawing, handle, t, &style)?;
+            id_to_handle.insert(written.id.to_lowercase(), handle);
             continue;
         }
         if let Object::MLeader(m) = object {
@@ -310,12 +332,13 @@ pub(crate) fn write_new_sheet(
             m.layer.clone_into(&mut common.layer);
             set_properties(common, &m.properties);
             ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
-            add_to(&mut drawing, dwg_mleader, paper).map_err(|e| {
+            let handle = add_to(&mut drawing, dwg_mleader, paper).map_err(|e| {
                 Error::new(
                     ErrorCode::DwgWrite,
                     format!("could not add a multileader to the drawing: {e}"),
                 )
             })?;
+            id_to_handle.insert(written.id.to_lowercase(), handle);
             continue;
         }
         if let Object::Dimension(d) = object {
@@ -341,12 +364,13 @@ pub(crate) fn write_new_sheet(
             d.layer.clone_into(&mut common.layer);
             set_properties(common, &d.properties);
             ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
-            add_to(&mut drawing, dwg_dimension, paper).map_err(|e| {
+            let handle = add_to(&mut drawing, dwg_dimension, paper).map_err(|e| {
                 Error::new(
                     ErrorCode::DwgWrite,
                     format!("could not add a dimension to the drawing: {e}"),
                 )
             })?;
+            id_to_handle.insert(written.id.to_lowercase(), handle);
             continue;
         }
         if let Object::Leader(l) = object {
@@ -370,6 +394,7 @@ pub(crate) fn write_new_sheet(
                     .map_err(added)?;
                 leader::link_annotation(&mut drawing, handle, text);
             }
+            id_to_handle.insert(written.id.to_lowercase(), handle);
             continue;
         }
         if let Object::Insert(insert) = object {
@@ -403,12 +428,46 @@ pub(crate) fn write_new_sheet(
             {
                 ids::write_dynamic_block(&mut dwg_ins.common, &insert.block, &insert.state);
             }
-            add_to(&mut drawing, EntityType::Insert(dwg_ins), paper).map_err(|e| {
+            let has_attr_fields = insert.attributes.iter().any(|a| a.field.is_some());
+            let handle = add_to(&mut drawing, EntityType::Insert(dwg_ins), paper).map_err(|e| {
                 Error::new(
                     ErrorCode::DwgWrite,
                     format!("could not add an insert to the drawing: {e}"),
                 )
             })?;
+            id_to_handle.insert(written.id.to_lowercase(), handle);
+            if has_attr_fields {
+                // Allocate handles for attributes and seqend so `set_text_field`
+                // can attach ACAD_FIELD directly onto each AttributeEntity.
+                let attr_count = match drawing.get_entity(handle) {
+                    Some(EntityType::Insert(ins)) => ins.attributes.len(),
+                    _ => 0,
+                };
+                let mut attr_handles = Vec::with_capacity(attr_count);
+                for _ in 0..attr_count {
+                    attr_handles.push(drawing.allocate_handle());
+                }
+                let seqend_handle = drawing.allocate_handle();
+                if let Some(EntityType::Insert(ins)) = drawing.get_entity_mut(handle) {
+                    for (att, h) in ins.attributes.iter_mut().zip(&attr_handles) {
+                        att.common.handle = *h;
+                        att.common.owner_handle = handle;
+                    }
+                    ins.seqend_handle = Some(seqend_handle);
+                }
+                for (att, &att_handle) in insert.attributes.iter().zip(&attr_handles) {
+                    if let Some(tf) = &att.field {
+                        pending_fields.push(PendingField {
+                            host: att_handle,
+                            field: tf,
+                            display_text: &att.value,
+                            width_factor: None,
+                            is_mtext: false,
+                            layout_name,
+                        });
+                    }
+                }
+            }
             continue;
         }
         let mut dwg_object = dwg_object(object, start_of, &sheet.blocks)?;
@@ -418,12 +477,69 @@ pub(crate) fn write_new_sheet(
             &written.id,
             written.name.as_deref(),
         );
-        add_to(&mut drawing, dwg_object, paper).map_err(|e| {
+        let handle = add_to(&mut drawing, dwg_object, paper).map_err(|e| {
             Error::new(
                 ErrorCode::DwgWrite,
                 format!("could not add a {} to the drawing: {e}", object.type_name()),
             )
         })?;
+        id_to_handle.insert(written.id.to_lowercase(), handle);
+        match object {
+            Object::Text(t) => {
+                if let Some(tf) = &t.field {
+                    pending_fields.push(PendingField {
+                        host: handle,
+                        field: tf,
+                        display_text: &t.contents,
+                        width_factor: None,
+                        is_mtext: false,
+                        layout_name,
+                    });
+                }
+            }
+            Object::MText(t) => {
+                if let Some(tf) = &t.field {
+                    pending_fields.push(PendingField {
+                        host: handle,
+                        field: tf,
+                        display_text: &t.contents,
+                        width_factor: t.width_factor,
+                        is_mtext: true,
+                        layout_name,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    if !pending_fields.is_empty() {
+        let local_ids: Vec<String> = record.objects.iter().map(|r| r.id.clone()).collect();
+        for pending in pending_fields {
+            let ctx = crate::model::field::EvalContext {
+                sheet_name: Some(&record.name),
+                layout_name: pending.layout_name,
+                custom_properties: &sheet.custom_properties,
+                objects: &sheet.objects,
+                object_ids: &local_ids,
+                object_handles: &[],
+            };
+            let (mut slots, _) = crate::model::field::evaluate_text_field(pending.field, &ctx);
+            if pending.field.items.len() == 1
+                && crate::model::field::is_default_field_template(&pending.field.template)
+                && !pending.display_text.is_empty()
+            {
+                slots[0] = pending.display_text.to_owned();
+            }
+            field::attach_text_field(
+                &mut drawing,
+                pending.host,
+                pending.field,
+                &slots,
+                &id_to_handle,
+                pending.width_factor,
+                pending.is_mtext,
+            )?;
+        }
     }
     match catch_unwind(AssertUnwindSafe(|| DwgWriter::write_to_vec(&drawing))) {
         Ok(Ok(bytes)) => Ok(bytes),
@@ -479,7 +595,7 @@ fn add_viewport(
     viewport: &crate::model::Viewport,
     layout: &str,
     (sheet_name, id, name): (&str, &str, Option<&str>),
-) -> Result<(), Error> {
+) -> Result<acadrust::types::Handle, Error> {
     let failed = |e: acadrust::DxfError| {
         Error::new(
             ErrorCode::DwgWrite,
@@ -530,7 +646,7 @@ fn add_viewport(
             object.common_mut().reactors = vec![handle];
         }
     }
-    Ok(())
+    Ok(handle)
 }
 
 fn dwg_linetype(linetype: &Linetype) -> LineType {
@@ -1110,6 +1226,64 @@ fn contents(
             None => not_read.push((kind_of(dwg_object), Some(handle_text(handle)))),
         }
     }
+    // Attach AutoCAD FIELD definitions read from extension dictionaries onto
+    // Text, MText, and Insert attributes, mapping referenced entity handles
+    // back to their local IDs (or `#<HEX>` when the target has no ID).
+    if !drawing.objects.is_empty() {
+        let mut handle_to_id: std::collections::HashMap<u64, String> =
+            std::collections::HashMap::with_capacity(objects.len());
+        for (h_hex, id_name) in handles.iter().zip(&ids_and_names) {
+            if let Ok(h_val) = u64::from_str_radix(h_hex, 16) {
+                let label = id_name
+                    .id
+                    .as_deref()
+                    .map(|full| {
+                        full.split_once(crate::description::ID_SEPARATOR)
+                            .map_or(full, |(_, local)| local)
+                            .to_owned()
+                    })
+                    .unwrap_or_else(|| format!("#{h_hex}"));
+                handle_to_id.insert(h_val, label);
+            }
+        }
+        for (obj, h_hex) in objects.iter_mut().zip(&handles) {
+            let Ok(h_val) = u64::from_str_radix(h_hex, 16) else {
+                continue;
+            };
+            let Some(dwg_ent) = drawing.get_entity(acadrust::types::Handle::new(h_val)) else {
+                continue;
+            };
+            match (obj, dwg_ent) {
+                (Object::Text(t), EntityType::Text(dt)) => {
+                    t.field = field::read_host_field(
+                        drawing,
+                        dt.common.xdictionary_handle,
+                        &handle_to_id,
+                        false,
+                    );
+                }
+                (Object::MText(t), EntityType::MText(dt)) => {
+                    t.field = field::read_host_field(
+                        drawing,
+                        dt.common.xdictionary_handle,
+                        &handle_to_id,
+                        true,
+                    );
+                }
+                (Object::Insert(ins), EntityType::Insert(di)) => {
+                    for (att, dwg_att) in ins.attributes.iter_mut().zip(&di.attributes) {
+                        att.field = field::read_host_field(
+                            drawing,
+                            dwg_att.common.xdictionary_handle,
+                            &handle_to_id,
+                            false,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     let (decode, skipped_for_sheet) = decode_report(drawing, stats);
     for (kind, handle) in skipped_for_sheet {
         let already = handle.as_ref().is_some_and(|h| {
@@ -1157,6 +1331,7 @@ fn contents(
         objects_not_read: not_read.len(),
         ltscale: drawing.header.linetype_scale,
         wipeout_frame: wipeout::read_wipeout_frame(drawing),
+        custom_properties: field::read_custom_properties(drawing),
         layout,
         other_layouts,
         opens_on: layout::opened_on(drawing).map(|(name, _)| name),
@@ -2956,6 +3131,7 @@ mod tests {
             layout: None,
             other_layouts: Vec::new(),
             wipeout_frame: crate::model::WipeoutFrame::Off,
+            custom_properties: std::collections::BTreeMap::new(),
         }
     }
 

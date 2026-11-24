@@ -185,6 +185,7 @@ pub use model::{
     STANDARD_MLEADER_STYLE,
 };
 pub use model::{Cell, Clip, Layout, Paper, Viewport};
+pub use model::{FieldItem, FieldKind, TextField, DEFAULT_FIELD_TEMPLATE, UNEVALUATED_FIELD};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use model::{
     RevisionCloud, RevisionCloudBoundary, RevisionCloudStyle, MOST_REVCLOUD_ARCS,

@@ -8,6 +8,7 @@
 //! anticlockwise from the X axis, and lie in `[0, 360)`. A lineweight is a
 //! pen width on paper and is in millimetres whatever the declared unit.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,7 @@ use crate::units::Unit;
 pub(crate) mod block;
 pub(crate) mod dimension;
 pub(crate) mod dynamic_block;
+pub(crate) mod field;
 pub(crate) mod hatch;
 pub(crate) mod layout;
 pub(crate) mod leader;
@@ -38,6 +40,7 @@ pub use dynamic_block::{
     is_default_state, resolve_state, DynamicParameter, DynamicParameterKind, DynamicValue,
     LookupRow, VisibilityState,
 };
+pub use field::{FieldItem, FieldKind, TextField, DEFAULT_FIELD_TEMPLATE, UNEVALUATED_FIELD};
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use layout::{Clip, Layout, Viewport};
 pub use leader::{
@@ -889,6 +892,10 @@ pub struct Sheet {
     /// matching AutoCAD's `WIPEOUTFRAME` (`WIPEOUTVARIABLES.display_frame`).
     #[serde(default, skip_serializing_if = "WipeoutFrame::is_off")]
     pub wipeout_frame: WipeoutFrame,
+    /// Custom drawing properties (`DWGPROPS`), mapped from property name to
+    /// value, referenced by `custom_property` fields (`\AcVar CustomDP.<name>`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub custom_properties: BTreeMap<String, String>,
 }
 
 impl Sheet {
@@ -1174,6 +1181,10 @@ pub struct DrawingContents {
     /// How wipeout frames are shown and plotted, read from `ACAD_WIPEOUT_VARS`.
     #[serde(default, skip_serializing_if = "WipeoutFrame::is_off")]
     pub wipeout_frame: WipeoutFrame,
+    /// Custom drawing properties read from the DWG's summary info (`DWGPROPS`),
+    /// excluding AgentDrafter's own build mark.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub custom_properties: BTreeMap<String, String>,
     /// The drawing's first layout the core reads, in the order of their
     /// tabs, whatever tab the drawing was saved on: `objects` then holds
     /// its paper space's objects and viewports beside model space's, and

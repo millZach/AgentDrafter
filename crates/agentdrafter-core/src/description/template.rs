@@ -300,6 +300,7 @@ pub(super) fn fill_with_records(
         &mut load_once,
         Some(set_units),
         Some(row_objects),
+        Some(&row.sheet),
         noticed,
     )
     .map_err(|e| at_row_value(e, &filled, row, rows_file))

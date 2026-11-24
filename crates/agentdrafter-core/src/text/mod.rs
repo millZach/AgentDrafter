@@ -268,6 +268,9 @@ pub struct Text {
     pub justify: Justify,
     #[serde(default = "crate::model::layer_zero")]
     pub layer: String,
+    /// Optional AutoCAD field attached to this text (`FIELD`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<crate::model::TextField>,
     #[serde(flatten)]
     pub properties: crate::model::Properties,
 }
@@ -301,6 +304,9 @@ pub struct MText {
     pub justify: Attachment,
     #[serde(default = "crate::model::layer_zero")]
     pub layer: String,
+    /// Optional AutoCAD field attached to this multiline text (`FIELD`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<crate::model::TextField>,
     #[serde(flatten)]
     pub properties: crate::model::Properties,
 }

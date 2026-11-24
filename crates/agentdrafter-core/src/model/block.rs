@@ -186,6 +186,9 @@ pub struct AttributeDefinition {
 pub struct Attribute {
     pub tag: String,
     pub value: String,
+    /// Optional AutoCAD field attached to this insert attribute (`FIELD`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<super::TextField>,
 }
 
 /// A block placed on a sheet: AutoCAD's INSERT, a block reference.
@@ -295,6 +298,7 @@ pub fn attribute_text(
         },
         justify: definition.justify,
         layer,
+        field: None,
         properties: definition.properties.clone(),
     }
 }
@@ -424,6 +428,7 @@ pub(crate) fn definition_text(definition: &AttributeDefinition) -> Text {
         rotation: definition.rotation,
         justify: definition.justify,
         layer: definition.layer.clone(),
+        field: None,
         properties: definition.properties.clone(),
     }
 }
