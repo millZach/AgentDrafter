@@ -47,7 +47,7 @@ use super::{
     ChangeReport, ChangeRequest, Copied, Fill, OperationOutcome, RowValueSet, SheetChange,
     SnapResolved, TextReplaced,
 };
-use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
+use crate::build::{is_same_file, prepare_sheet_as, DrawingFormat, PreparedSheet};
 use crate::description::blocks::tag_in_capitals;
 use crate::description::parts::{self, Unsplit};
 use crate::description::SheetRecord;
@@ -77,6 +77,7 @@ struct SetFiles {
     folder: PathBuf,
     units: Unit,
     output: PathBuf,
+    format: DrawingFormat,
     /// The set as the build marks of its DWGs name it, as `build` names it
     /// names it.
     marked: Option<String>,
@@ -194,6 +195,7 @@ impl SetFiles {
             folder: folder.to_owned(),
             units: settings.units,
             output: folder.join(&settings.output),
+            format: settings.format,
             marked: set_in_mark(folder, &settings.output),
             rows_files,
             rows,
@@ -295,7 +297,11 @@ impl SetFiles {
     }
 
     fn dwg(&self, k: usize) -> PathBuf {
-        self.output.join(format!("{}.dwg", self.rows[k].sheet))
+        self.output.join(format!(
+            "{}.{}",
+            self.rows[k].sheet,
+            self.format.extension()
+        ))
     }
 
     /// The build mark sheet `k`'s DWG carries, as `build` writes it.
@@ -9549,12 +9555,13 @@ fn validate(
     let record = sheet_record(at, rows, k, notices)?;
     let dwg = files.dwg(k);
     writable(&dwg)?;
-    prepare_sheet(
+    prepare_sheet_as(
         &record,
         &files.templates[t].path,
         &dwg,
         &files.mark(k),
         true,
+        files.format,
         settings,
     )
 }
@@ -10291,12 +10298,13 @@ fn before_change(files: &SetFiles, k: usize, settings: &Settings) -> Result<Resu
     .and_then(|(record, _)| {
         let dwg = files.dwg(k);
         writable(&dwg)?;
-        prepare_sheet(
+        prepare_sheet_as(
             &record,
             &template.path,
             &dwg,
             &files.mark(k),
             true,
+            files.format,
             settings,
         )
         .map(|_| ())

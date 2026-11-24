@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::description::{read_sheet_record, ReadFiles, SavedSet, SheetRecord};
 use crate::error::{Error, ErrorCode};
 use crate::model::{Paper, RecordsOfKind};
-use crate::original::{is_dwg_file, kinds_in_words, plural, read_dwg_record};
+use crate::original::{is_drawing_file, kinds_in_words, plural, read_dwg_record};
 use crate::query::{Extents, WrittenAt};
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
@@ -507,7 +507,7 @@ fn load(
             .map(|w| no_such_sheet(w, names))
     };
     if !source.is_dir() {
-        if is_dwg_file(source) {
+        if is_drawing_file(source) {
             let loaded = read_dwg_record(source, true)?;
             if let Some(error) = missing(&[loaded.record.name.as_str()]) {
                 return Err(error);

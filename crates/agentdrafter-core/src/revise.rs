@@ -55,7 +55,7 @@ use crate::model::{DecodeReport, Object};
 #[cfg(any(unix, windows))]
 use crate::original::regular_file_id_no_follow;
 use crate::original::{
-    dwg_loaded_from_drawing, handle_id, is_dwg, is_dwg_file, on_disk_path, plural,
+    dwg_loaded_from_drawing, handle_id, is_drawing_file, is_dwg, is_dxf, on_disk_path, plural,
     read_regular_no_follow, DwgLoaded, NoFollowRead, HANDLE_ID,
 };
 use crate::plot::{plot_dwg_bytes, plot_style, PlotReport};
@@ -318,9 +318,9 @@ pub fn revise(request: &ReviseRequest) -> Reply<RevisionReport> {
 /// pending commit exists.
 pub fn revise_with(request: &ReviseRequest, settings: &Settings) -> Reply<RevisionReport> {
     let source = request.set.as_path();
-    if !is_dwg_file(source) {
+    if !is_drawing_file(source) {
         return Reply::from(Err(Error::usage(
-            "revising an original requires a `.dwg` file, not a folder",
+            "revising an original requires a `.dwg` or `.dxf` file, not a folder",
         )
         .in_file(source)));
     }
@@ -1103,6 +1103,8 @@ fn resolve_output_paths(
     explicit_output: Option<&Path>,
     no_pdf: bool,
 ) -> Result<OutputPaths, Error> {
+    let source_is_dxf = is_dxf(source);
+    let ext = if source_is_dxf { "dxf" } else { "dwg" };
     if let Some(output) = explicit_output {
         if output.file_name().is_none() {
             return Err(
@@ -1111,14 +1113,21 @@ fn resolve_output_paths(
                     .in_file(output),
             );
         }
-        if !is_dwg(output) {
-            return Err(Error::usage("the revision's output path must end `.dwg`")
-                .at_field("output")
-                .in_file(output));
+        let matches = if source_is_dxf {
+            is_dxf(output)
+        } else {
+            is_dwg(output)
+        };
+        if !matches {
+            return Err(
+                Error::usage(format!("the revision's output path must end `.{ext}`"))
+                    .at_field("output")
+                    .in_file(output),
+            );
         }
         let changes = with_dwg_replaced(output, REVISION_CHANGES_EXTENSION);
         let pdf = (!no_pdf).then(|| with_dwg_replaced(output, "pdf"));
-        refuse_existing_or_original(source, source_id, output, "revision DWG")?;
+        refuse_existing_or_original(source, source_id, output, "revision drawing")?;
         refuse_existing_or_original(source, source_id, &changes, "revision change list")?;
         if let Some(pdf_path) = &pdf {
             refuse_existing_or_original(source, source_id, pdf_path, "revision PDF")?;
@@ -1130,13 +1139,13 @@ fn resolve_output_paths(
         });
     }
 
-    // Default beside the original: `<stem>.rev1.dwg`, `<stem>.rev2.dwg`, ...
+    // Default beside the original: `<stem>.rev1.<ext>`, `<stem>.rev2.<ext>`, ...
     let stem = source
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     for n in 1u64..=100_000 {
-        let dwg = source.with_file_name(format!("{stem}.rev{n}.dwg"));
+        let dwg = source.with_file_name(format!("{stem}.rev{n}.{ext}"));
         let changes = source.with_file_name(format!("{stem}.rev{n}.{REVISION_CHANGES_EXTENSION}"));
         let pdf = (!no_pdf).then(|| source.with_file_name(format!("{stem}.rev{n}.pdf")));
         let dwg_free = path_absent(&dwg)?;

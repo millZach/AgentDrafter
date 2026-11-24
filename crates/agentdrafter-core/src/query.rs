@@ -34,7 +34,7 @@ use crate::error::{Error, ErrorCode};
 use crate::geometry::snap::{touches, SnapPoint, Touch};
 use crate::geometry::{ObjectRef, SnapRef};
 use crate::model::{Attribute, Layer, Measured, Object, Point3, RecordsOfKind, Sheet, LAYER_ZERO};
-use crate::original::{is_dwg_file, kinds_in_words, plural, read_dwg_record};
+use crate::original::{is_drawing_file, kinds_in_words, plural, read_dwg_record};
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -649,7 +649,7 @@ struct Loaded {
 fn load(source: &Path, sheet: Option<&str>, need_set_paper: bool) -> Result<Loaded, Error> {
     let named = |name: &str| sheet.is_none_or(|s| s.to_lowercase() == name.to_lowercase());
     if !source.is_dir() {
-        if is_dwg_file(source) {
+        if is_drawing_file(source) {
             let loaded = read_dwg_record(source, need_set_paper)?;
             if !named(&loaded.record.name) {
                 return Err(no_such_sheet(sheet, &[loaded.record.name.as_str()]));

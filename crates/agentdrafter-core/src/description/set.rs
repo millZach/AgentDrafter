@@ -18,14 +18,15 @@ use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
 use super::{
     at, bad_value, read_file_in, scalar, sequence, unit, wrong_type, Disk, Fields, ReadFiles,
 };
-use crate::build::is_same_file;
+use crate::build::{is_same_file, DrawingFormat};
 use crate::change::relative_to;
 use crate::error::{Error, ErrorCode};
 use crate::set::SET_SETTINGS_FILE;
 use crate::units::Unit;
 
 /// The keys of a drawing set's settings.
-pub(crate) const SETTINGS_KEYS: [&str; 5] = ["units", "output", "rows", "clean", "plot_style"];
+pub(crate) const SETTINGS_KEYS: [&str; 6] =
+    ["units", "output", "rows", "clean", "plot_style", "format"];
 
 /// The keys at the top of a set's rows file.
 pub(crate) const ROWS_FILE_KEYS: [&str; 1] = ["rows"];
@@ -74,6 +75,9 @@ pub(crate) struct SetSettings {
     /// The CTB or STB plot style file name the set plots with unless a plot
     /// request names another.
     pub plot_style: Option<String>,
+    /// The drawing format the set builds (`dwg`, ASCII `dxf`, or `dxf_binary`),
+    /// unless a build asks for another. `dwg` when the settings leave it out.
+    pub format: DrawingFormat,
 }
 
 /// A path the settings' `rows` names: a rows file or a folder of them.
@@ -277,6 +281,23 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
         Some(node) => Some(super::page_setup::plot_style_file(node, "plot_style")?),
         None => None,
     };
+    let format = match fields.get("format") {
+        Some(node) => {
+            let text = scalar(
+                node,
+                "format",
+                "a drawing format: `dwg`, `dxf` (ASCII DXF) or `dxf_binary`",
+            )?;
+            DrawingFormat::from_name(text).ok_or_else(|| {
+                bad_value(
+                    node,
+                    "format",
+                    format!("unknown drawing format `{text}`; choose `dwg`, `dxf` or `dxf_binary`"),
+                )
+            })?
+        }
+        None => DrawingFormat::Dwg,
+    };
     Ok(SetSettings {
         units,
         output: output.to_owned(),
@@ -284,6 +305,7 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
         rows_listed,
         clean,
         plot_style,
+        format,
     })
 }
 

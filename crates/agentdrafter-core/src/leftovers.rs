@@ -76,6 +76,8 @@ fn is_false(value: &bool) -> bool {
 pub enum LeftoverKind {
     /// A DWG a build wrote.
     Dwg,
+    /// A DXF a build wrote.
+    Dxf,
     /// A PDF a plot wrote.
     Pdf,
 }
@@ -260,7 +262,13 @@ impl<'a> Written<'a> {
         let names = set
             .sheets
             .iter()
-            .flat_map(|sheet| [format!("{sheet}.dwg"), format!("{sheet}.pdf")])
+            .flat_map(|sheet| {
+                [
+                    format!("{sheet}.dwg"),
+                    format!("{sheet}.dxf"),
+                    format!("{sheet}.pdf"),
+                ]
+            })
             .collect();
         Written {
             output: set.output,
@@ -280,7 +288,9 @@ impl<'a> Written<'a> {
         let files = self.files.get_or_insert_with(|| {
             sheets
                 .iter()
-                .flat_map(|sheet| ["dwg", "pdf"].map(|e| output.join(format!("{sheet}.{e}"))))
+                .flat_map(|sheet| {
+                    ["dwg", "dxf", "pdf"].map(|e| output.join(format!("{sheet}.{e}")))
+                })
                 .filter_map(|path| file_id(&path))
                 .collect()
         });
@@ -336,12 +346,14 @@ fn is_link(metadata: &fs::Metadata) -> bool {
 }
 
 /// The sheet a file of the output folder named `name` is for, and what it
-/// is: a DWG or a PDF, by its extension in any case. None for any other
+/// is: a DWG, a DXF or a PDF, by its extension in any case. None for any other
 /// file.
 fn output_kind(name: &str) -> Option<(&str, LeftoverKind)> {
     let (sheet, extension) = name.rsplit_once('.')?;
     let kind = if extension.eq_ignore_ascii_case("dwg") {
         LeftoverKind::Dwg
+    } else if extension.eq_ignore_ascii_case("dxf") {
+        LeftoverKind::Dxf
     } else if extension.eq_ignore_ascii_case("pdf") {
         LeftoverKind::Pdf
     } else {
@@ -354,7 +366,7 @@ fn output_kind(name: &str) -> Option<(&str, LeftoverKind)> {
 /// AgentDrafter made for the set. An error when it cannot be read.
 fn is_sets(set: &SetOutputs, kind: LeftoverKind, path: &Path) -> io::Result<bool> {
     match kind {
-        LeftoverKind::Dwg => is_sets_dwg(set, path),
+        LeftoverKind::Dwg | LeftoverKind::Dxf => is_sets_dwg(set, path),
         LeftoverKind::Pdf => is_sets_pdf(set, path),
     }
 }

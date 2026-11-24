@@ -17,6 +17,7 @@ use super::set::{
     SETTINGS_KEYS,
 };
 use super::template::ROW_KEY;
+use crate::build::DrawingFormat;
 use crate::units::Unit;
 
 /// The name of a row's value, as a regular expression.
@@ -24,7 +25,7 @@ pub(crate) const VALUE_NAME: &str = "^[A-Za-z0-9_-]+$";
 
 /// The schema of a drawing set's settings, `set.yaml`.
 pub(crate) fn set_schema() -> Value {
-    let [units_key, output_key, rows_key, clean_key, plot_style_key] = SETTINGS_KEYS;
+    let [units_key, output_key, rows_key, clean_key, plot_style_key, format_key] = SETTINGS_KEYS;
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "AgentDrafter drawing set settings",
@@ -67,6 +68,12 @@ pub(crate) fn set_schema() -> Value {
                  `plot_style` overrides it for that run. Without it, each sheet's page setup or \
                  the built-in monochrome style.",
             ),
+            format_key: {
+                "description": "The drawing format the drawing set builds: `dwg` (2018 DWG, the \
+                                default), `dxf` (ASCII DXF) or `dxf_binary` (binary DXF). A run's \
+                                own `format` overrides it for that run.",
+                "enum": DrawingFormat::ALL.map(DrawingFormat::name),
+            },
         },
     })
 }

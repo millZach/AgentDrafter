@@ -105,7 +105,7 @@ mod warning;
 
 use std::path::Path;
 
-pub use build::{build, build_with, BuildReport, BuildRequest};
+pub use build::{build, build_with, build_with_format, BuildReport, BuildRequest, DrawingFormat};
 pub use change::{
     accept_with, AcceptReport, AcceptRequest, CheckFailed, FileIssued, HowChanged, ObjectChanged,
     StampRevision,
@@ -219,8 +219,8 @@ pub use revise::{
     RevisionUnexpectedChangeKind, REVISION_CHANGES_EXTENSION,
 };
 pub use set::{
-    build_set, build_set_with, Notice, NoticeCode, SetBuildRequest, SetReport, SheetOutcome,
-    SET_SETTINGS_FILE,
+    build_set, build_set_with, build_set_with_format, Notice, NoticeCode, SetBuildRequest,
+    SetReport, SheetOutcome, SET_SETTINGS_FILE,
 };
 pub use settings::SYSTEM_FONTS_VARIABLE;
 pub use settings::{system_font_folders, Settings, FONTS_VARIABLE, PLOT_STYLES_VARIABLE};
@@ -234,8 +234,14 @@ pub use units::Unit;
 pub use warning::{Warning, WarningCode};
 
 /// Reads the linetypes, the layers, the text styles, the block definitions
-/// and the model-space objects of the DWG at `path`.
+/// and the model-space objects of the DWG or DXF at `path`.
 pub fn read_dwg(path: &Path) -> Result<DrawingContents, Error> {
+    dwg::read(path)
+}
+
+/// Reads the linetypes, the layers, the text styles, the block definitions
+/// and the model-space objects of the DXF (ASCII or binary) at `path`.
+pub fn read_dxf(path: &Path) -> Result<DrawingContents, Error> {
     dwg::read(path)
 }
 

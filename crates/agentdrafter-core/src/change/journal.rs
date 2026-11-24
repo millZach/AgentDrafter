@@ -444,7 +444,7 @@ pub struct JournalEntry {
 /// commit that never finished left pending is rolled back first, and the
 /// reply says so under `rolled_back`.
 pub fn journal(request: &JournalRequest) -> Reply<JournalReport> {
-    if crate::original::is_dwg_file(&request.set) {
+    if crate::original::is_drawing_file(&request.set) {
         return super::original_journal::journal_original(request);
     }
     match super::recover(&request.set) {

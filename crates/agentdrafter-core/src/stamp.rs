@@ -70,6 +70,8 @@ pub enum SourceKind {
     SheetDescription,
     /// A DWG.
     Dwg,
+    /// A DXF.
+    Dxf,
     /// The block library a sheet description or a template draws its
     /// blocks from.
     BlockLibrary,
@@ -82,18 +84,22 @@ pub enum SourceKind {
 }
 
 impl SourceKind {
-    /// What a record is, by its name: a DWG when it ends `.dwg` in any
-    /// case, and otherwise a sheet description.
+    /// What a record is, by its name: a DWG when it ends `.dwg`, a DXF when it
+    /// ends `.dxf` in any case, and otherwise a sheet description.
     pub(crate) fn of(path: &Path) -> SourceKind {
-        let dwg = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("dwg"));
-        if dwg {
+        let ext = path.extension().and_then(|e| e.to_str());
+        if ext.is_some_and(|e| e.eq_ignore_ascii_case("dwg")) {
             SourceKind::Dwg
+        } else if ext.is_some_and(|e| e.eq_ignore_ascii_case("dxf")) {
+            SourceKind::Dxf
         } else {
             SourceKind::SheetDescription
         }
+    }
+
+    /// Whether this source kind is a CAD drawing file (DWG or DXF).
+    pub(crate) fn is_drawing(self) -> bool {
+        matches!(self, SourceKind::Dwg | SourceKind::Dxf)
     }
 
     /// What the kind is called in a message.
@@ -101,6 +107,7 @@ impl SourceKind {
         match self {
             SourceKind::SheetDescription => "sheet description",
             SourceKind::Dwg => "DWG",
+            SourceKind::Dxf => "DXF",
             SourceKind::BlockLibrary => "block library",
             SourceKind::Template => "template",
             SourceKind::Rows => "rows file",

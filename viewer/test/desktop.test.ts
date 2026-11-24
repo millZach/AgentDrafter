@@ -61,6 +61,8 @@ test('classifies drawing set folders, plant DWGs, and single YAML sheets across 
   assert.equal(classifySource('/home/drafter/demo-plant/set.yaml'), 'set');
   assert.equal(classifySource('/home/drafter/DP-P-101.dwg'), 'dwg');
   assert.equal(classifySource('C:\\Drawings\\DP-P-101.DWG'), 'dwg');
+  assert.equal(classifySource('/home/drafter/DP-P-101.dxf'), 'dwg');
+  assert.equal(classifySource('C:\\Drawings\\DP-P-101.DXF'), 'dwg');
   assert.equal(classifySource('/home/drafter/geometry.yaml'), 'sheet');
   assert.equal(classifySource('examples/one-line.yml'), 'sheet');
   // Explicit kind from native picker / URL overrides extension guessing (dotted folder names).
@@ -78,6 +80,7 @@ test('classifies drawing set folders, plant DWGs, and single YAML sheets across 
   assert.equal(kindBadge('dwg'), 'DWG');
   assert.equal(kindBadge('sheet'), 'Sheet');
   assert.equal(nextRevisionHint('DP-P-101.dwg'), 'DP-P-101.rev1.dwg');
+  assert.equal(nextRevisionHint('DP-P-101.dxf'), 'DP-P-101.rev1.dxf');
 });
 
 test('resolves revision DWG paths beside POSIX and Windows originals', () => {

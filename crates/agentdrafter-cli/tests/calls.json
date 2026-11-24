@@ -257,6 +257,46 @@
       "command": "change",
       "args": ["change", "demo-set", "transform.json"],
       "input": {"set": "demo-set", "change_set": {"operations": [{"op": "mirror", "target": {"id": "DEMO-002/heading"}, "first_point": [8.5, 0, 0], "second_point": [8.5, 1, 0]}, {"op": "ro", "target": {"id": "DEMO-001/heading"}, "base_point": [1, 10, 0], "angle": 90}, {"op": "scale", "target": {"id": "DEMO-001/heading"}, "base_point": {"snap": {"id": "DEMO-001/heading", "snap": "insertion"}}, "factor": 2}]}}
+    },
+    {
+      "command": "build",
+      "args": ["build", "demo-set", "--format", "dxf", "--overwrite"],
+      "input": {"source": "demo-set", "format": "dxf", "overwrite": true}
+    },
+    {
+      "command": "read",
+      "args": ["read", "demo-set/dwg/DEMO-001.dxf", "--no-mirror"],
+      "input": {"source": "demo-set/dwg/DEMO-001.dxf", "no_mirror": true}
+    },
+    {
+      "command": "query",
+      "args": ["query", "find", "demo-set/dwg/DEMO-001.dxf", "--id", "DEMO-001/border"],
+      "input": {"source": "demo-set/dwg/DEMO-001.dxf", "query": {"kind": "find", "id": "DEMO-001/border"}}
+    },
+    {
+      "command": "check",
+      "args": ["check", "demo-set/dwg/DEMO-001.dxf"],
+      "input": {"source": "demo-set/dwg/DEMO-001.dxf"}
+    },
+    {
+      "command": "display-list",
+      "args": ["display-list", "demo-set/dwg/DEMO-001.dxf"],
+      "input": {"source": "demo-set/dwg/DEMO-001.dxf"}
+    },
+    {
+      "command": "render",
+      "args": ["render", "demo-set/dwg/DEMO-001.dxf", "--width", "320", "--height", "200", "--output", "demo-set/dwg/DEMO-001-dxf.png"],
+      "input": {"source": "demo-set/dwg/DEMO-001.dxf", "width": 320, "height": 200, "output": "demo-set/dwg/DEMO-001-dxf.png"}
+    },
+    {
+      "command": "plot",
+      "args": ["plot", "demo-set/dwg/DEMO-001.dxf", "--output", "demo-set/dwg/DEMO-001-dxf.pdf"],
+      "input": {"source": "demo-set/dwg/DEMO-001.dxf", "output": "demo-set/dwg/DEMO-001-dxf.pdf"}
+    },
+    {
+      "command": "stale",
+      "args": ["stale", "demo-set/dwg/DEMO-001-dxf.pdf"],
+      "input": {"output": "demo-set/dwg/DEMO-001-dxf.pdf"}
     }
   ]
 }
