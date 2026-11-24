@@ -116,6 +116,8 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
 | `set_attributes` | `GATTE` | Sets an attribute on every insert matching a query `where` selection across named sheets or the whole set (and on original DWGs). See [Find and replace](find-and-replace.md). |
 | `replace_text` | `FIND` | Finds and replaces text across texts, mtexts and attribute values in `exact`, `whole_word`, or `pattern` mode across named sheets or the whole set (and on original DWGs). See [Find and replace](find-and-replace.md). |
 | `offset` | `OFFSET`, `O` | Draws a parallel offset of a line, polyline (with corners joined per `OFFSETGAPTYPE 0`), arc, circle, ellipse or spline at a distance on a side or through a point. See [Offset](offset.md). |
+| `trim` | `TRIM`, `TR` | Cuts a line, polyline, arc, circle, ellipse or spline back to one or more boundary objects (including block inserts), keeping the named part and reporting `split_id` when `keep: "ends"` splits an open object in two. See [Trim and extend](trim-and-extend.md). |
+| `extend` | `EXTEND`, `EX` | Extends an open line, polyline, arc, elliptical arc or spline at its `start`, `end`, or `both` ends to the nearest boundary object. See [Trim and extend](trim-and-extend.md). |
 | `set_cell` | `TABLEDIT` | Sets keys of a table's cell: its text, style, height, justification or merge. |
 | `add_row` | none | Adds a row to a table. |
 | `delete_row` | none | Deletes a row of a table. |

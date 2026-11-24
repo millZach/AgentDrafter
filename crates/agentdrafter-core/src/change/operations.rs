@@ -27,6 +27,7 @@ use crate::query::Selection;
 use crate::units::{parse_length, LengthError, Unit};
 
 use super::replace::{TextMatchKind, TextMatcher, TextScope};
+use super::trim_extend::{ExtendEnd, TrimKeep};
 
 /// What an operation does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +74,11 @@ pub(crate) enum Kind {
     /// Draws a parallel offset of a line, polyline, arc, circle, ellipse or
     /// spline: AutoCAD's OFFSET.
     Offset,
+    /// Cuts an object back to one or more boundary objects: AutoCAD's TRIM.
+    Trim,
+    /// Carries an open object on to one or more boundary objects: AutoCAD's
+    /// EXTEND.
+    Extend,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -242,6 +248,8 @@ impl Spec {
             Kind::Mirror => &["MI"],
             Kind::DrawOrder => &["DR"],
             Kind::Offset => &["O"],
+            Kind::Trim => &["TR"],
+            Kind::Extend => &["EX"],
             _ => &[],
         }
     }
@@ -293,7 +301,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 72] = [
+pub(crate) const SPECS: [Spec; 74] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -422,6 +430,16 @@ pub(crate) const SPECS: [Spec; 72] = [
         name: "offset",
         alias: "OFFSET",
         kind: Kind::Offset,
+    },
+    Spec {
+        name: "trim",
+        alias: "TRIM",
+        kind: Kind::Trim,
+    },
+    Spec {
+        name: "extend",
+        alias: "EXTEND",
+        kind: Kind::Extend,
     },
     grid("set_cell", "TABLEDIT", GridOp::SetCell),
     grid("add_row", "", GridOp::Add(Axis::Row)),
@@ -1001,6 +1019,18 @@ fn does(spec: &Spec) -> String {
                          in the same record and space as `target`, keeping its properties (with \
                          optional `layer`, `id`, `name`, and `erase_source`). AutoCAD's OFFSET \
                          (O)."
+            .to_owned(),
+        Kind::Trim => "Cuts `target` (a line, polyline, arc, circle, ellipse or spline) back to \
+                       one or more boundary objects (`boundary` or `boundaries`, including block \
+                       inserts), keeping the part named by `keep` (`start`, `end`, `between`, or \
+                       `ends`). `target` keeps its ID; `keep: \"ends\"` on an open curve splits \
+                       it in two, giving the second piece an ID (`new_id` or assigned) reported \
+                       under `split_id`. AutoCAD's TRIM (TR)."
+            .to_owned(),
+        Kind::Extend => "Carries an open `target` (a line, open polyline, arc, elliptical arc or \
+                         open spline) on at its `end` (`start`, `end`, or `both`) until it meets \
+                         the nearest boundary object (`boundary` or `boundaries`, including block \
+                         inserts). `target` keeps its ID. AutoCAD's EXTEND (EX)."
             .to_owned(),
     }
 }
@@ -2123,6 +2153,70 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                 },
             },
         }),
+        Kind::Trim => json!({
+            "type": "object",
+            "required": ["target", "keep"],
+            "additionalProperties": false,
+            "oneOf": [
+                { "required": ["boundary"], "not": { "required": ["boundaries"] } },
+                { "required": ["boundaries"], "not": { "required": ["boundary"] } },
+            ],
+            "properties": {
+                "target": target,
+                "boundary": {
+                    "description": "The cutting-edge object, by its ID or its name. Give \
+                                    `boundary` or `boundaries`.",
+                    "$ref": "#/$defs/target",
+                },
+                "boundaries": {
+                    "description": "One or more cutting-edge objects, each by its ID or its name.",
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/target" },
+                    "minItems": 1,
+                },
+                "keep": {
+                    "description": "Which part of `target` to keep: `start` (start to first \
+                                    crossing), `end` (last crossing to end), `between` (first \
+                                    to last crossing), or `ends` (removes middle, splitting an \
+                                    open curve into two).",
+                    "enum": TrimKeep::ALL,
+                },
+                "new_id": {
+                    "description": "Optional ID for the second object created when `keep: \"ends\"` \
+                                    splits an open curve into two.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+            },
+        }),
+        Kind::Extend => json!({
+            "type": "object",
+            "required": ["target", "end"],
+            "additionalProperties": false,
+            "oneOf": [
+                { "required": ["boundary"], "not": { "required": ["boundaries"] } },
+                { "required": ["boundaries"], "not": { "required": ["boundary"] } },
+            ],
+            "properties": {
+                "target": target,
+                "boundary": {
+                    "description": "The boundary object to extend to, by its ID or its name. \
+                                    Give `boundary` or `boundaries`.",
+                    "$ref": "#/$defs/target",
+                },
+                "boundaries": {
+                    "description": "One or more boundary objects to extend to, each by its ID \
+                                    or its name.",
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/target" },
+                    "minItems": 1,
+                },
+                "end": {
+                    "description": "Which end of `target` to extend: `start`, `end`, or `both`.",
+                    "enum": ExtendEnd::ALL,
+                },
+            },
+        }),
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
@@ -2182,6 +2276,64 @@ fn insert_selection_schema() -> Value {
             },
         },
     })
+}
+
+/// Parses `boundary` (one target) or `boundaries` (a non-empty list of targets)
+/// for `trim` and `extend`.
+fn read_boundary_targets(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+) -> Result<Vec<(Target, String)>, (ErrorCode, String, String)> {
+    let parse_one = |val: &Value, prefix: &str| -> Result<Target, (ErrorCode, String, String)> {
+        let mut t = read_target(val).map_err(|(code, msg, sub)| {
+            let field = if sub.is_empty() {
+                prefix.to_owned()
+            } else {
+                format!("{prefix}.{sub}")
+            };
+            (code, msg, field)
+        })?;
+        if let Some(sheet) = default_sheet {
+            if let Target::Name {
+                sheet: slot @ None, ..
+            } = &mut t
+            {
+                *slot = Some(sheet.to_owned());
+            }
+        }
+        Ok(t)
+    };
+    match (map.get("boundary"), map.get("boundaries")) {
+        (Some(_), Some(_)) => Err((
+            ErrorCode::Usage,
+            "give `boundary` or `boundaries`, not both".to_owned(),
+            "boundaries".to_owned(),
+        )),
+        (None, None) => Err((
+            ErrorCode::MissingKey,
+            "missing `boundary` (or `boundaries`), the cutting or boundary object".to_owned(),
+            "boundary".to_owned(),
+        )),
+        (Some(one), None) => Ok(vec![(parse_one(one, "boundary")?, "boundary".to_owned())]),
+        (None, Some(Value::Array(items))) if !items.is_empty() => {
+            let mut out = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                let field = format!("boundaries[{i}]");
+                out.push((parse_one(item, &field)?, field));
+            }
+            Ok(out)
+        }
+        (None, Some(Value::Array(_))) => Err((
+            ErrorCode::BadValue,
+            "`boundaries` must name at least one boundary object".to_owned(),
+            "boundaries".to_owned(),
+        )),
+        (None, Some(_)) => Err((
+            ErrorCode::WrongType,
+            "expected `boundaries`, a list of boundary targets".to_owned(),
+            "boundaries".to_owned(),
+        )),
+    }
 }
 
 /// Parses an optional non-empty `sheets` list of sheet names on a batch
@@ -3097,6 +3249,19 @@ pub(crate) enum Body {
         name: Option<String>,
         layer: Option<String>,
         erase_source: bool,
+    },
+    /// Cuts `target` back to one or more `boundaries`: AutoCAD's TRIM.
+    Trim {
+        target: Target,
+        boundaries: Vec<(Target, String)>,
+        keep: TrimKeep,
+        new_id: Option<String>,
+    },
+    /// Carries an open `target` on to one or more `boundaries`: AutoCAD's EXTEND.
+    Extend {
+        target: Target,
+        boundaries: Vec<(Target, String)>,
+        end: ExtendEnd,
     },
     /// A table operation: on the entry `name` of the template `to` names,
     /// with the keys it adds or sets, and the new name a rename gives.
@@ -4876,6 +5041,99 @@ fn operation(
                 name,
                 layer,
                 erase_source,
+            }
+        }
+        Kind::Trim => {
+            keys(&["target", "boundary", "boundaries", "keep", "new_id"])?;
+            let target = target()?;
+            let boundaries = read_boundary_targets(map, default_sheet)
+                .map_err(|(code, msg, field)| fail(code, msg, &field))?;
+            let keep = match map.get("keep") {
+                Some(Value::String(s)) => TrimKeep::parse(s).ok_or_else(|| {
+                    fail(
+                        ErrorCode::BadValue,
+                        format!(
+                            "unknown `keep` `{s}`; expected one of {}",
+                            TrimKeep::ALL.join(", ")
+                        ),
+                        "keep",
+                    )
+                })?,
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        format!("expected `keep`, one of {}", TrimKeep::ALL.join(", ")),
+                        "keep",
+                    ))
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        format!("missing key `keep`, one of {}", TrimKeep::ALL.join(", ")),
+                        "keep",
+                    ))
+                }
+            };
+            let new_id = match map.get("new_id") {
+                None => None,
+                Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`new_id` cannot be empty".to_owned(),
+                        "new_id",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `new_id`, a string".to_owned(),
+                        "new_id",
+                    ))
+                }
+            };
+            Body::Trim {
+                target,
+                boundaries,
+                keep,
+                new_id,
+            }
+        }
+        Kind::Extend => {
+            keys(&["target", "boundary", "boundaries", "end"])?;
+            let target = target()?;
+            let boundaries = read_boundary_targets(map, default_sheet)
+                .map_err(|(code, msg, field)| fail(code, msg, &field))?;
+            let end = match map.get("end") {
+                Some(Value::String(s)) => ExtendEnd::parse(s).ok_or_else(|| {
+                    fail(
+                        ErrorCode::BadValue,
+                        format!(
+                            "unknown `end` `{s}`; expected one of {}",
+                            ExtendEnd::ALL.join(", ")
+                        ),
+                        "end",
+                    )
+                })?,
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        format!("expected `end`, one of {}", ExtendEnd::ALL.join(", ")),
+                        "end",
+                    ))
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        format!("missing key `end`, one of {}", ExtendEnd::ALL.join(", ")),
+                        "end",
+                    ))
+                }
+            };
+            Body::Extend {
+                target,
+                boundaries,
+                end,
             }
         }
         Kind::Grid(grid_op) => {

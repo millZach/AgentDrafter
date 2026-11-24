@@ -1282,6 +1282,49 @@ impl RecordFile {
             .map(|(index, _)| index)
     }
 
+    /// Replaces the object at `index` in `list` with an object of type `kind`
+    /// and `keys` (used by `trim` and `extend`, e.g. trimming a `circle` into
+    /// an `arc`), preserving its position in the list.
+    pub(crate) fn replace_object(
+        &mut self,
+        list: ObjectList,
+        index: usize,
+        kind: &str,
+        keys: &Map<String, Value>,
+        operation: usize,
+    ) -> Result<(), Error> {
+        let order: Vec<&str> = OBJECT_TYPES
+            .iter()
+            .find(|(name, _)| *name == kind)
+            .map(|(_, keys)| keys.iter().copied().chain([ID_KEY, NAME_KEY]).collect())
+            .unwrap_or_default();
+        let mut ordered: Vec<(&String, &Value)> = keys.iter().collect();
+        ordered.sort_by_key(|(key, _)| order.iter().position(|k| k == key).unwrap_or(order.len()));
+        let mut entries = Vec::with_capacity(ordered.len());
+        for (key, value) in ordered {
+            let mut node = node_of(value);
+            if kind == "polyline" && key == "points" {
+                order_vertices(&mut node);
+            }
+            entries.push(new_entry(key, node));
+        }
+        let object = Node::new(Kind::Mapping(vec![new_entry(
+            kind,
+            Node::new(Kind::Mapping(entries)),
+        )]));
+        self.state(list);
+        let items = self.items_mut(list)?;
+        let Some(slot) = items.get_mut(index) else {
+            return Err(Error::new(
+                ErrorCode::UnknownName,
+                format!("no object at index {index}"),
+            ));
+        };
+        *slot = object;
+        self.touch(list, index, operation, Touch::Whole);
+        Ok(())
+    }
+
     /// Adds an object of type `kind` with `keys` to `list`, inserted at
     /// `insert_at` (or at the end when `None` or past the end). Any existing
     /// object whose index shifts and which carries no explicit `id` has its
