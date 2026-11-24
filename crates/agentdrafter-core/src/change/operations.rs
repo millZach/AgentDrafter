@@ -94,6 +94,9 @@ pub(crate) enum Kind {
     /// Joins lines, arcs and open polylines end to end (or collinear lines /
     /// co-circular arcs) into one object: AutoCAD's JOIN.
     Join,
+    /// Moves vertices and ends of objects lying inside a box while leaving the
+    /// rest where they are: AutoCAD's STRETCH.
+    Stretch,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -269,6 +272,7 @@ impl Spec {
             Kind::Chamfer => &["CHA"],
             Kind::Break => &["BR", "BREAKATPOINT"],
             Kind::Join => &["J"],
+            Kind::Stretch => &["S"],
             _ => &[],
         }
     }
@@ -320,7 +324,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 78] = [
+pub(crate) const SPECS: [Spec; 79] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -479,6 +483,11 @@ pub(crate) const SPECS: [Spec; 78] = [
         name: "join",
         alias: "JOIN",
         kind: Kind::Join,
+    },
+    Spec {
+        name: "stretch",
+        alias: "STRETCH",
+        kind: Kind::Stretch,
     },
     grid("set_cell", "TABLEDIT", GridOp::SetCell),
     grid("add_row", "", GridOp::Add(Axis::Row)),
@@ -1098,6 +1107,13 @@ fn does(spec: &Spec) -> String {
                        chain into a polyline (auto-closing if the ends meet). `targets[0]`'s ID \
                        carries on and the absorbed objects' IDs are reported under `deleted`. \
                        AutoCAD's JOIN (J)."
+            .to_owned(),
+        Kind::Stretch => "Moves endpoints, vertices and rigid objects lying inside `box` (two \
+                          opposite corners, each `[x, y]`, `[x, y, z]`, or a snapped point on a \
+                          named object) by `by` or from `from` to `to`, leaving vertices outside \
+                          `box` fixed so connected wires and enclosures follow. Skips objects on \
+                          locked layers (unless named under optional `targets`) and lists every \
+                          touched object ID under `transformed`. AutoCAD's STRETCH (S)."
             .to_owned(),
     }
 }
@@ -2570,6 +2586,91 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                 },
             },
         }),
+        Kind::Stretch => {
+            let corner_schema = json!({
+                "anyOf": [
+                    { "$ref": "#/$defs/snapped_point" },
+                    {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "items": { "$ref": "#/$defs/length" },
+                    },
+                ],
+            });
+            let sheet_rule = if allow_omitted_sheet {
+                json!({ "not": { "required": ["sheet", "template"] } })
+            } else {
+                json!({ "oneOf": [{ "required": ["sheet"] }, { "required": ["template"] }] })
+            };
+            json!({
+                "type": "object",
+                "required": ["box"],
+                "additionalProperties": false,
+                "allOf": [
+                    sheet_rule,
+                    {
+                        "oneOf": [
+                            { "required": ["by"], "not": { "anyOf": [{ "required": ["from"] }, { "required": ["to"] }] } },
+                            { "required": ["from", "to"], "not": { "required": ["by"] } },
+                        ],
+                    },
+                ],
+                "properties": {
+                    "sheet": {
+                        "description": if allow_omitted_sheet {
+                            "The sheet to stretch on; on an original `.dwg`, omit `sheet` to \
+                             target that drawing."
+                        } else {
+                            "The sheet to stretch on. Give `sheet` or `template`, not both."
+                        },
+                        "$ref": "#/$defs/sheet_name",
+                    },
+                    "template": {
+                        "description": "The template whose objects to stretch across every sheet \
+                                        built from it. Give `sheet` or `template`, not both.",
+                        "$ref": "#/$defs/template_path",
+                    },
+                    "space": {
+                        "description": "Space to stretch in: `model` (default) or a layout name.",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "targets": {
+                        "description": "Optional list of objects to restrict stretching to, each \
+                                        by ID or name. Left out, every unlocked object in the \
+                                        space whose vertices lie inside `box`.",
+                        "type": "array",
+                        "items": { "$ref": "#/$defs/target" },
+                        "minItems": 1,
+                    },
+                    "box": {
+                        "description": "Two opposite corners of the stretch selection box, \
+                                        `[corner1, corner2]`. Each corner is `[x, y]`, `[x, y, z]` \
+                                        in the declared unit (or carrying its own), or a snapped \
+                                        point on a named object.",
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "items": corner_schema,
+                    },
+                    "by": {
+                        "description": "Displacement `[dx, dy, dz]` in the declared unit or \
+                                        carrying its own. Give `by`, or `from` and `to`.",
+                        "$ref": "#/$defs/point",
+                    },
+                    "from": {
+                        "description": "Base point (or snapped point) for the stretch displacement.",
+                        "$ref": "#/$defs/snapped_point",
+                    },
+                    "to": {
+                        "description": "Second point (or snapped point); vertices inside `box` \
+                                        move by `to` minus `from`.",
+                        "$ref": "#/$defs/snapped_point",
+                    },
+                },
+            })
+        }
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
@@ -3874,6 +3975,14 @@ pub(crate) enum Body {
     Join {
         targets: Vec<(Target, String)>,
         tolerance: f64,
+    },
+    /// Moves vertices and objects inside `box` by `motion`: AutoCAD's STRETCH.
+    Stretch {
+        to: AddTo,
+        space: Option<String>,
+        targets: Option<Vec<(Target, String)>>,
+        corners: [Box<OpPoint>; 2],
+        motion: Motion,
     },
     /// A table operation: on the entry `name` of the template `to` names,
     /// with the keys it adds or sets, and the new name a rename gives.
@@ -6001,6 +6110,198 @@ fn operation(
                 }
             };
             Body::Join { targets, tolerance }
+        }
+        Kind::Stretch => {
+            keys(&[
+                "sheet", "template", "space", "targets", "box", "by", "from", "to",
+            ])?;
+            let to = match (map.get("sheet"), map.get("template")) {
+                (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
+                (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
+                (Some(_), Some(_)) => {
+                    return Err(fail(
+                        ErrorCode::Usage,
+                        "give `sheet` or `template`, not both".to_owned(),
+                        "",
+                    ));
+                }
+                (None, None) => match default_sheet {
+                    Some(sheet) => AddTo::Sheet(sheet.to_owned()),
+                    None => {
+                        return Err(fail(
+                            ErrorCode::MissingKey,
+                            "missing key `sheet` (or `template`), where to stretch".to_owned(),
+                            "sheet",
+                        ));
+                    }
+                },
+                (Some(_), None) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected a sheet's name".to_owned(),
+                        "sheet",
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected a template's path".to_owned(),
+                        "template",
+                    ));
+                }
+            };
+            let space = match map.get("space") {
+                None => None,
+                Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+                Some(Value::String(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`space` cannot be empty".to_owned(),
+                        "space",
+                    ));
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `space`, \"model\" or a layout name".to_owned(),
+                        "space",
+                    ));
+                }
+            };
+            let targets = match map.get("targets") {
+                None => None,
+                Some(Value::Array(items)) if !items.is_empty() => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for (i, item) in items.iter().enumerate() {
+                        let field = format!("targets[{i}]");
+                        let mut t = read_target(item).map_err(|(code, msg, sub)| {
+                            let f = if sub.is_empty() {
+                                field.clone()
+                            } else {
+                                format!("{field}.{sub}")
+                            };
+                            fail(code, msg, &f)
+                        })?;
+                        if let Some(sheet) = default_sheet {
+                            if let Target::Name {
+                                sheet: slot @ None, ..
+                            } = &mut t
+                            {
+                                *slot = Some(sheet.to_owned());
+                            }
+                        }
+                        out.push((t, field));
+                    }
+                    Some(out)
+                }
+                Some(Value::Array(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`targets` must name at least one object, or be left out".to_owned(),
+                        "targets",
+                    ));
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `targets`, a list of object targets".to_owned(),
+                        "targets",
+                    ));
+                }
+            };
+            let parse_box_corner = |v: &Value, field: &str| -> Result<OpPoint, Error> {
+                match v {
+                    Value::Array(xy) if xy.len() == 2 => {
+                        let x = length(&xy[0], units)
+                            .map_err(|m| fail(ErrorCode::BadNumber, m, &format!("{field}[0]")))?;
+                        let y = length(&xy[1], units)
+                            .map_err(|m| fail(ErrorCode::BadNumber, m, &format!("{field}[1]")))?;
+                        Ok(OpPoint::At([x, y, 0.0]))
+                    }
+                    _ => op_point(v, units, field).map_err(|(code, msg, f)| fail(code, msg, &f)),
+                }
+            };
+            let corners = match map.get("box") {
+                Some(Value::Array(items)) if items.len() == 2 => [
+                    Box::new(parse_box_corner(&items[0], "box[0]")?),
+                    Box::new(parse_box_corner(&items[1], "box[1]")?),
+                ],
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `box`, two opposite corners `[corner1, corner2]`".to_owned(),
+                        "box",
+                    ));
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `box`, two opposite corners of the stretch selection box"
+                            .to_owned(),
+                        "box",
+                    ));
+                }
+            };
+            let given = |key: &str| map.contains_key(key);
+            let motion = match (given("by"), given("from"), given("to")) {
+                (true, false, false) => match map.get("by") {
+                    Some(Value::Array(items)) if items.len() == 3 => {
+                        let mut by = [0.0; 3];
+                        for (axis, item) in items.iter().enumerate() {
+                            by[axis] = length(item, units).map_err(|message| {
+                                fail(ErrorCode::BadNumber, message, &format!("by[{axis}]"))
+                            })?;
+                        }
+                        Motion::By(by)
+                    }
+                    _ => {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected how far to stretch, three lengths [dx, dy, dz]".to_owned(),
+                            "by",
+                        ))
+                    }
+                },
+                (false, true, true) => {
+                    let point = |key: &str| {
+                        op_point(&map[key], units, key)
+                            .map_err(|(code, message, field)| fail(code, message, &field))
+                    };
+                    Motion::Between {
+                        from: Box::new(point("from")?),
+                        to: Box::new(point("to")?),
+                    }
+                }
+                (false, false, false) => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `by`, [dx, dy, dz]; or give `from` and `to`".to_owned(),
+                        "by",
+                    ))
+                }
+                (false, true, false) | (false, false, true) => {
+                    let missing = if given("from") { "to" } else { "from" };
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        format!("missing key `{missing}` to go with the other point"),
+                        missing,
+                    ));
+                }
+                (true, _, _) => {
+                    return Err(fail(
+                        ErrorCode::Usage,
+                        "give `by`, or `from` and `to`, not both".to_owned(),
+                        "",
+                    ))
+                }
+            };
+            Body::Stretch {
+                to,
+                space,
+                targets,
+                corners,
+                motion,
+            }
         }
         Kind::Grid(grid_op) => {
             let allowed: Vec<&str> = match grid_op {

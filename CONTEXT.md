@@ -384,6 +384,10 @@ _Avoid_: split (alone), cut (a cut may refer to trimming)
 Merging two or more lines, arcs, or open polylines into a single object (`JOIN` / `J`): collinear lines into one line (including across a gap), co-circular arcs into an arc or circle, and end-to-end curves into a polyline; `targets[0]`'s ID carries on and the absorbed objects' IDs are reported under `deleted`.
 _Avoid_: merge (alone), weld, group (a group is AutoCAD's GROUP object)
 
+**Stretch**:
+Moving the endpoints, vertices and rigid objects lying inside a selection box by a displacement while leaving vertices outside the box fixed, as AutoCAD's STRETCH (`S`) does, so connected wires and enclosures follow; the one operation that selects by area, listing every object it touched under `transformed`.
+_Avoid_: resize (alone), pull, drag
+
 **Change set**:
 Operations sent together as one request. Each sheet takes its part of a change set fully or not at all.
 _Avoid_: batch, transaction, commit
