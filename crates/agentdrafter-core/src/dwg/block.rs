@@ -111,7 +111,7 @@ pub(super) fn add_block_record(
 }
 
 /// Adds an external reference block record for `xref`, in the drawing's
-/// `units` code, and returns its handle. No entities are owned by an xref
+/// `units` code, and returns its handle. No objects are owned by an xref
 /// block record.
 pub(super) fn add_xref_record(
     drawing: &mut CadDocument,
