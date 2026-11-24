@@ -142,7 +142,7 @@ export function classifySource(path: string, explicitKind?: SourceKind | null): 
   if (explicitKind) return explicitKind;
   const trimmed = stripTrailingSeparators(path);
   const lower = trimmed.toLowerCase();
-  if (lower.endsWith('.dwg')) return 'dwg';
+  if (lower.endsWith('.dwg') || lower.endsWith('.dxf')) return 'dwg';
   const base = sourceDisplayName(trimmed).toLowerCase();
   if (base === 'set.yaml') return 'set';
   if (lower.endsWith('.yaml') || lower.endsWith('.yml')) return 'sheet';
@@ -215,8 +215,9 @@ export function resolveBeside(originalPath: string, relOrAbs: string): string {
 /** Default filename the core chooses for the first revision beside `originalName`. */
 export function nextRevisionHint(originalName: string): string {
   const base = sourceDisplayName(originalName);
-  const stem = base.replace(/\.dwg$/i, '');
-  return `${stem}.rev1.dwg`;
+  const ext = /\.dxf$/i.test(base) ? 'dxf' : 'dwg';
+  const stem = base.replace(/\.(dwg|dxf)$/i, '');
+  return `${stem}.rev1.${ext}`;
 }
 
 /** Active revision metadata resolved from an original DWG's journal. */
@@ -242,7 +243,7 @@ function parseSiblingWorkingRevisionStem(revisionDwg: string, winOrig: boolean):
   } else if (revisionDwg.includes('/')) {
     return null;
   }
-  if (!/\.dwg$/i.test(revisionDwg)) return null;
+  if (!/\.(dwg|dxf)$/i.test(revisionDwg)) return null;
   const withoutExt = revisionDwg.slice(0, -4);
   const revIdx = withoutExt.lastIndexOf('.rev');
   if (revIdx <= 0) return null;
@@ -253,7 +254,7 @@ function parseSiblingWorkingRevisionStem(revisionDwg: string, winOrig: boolean):
 
 function dwgStem(path: string, winOrig: boolean): string {
   const base = displayNameWithMode(path, winOrig);
-  return base.replace(/\.dwg$/i, '');
+  return base.replace(/\.(dwg|dxf)$/i, '');
 }
 
 function stemsMatch(a: string, b: string, winOrig: boolean): boolean {

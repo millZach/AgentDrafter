@@ -37,7 +37,7 @@ use crate::check::check_dwg_bytes;
 use crate::error::{Error, ErrorCode};
 use crate::interface::Interface;
 use crate::original::{
-    ensure_real_dir_chain, is_dwg, on_disk_path, read_regular_no_follow,
+    ensure_real_dir_chain, is_drawing, on_disk_path, read_regular_no_follow,
     read_regular_no_follow_with_id, stem_of, verify_no_symlink_ancestors,
     verify_no_symlink_intermediate_dirs, verify_real_dir_chain, NoFollowRead, NoFollowReadWithId,
 };
@@ -77,7 +77,7 @@ pub const ORIGINALS_JOURNAL_FOLDER: &str = ".agentdrafter/originals";
 ///
 /// Returns `None` when `source` is not an existing `.dwg` file.
 pub fn original_journal_file(source: &Path) -> Option<PathBuf> {
-    if !crate::original::is_dwg_file(source) {
+    if !crate::original::is_drawing_file(source) {
         return None;
     }
     OriginalJournal::open(source).ok().map(|oj| oj.journal_file)
@@ -2032,7 +2032,7 @@ fn revision_dwg_of_entry(entry: &Entry) -> Option<(String, String)> {
         return Some((meta.revision_dwg.clone(), meta.revision_sha256.clone()));
     }
     entry.files.iter().find_map(|f| {
-        if is_dwg(Path::new(&f.path)) {
+        if is_drawing(Path::new(&f.path)) {
             f.after.as_ref().map(|sha| (f.path.clone(), sha.clone()))
         } else {
             None

@@ -555,9 +555,22 @@ const CLEAN: Place = Place {
     json: r#"{"units": "mm", "output": "dwg", "rows": "rows.yaml", "clean": V}"#,
 };
 
+const FORMAT: Place = Place {
+    name: "the set's format",
+    yaml: "units: mm\noutput: dwg\nrows: rows.yaml\nformat: V\n",
+    json: r#"{"units": "mm", "output": "dwg", "rows": "rows.yaml", "format": V}"#,
+};
+
 #[test]
 fn the_set_schema_accepts_exactly_the_settings_the_reader_accepts() {
     let cases: Vec<Case> = vec![
+        (&FORMAT, "dwg", json!("dwg"), true),
+        (&FORMAT, "dxf", json!("dxf"), true),
+        (&FORMAT, "dxf_binary", json!("dxf_binary"), true),
+        (&FORMAT, "DXF", json!("DXF"), false),
+        (&FORMAT, "pdf", json!("pdf"), false),
+        (&FORMAT, "1", json!(1), false),
+        (&FORMAT, "[dxf]", json!(["dxf"]), false),
         (&CLEAN, "true", json!(true), true),
         (&CLEAN, "false", json!(false), true),
         (&CLEAN, "yes", json!("yes"), false),

@@ -27,7 +27,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::build::{build_sheet, is_same_file, BuildReport};
+use crate::build::{build_sheet_as, is_same_file, BuildReport, DrawingFormat};
 use crate::change::relative_to;
 use crate::description::{
     read_rows_file_in, read_rows_files_in, read_set_settings, read_template, rows_of, rows_paths,
@@ -175,7 +175,17 @@ pub fn build_set(request: &SetBuildRequest) -> Reply<SetReport> {
 /// with only an error, when the set's settings or rows could not be read
 /// and nothing was built.
 pub fn build_set_with(request: &SetBuildRequest, settings: &Settings) -> Reply<SetReport> {
-    match build_sheets(request, settings) {
+    build_set_with_format(request, None, settings)
+}
+
+/// Builds every sheet of a drawing set into `format` (`dwg`, ASCII `dxf`, or
+/// `dxf_binary`), overriding `set.yaml`'s `format` when `Some`.
+pub fn build_set_with_format(
+    request: &SetBuildRequest,
+    format: Option<DrawingFormat>,
+    settings: &Settings,
+) -> Reply<SetReport> {
+    match build_sheets(request, format, settings) {
         Ok(report) if report.failed > 0 => {
             let error = Error::new(
                 ErrorCode::SheetsFailed,
@@ -199,9 +209,14 @@ pub fn build_set_with(request: &SetBuildRequest, settings: &Settings) -> Reply<S
     }
 }
 
-fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetReport, Error> {
+fn build_sheets(
+    request: &SetBuildRequest,
+    format_override: Option<DrawingFormat>,
+    settings: &Settings,
+) -> Result<SetReport, Error> {
     let folder = request.set.as_path();
     let set = read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
+    let format = format_override.unwrap_or(set.format);
     let rows_files = read_rows_files_in(&Disk, folder, &set)?;
     let rows = rows_of(&rows_files)?;
     let output = folder.join(&set.output);
@@ -218,10 +233,18 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
         .map(|row| {
             let mark = sheet_mark(marked.as_deref(), &rows_files, row);
             let template = template_path(folder, row);
-            let dwg = output.join(format!("{}.dwg", row.sheet));
+            let dwg = output.join(format!("{}.{}", row.sheet, format.extension()));
             let mut notices = Vec::new();
             let built = read_template(&template, row, set.units, &mut notices).and_then(|record| {
-                build_sheet(&record, &template, &dwg, &mark, request.overwrite, settings)
+                build_sheet_as(
+                    &record,
+                    &template,
+                    &dwg,
+                    &mark,
+                    request.overwrite,
+                    format,
+                    settings,
+                )
             });
             let (result, error) = match built {
                 Ok(report) => (Some(report), None),
@@ -437,8 +460,9 @@ fn set_at(
     }
     let settings = read_set_settings(&settings_file)
         .map_err(|e| format!("{named} cannot be read: {}", e.message))?;
+    let ext = if dwg::is_dxf_path(dwg) { "dxf" } else { "dwg" };
     let name = format!(
-        "{}.dwg",
+        "{}.{ext}",
         dwg.file_stem().unwrap_or_default().to_string_lossy()
     );
     let built = folder.join(&settings.output).join(&name);
@@ -517,8 +541,9 @@ fn paper_of_dwg_in(
     let rows_files = marked_rows_files(&set.folder, &settings, set.rows.as_deref())?;
     let rows = rows_of(&rows_files).ok()?;
     let output = set.folder.join(&settings.output);
+    let ext = if dwg::is_dxf_path(dwg) { "dxf" } else { "dwg" };
     let row = rows.iter().find(|r| {
-        crate::build::is_same_file_id(&output.join(format!("{}.dwg", r.sheet)), dwg, source_id)
+        crate::build::is_same_file_id(&output.join(format!("{}.{ext}", r.sheet)), dwg, source_id)
     })?;
     let rows_file = &rows_files[row.file_index];
     let template = template_path(&set.folder, row);

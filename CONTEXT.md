@@ -41,8 +41,12 @@ _Avoid_: oracle, reference CAD
 ### Drawings
 
 **Drawing**:
-One CAD file, DWG or DXF.
+One CAD file, DWG or DXF (ASCII or binary).
 _Avoid_: document, model
+
+**DXF**:
+AutoCAD's Drawing Exchange Format, ASCII (the default when building DXF) or binary (`dxf_binary`), read everywhere AgentDrafter reads a DWG and written by `build` (via `format` or a `.dxf` output path) and drawing sets (`format: dxf` or `dxf_binary` in `set.yaml`) with the same build mark (`$CUSTOMPROPERTYTAG` / `$CUSTOMPROPERTY`) and object IDs as a DWG.
+_Avoid_: text DWG, export file
 
 **Sheet**:
 One titled page that prints: a border, a title block and the content inside them. It is drawn in model space alone, or in a layout: its border and title block in paper space, and its content in model space, shown through viewports. A sheet drawn in several layouts is one DWG that prints once for each layout, each on its own paper, all showing its one model space; it keeps one name, and its objects one set of IDs.
@@ -484,15 +488,15 @@ The box in a block that one of its texts or attributes draws within, such as a t
 _Avoid_: field, box (a cell is not a block)
 
 **Output**:
-A PDF, PNG or DWG produced from a revision and stamped with the revision it came from. An output whose revision has moved on is stale.
+A PDF, PNG, DWG or DXF produced from a revision and stamped with the revision it came from. An output whose revision has moved on is stale.
 _Avoid_: export, artifact, plot
 
 **Stamp**:
 What an output records about the files it came from: the record and the files it draws on, such as a block library, each by where it was and a fingerprint of its bytes, and the revision once revisions are built. An output any of whose files no longer matches its stamp, or is gone, is stale.
-_Avoid_: watermark, signature, build mark (a build mark tells that AgentDrafter built a DWG, not what from)
+_Avoid_: watermark, signature, build mark (a build mark tells that AgentDrafter built a DWG or DXF, not what from)
 
 **Leftover output**:
-A DWG or PDF in a drawing set's output folder that AgentDrafter made for that set, as its build mark or its stamp shows, and that no row writes any more, since its sheet was renamed, merged or taken out of the rows. Every build and plot of the set lists them; cleaning moves them into the superseded folder.
+A DWG, DXF or PDF in a drawing set's output folder that AgentDrafter made for that set, as its build mark or its stamp shows, and that no row writes any more, since its sheet was renamed, merged or taken out of the rows. Every build and plot of the set lists them; cleaning moves them into the superseded folder.
 _Avoid_: orphan, stale output (a stale output's files have moved on; a leftover's row is gone), dead file
 
 **Superseded folder**:

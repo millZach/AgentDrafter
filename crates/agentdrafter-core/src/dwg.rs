@@ -27,7 +27,9 @@ use acadrust::entities::{
 use acadrust::tables::{BlockRecord, Layer as DwgLayer, LineType, LineTypeElement};
 use acadrust::types::{Color, DxfVersion, LineWeight, Vector2, Vector3};
 use acadrust::xdata::{ExtendedDataRecord, XDataValue};
-use acadrust::{CadDocument, DwgReader, DwgWriter};
+use acadrust::{CadDocument, DwgReader, DwgWriter, DxfReader, DxfReaderConfiguration, DxfWriter};
+
+use crate::build::DrawingFormat;
 
 use crate::description::{normalize_degrees, SheetRecord};
 use crate::error::{Error, ErrorCode};
@@ -127,17 +129,53 @@ pub(crate) fn new_sheet_version() -> String {
     NEW_SHEET_VERSION.to_string()
 }
 
+/// The sentinel bytes at the start of every AutoCAD Binary DXF file.
+const BINARY_DXF_SENTINEL: &[u8] = b"AutoCAD Binary DXF";
+
+/// Whether `path` has a `.dxf` extension, in any case.
+pub(crate) fn is_dxf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("dxf"))
+}
+
+/// Detects the drawing format of `bytes` read from `path`: binary DXF by its
+/// sentinel, ASCII DXF by a `.dxf` extension, and otherwise DWG.
+pub(crate) fn detect_drawing_format(bytes: &[u8], path: &Path) -> DrawingFormat {
+    if bytes.starts_with(BINARY_DXF_SENTINEL) {
+        DrawingFormat::DxfBinary
+    } else if is_dxf_path(path) {
+        DrawingFormat::Dxf
+    } else {
+        DrawingFormat::Dwg
+    }
+}
+
 /// Writes a new sheet as the bytes of a DWG in the 2018 format, carrying the
-/// build mark `mark`. `record` holds the sheet with the record of each of
-/// its objects, and each object is written with its ID and name from its
-/// record. `start_of` gives where each single line of text starts, which
-/// the DWG records beside the point it is justified at, and `measure` the
-/// box multiline text lays out in, which places a multileader's text.
+/// build mark `mark`.
+#[cfg(test)]
 pub(crate) fn write_new_sheet(
     record: &SheetRecord,
     start_of: &dyn Fn(&TextObject) -> Point3,
     measure: &dyn Fn(&MTextObject) -> MTextBox,
     mark: &BuildMark,
+) -> Result<Vec<u8>, Error> {
+    write_new_sheet_as(record, start_of, measure, mark, DrawingFormat::Dwg)
+}
+
+/// Writes a new sheet as the bytes of a DWG, ASCII DXF or binary DXF in the
+/// 2018 format (`AC1032`), carrying the build mark `mark`. `record` holds the
+/// sheet with the record of each of its objects, and each object is written
+/// with its ID and name from its record. `start_of` gives where each single
+/// line of text starts, which the drawing records beside the point it is
+/// justified at, and `measure` the box multiline text lays out in, which
+/// places a multileader's text.
+pub(crate) fn write_new_sheet_as(
+    record: &SheetRecord,
+    start_of: &dyn Fn(&TextObject) -> Point3,
+    measure: &dyn Fn(&MTextObject) -> MTextBox,
+    mark: &BuildMark,
+    format: DrawingFormat,
 ) -> Result<Vec<u8>, Error> {
     let sheet = &record.sheet;
     if record.objects.len() != sheet.objects.len() {
@@ -607,7 +645,20 @@ pub(crate) fn write_new_sheet(
             )?;
         }
     }
-    match catch_unwind(AssertUnwindSafe(|| DwgWriter::write_to_vec(&drawing))) {
+    write_document(&drawing, format)
+}
+
+/// Serializes `drawing` as a DWG, ASCII DXF or binary DXF.
+pub(crate) fn write_document(
+    drawing: &CadDocument,
+    format: DrawingFormat,
+) -> Result<Vec<u8>, Error> {
+    let outcome = catch_unwind(AssertUnwindSafe(|| match format {
+        DrawingFormat::Dwg => DwgWriter::write_to_vec(drawing),
+        DrawingFormat::Dxf => DxfWriter::new(drawing).write_to_vec(),
+        DrawingFormat::DxfBinary => DxfWriter::new_binary(drawing).write_to_vec(),
+    }));
+    match outcome {
         Ok(Ok(bytes)) => Ok(bytes),
         Ok(Err(e)) => Err(Error::new(
             ErrorCode::DwgWrite,
@@ -2494,12 +2545,12 @@ pub(crate) fn read_build_mark(path: &Path) -> Result<Option<BuildMark>, String> 
     }
 }
 
-/// The custom drawing properties of the DWG at `path`, each its name and
-/// its value, read from its summary section alone. None for a file that
-/// is not a DWG of the 2007 format or later, by its first bytes; an error
-/// when the file, or such a DWG's header or summary, cannot be read.
+/// The custom drawing properties of the DWG or DXF at `path`, each its name
+/// and its value. None for a file that is neither a DWG of the 2007 format or
+/// later nor a DXF; an error when the file, or such a drawing's header or
+/// summary, cannot be read.
 fn drawing_properties(path: &Path) -> Result<Option<Vec<(String, String)>>, String> {
-    let mut start = [0u8; 6];
+    let mut start = [0u8; 22];
     let read = std::fs::File::open(path)
         .and_then(|mut file| {
             use std::io::Read;
@@ -2513,37 +2564,167 @@ fn drawing_properties(path: &Path) -> Result<Option<Vec<(String, String)>>, Stri
             Ok(read)
         })
         .map_err(|e| format!("could not read the file: {e}"))?;
+    let prefix = &start[..read];
     // A DWG starts with its version, such as `AC1032` for the 2018 format;
     // the 2007 format is `AC1021`. The DWG library reads `AD` for `AC` too.
-    let version = std::str::from_utf8(&start[..read])
-        .ok()
-        .and_then(|text| text.strip_prefix("AC").or_else(|| text.strip_prefix("AD")))
-        .filter(|digits| digits.len() == 4)
-        .and_then(|digits| digits.parse::<u32>().ok());
-    match version {
-        Some(version) if version >= 1021 => {}
-        _ => return Ok(None),
+    if let Some(version) = dwg_header_version_number(prefix) {
+        if version < 1021 {
+            return Ok(None);
+        }
+        let mut reader = DwgReader::from_file(path)
+            .map_err(|e| format!("the DWG library could not open it: {e}"))?;
+        return summary_properties(&mut reader);
     }
-    let mut reader = DwgReader::from_file(path)
-        .map_err(|e| format!("the DWG library could not open it: {e}"))?;
-    summary_properties(&mut reader)
+    if prefix.starts_with(BINARY_DXF_SENTINEL) {
+        let reader = DxfReader::from_file(path)
+            .map_err(|e| format!("the DWG library could not open the DXF: {e}"))?;
+        let drawing = reader
+            .read()
+            .map_err(|e| format!("the DWG library could not read the DXF: {e}"))?;
+        return Ok(Some(drawing.summary_info.custom_properties));
+    }
+    if is_dxf_path(path) {
+        let file =
+            std::fs::File::open(path).map_err(|e| format!("could not read the file: {e}"))?;
+        return ascii_dxf_header_custom_properties(std::io::BufReader::new(file));
+    }
+    Ok(None)
 }
 
 /// Same as [`drawing_properties`], reading from `bytes` already in memory
 /// so the file is never opened a second time.
 fn drawing_properties_bytes(bytes: &[u8]) -> Result<Option<Vec<(String, String)>>, String> {
-    let start = bytes.get(..6).unwrap_or(bytes);
-    let version = std::str::from_utf8(start)
-        .ok()
-        .and_then(|text| text.strip_prefix("AC").or_else(|| text.strip_prefix("AD")))
-        .filter(|digits| digits.len() == 4)
-        .and_then(|digits| digits.parse::<u32>().ok());
-    match version {
-        Some(version) if version >= 1021 => {}
-        _ => return Ok(None),
+    if let Some(version) = dwg_header_version_number(bytes) {
+        if version < 1021 {
+            return Ok(None);
+        }
+        let mut reader = DwgReader::from_stream(std::io::Cursor::new(bytes));
+        return summary_properties(&mut reader);
     }
-    let mut reader = DwgReader::from_stream(std::io::Cursor::new(bytes));
-    summary_properties(&mut reader)
+    if bytes.starts_with(BINARY_DXF_SENTINEL) {
+        let reader = DxfReader::from_reader(std::io::Cursor::new(bytes.to_vec()))
+            .map_err(|e| format!("the DWG library could not open the DXF: {e}"))?;
+        let drawing = reader
+            .read()
+            .map_err(|e| format!("the DWG library could not read the DXF: {e}"))?;
+        return Ok(Some(drawing.summary_info.custom_properties));
+    }
+    ascii_dxf_header_custom_properties(std::io::Cursor::new(bytes))
+}
+
+fn dwg_header_version_number(bytes: &[u8]) -> Option<u32> {
+    let start = bytes.get(..6)?;
+    let text = std::str::from_utf8(start).ok()?;
+    let digits = text
+        .strip_prefix("AC")
+        .or_else(|| text.strip_prefix("AD"))?;
+    (digits.len() == 4)
+        .then(|| digits.parse::<u32>().ok())
+        .flatten()
+}
+
+/// Reads `$CUSTOMPROPERTYTAG` / `$CUSTOMPROPERTY` pairs from an ASCII DXF's
+/// `HEADER` section alone, stopping as soon as `HEADER` ends.
+///
+/// Returns `Ok(None)` when the stream does not start as an ASCII DXF;
+/// `Ok(Some(props))` when it does and its header (or lack of one) was read;
+/// and `Err` when a file that starts as an ASCII DXF has a truncated or
+/// malformed header.
+fn ascii_dxf_header_custom_properties<R: std::io::BufRead>(
+    mut reader: R,
+) -> Result<Option<Vec<(String, String)>>, String> {
+    let mut line = String::new();
+    let mut first_line = true;
+    let mut read_pair = |reader: &mut R| -> Result<Option<(i32, String)>, String> {
+        loop {
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .map_err(|e| format!("could not read the DXF: {e}"))?;
+            if n == 0 {
+                return Ok(None);
+            }
+            let code_text = if first_line {
+                first_line = false;
+                line.trim_start_matches('\u{feff}').trim()
+            } else {
+                line.trim()
+            };
+            if code_text.is_empty() {
+                continue;
+            }
+            let Ok(code) = code_text.parse::<i32>() else {
+                return Err("its DXF header has a malformed group code".to_owned());
+            };
+            let mut val = String::new();
+            let vn = reader
+                .read_line(&mut val)
+                .map_err(|e| format!("could not read the DXF: {e}"))?;
+            if vn == 0 {
+                return Err("its DXF header is cut short".to_owned());
+            }
+            let val = val.trim_end_matches(&['\r', '\n'][..]).to_owned();
+            return Ok(Some((code, val)));
+        }
+    };
+
+    // Skip leading 999 comments and verify the stream starts as an ASCII DXF.
+    let mut saw_comment = false;
+    let first = loop {
+        match read_pair(&mut reader) {
+            Ok(Some((999, _))) => {
+                saw_comment = true;
+            }
+            Ok(Some(pair)) => break pair,
+            Ok(None) => {
+                return if saw_comment {
+                    Err("its DXF header is cut short".to_owned())
+                } else {
+                    Ok(None)
+                };
+            }
+            Err(why) => {
+                return if saw_comment { Err(why) } else { Ok(None) };
+            }
+        }
+    };
+    if first.0 != 0 || first.1.trim() != "SECTION" {
+        return Ok(None);
+    }
+    let Some((2, section_name)) = read_pair(&mut reader)? else {
+        return Err("its DXF header is cut short".to_owned());
+    };
+    if section_name.trim() != "HEADER" {
+        return Ok(Some(Vec::new()));
+    }
+    let mut properties: Vec<(String, String)> = Vec::new();
+    let mut pending = false;
+    while let Some((code, value)) = read_pair(&mut reader)? {
+        if code == 0 && value.trim() == "ENDSEC" {
+            return Ok(Some(properties));
+        }
+        if code == 9 {
+            let var = value.trim();
+            if var == "$CUSTOMPROPERTYTAG" {
+                let Some((_, tag)) = read_pair(&mut reader)? else {
+                    return Err("its DXF header is cut short".to_owned());
+                };
+                properties.push((tag, String::new()));
+                pending = true;
+            } else if var == "$CUSTOMPROPERTY" {
+                let Some((_, prop_val)) = read_pair(&mut reader)? else {
+                    return Err("its DXF header is cut short".to_owned());
+                };
+                if pending {
+                    if let Some((_, slot)) = properties.last_mut() {
+                        *slot = prop_val;
+                    }
+                    pending = false;
+                }
+            }
+        }
+    }
+    Err("its DXF header is cut short before ENDSEC".to_owned())
 }
 
 fn summary_properties<R: std::io::Read + std::io::Seek>(
@@ -2659,12 +2840,18 @@ fn read_file_bytes(path: &Path) -> Result<Vec<u8>, Error> {
     })
 }
 
-/// Reads the DWG at `path` directly through `DwgReader` without the strict
-/// decode-report gate (used by `carries_build_mark` and `import-blocks`).
+/// Reads the DWG or DXF at `path` directly through `DwgReader` or `DxfReader`
+/// without the strict decode-report gate (used by `carries_build_mark` and
+/// `import-blocks`).
 fn read_drawing(path: &Path) -> Result<CadDocument, Error> {
+    let is_dxf = is_dxf_path(path);
     match catch_unwind(AssertUnwindSafe(|| {
-        let mut reader = DwgReader::from_file(path)?;
-        reader.read()
+        if is_dxf {
+            DxfReader::from_file(path)?.read()
+        } else {
+            let mut reader = DwgReader::from_file(path)?;
+            reader.read()
+        }
     })) {
         Ok(Ok(drawing)) => Ok(drawing),
         Ok(Err(e)) => Err(Error::new(
@@ -2800,45 +2987,77 @@ fn first_read_error(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Optio
         })
 }
 
-/// Reads the DWG from `bytes`, already read from `path`, with what the DWG
-/// library says of how it read each record: whole, or with `past_damage`
+/// Reads the DWG or DXF from `bytes`, already read from `path`, with what the
+/// DWG library says of how it read each record: whole, or with `past_damage`
 /// past the records it cannot read, which it reports.
 fn read_drawing_bytes_with_stats(
     bytes: &[u8],
     path: &Path,
     past_damage: bool,
 ) -> Result<(CadDocument, acadrust::ReadStats), Error> {
-    let mut options = if past_damage {
-        acadrust::DwgReadOptions::failsafe()
-    } else {
-        acadrust::DwgReadOptions::default()
-    };
-    // Pin the mesh face budget to the library's deterministic baseline cap
-    // rather than probing host RAM, so reads and mirrors stay byte-identical
-    // across machines and memory loads (and match WebAssembly).
-    options.max_mesh_faces = Some(acadrust::MeshFaceBudget::BASELINE.max_faces);
-    options.max_mesh_face_indices = Some(acadrust::MeshFaceBudget::BASELINE.max_face_indices);
-    let outcome = match catch_unwind(AssertUnwindSafe(|| {
-        let mut reader = DwgReader::from_stream_with_options(std::io::Cursor::new(bytes), options);
-        reader.read_with_stats()
-    })) {
-        Ok(Ok(outcome)) => outcome,
-        Ok(Err(e)) => {
-            return Err(Error::new(
-                ErrorCode::DwgRead,
-                format!("the DWG library could not read the drawing: {e}"),
-            )
-            .in_file(path))
+    let as_dxf = is_dxf_path(path) || bytes.starts_with(BINARY_DXF_SENTINEL);
+    let outcome = if as_dxf {
+        let config = DxfReaderConfiguration {
+            failsafe: past_damage,
+            default_encoding: None,
+        };
+        match catch_unwind(AssertUnwindSafe(|| {
+            let reader = DxfReader::from_reader(std::io::Cursor::new(bytes.to_vec()))?;
+            reader.with_configuration(config).read_with_stats()
+        })) {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(e)) => {
+                return Err(Error::new(
+                    ErrorCode::DwgRead,
+                    format!("the DWG library could not read the DXF: {e}"),
+                )
+                .in_file(path))
+            }
+            Err(panic) => {
+                return Err(Error::new(
+                    ErrorCode::DwgRead,
+                    format!(
+                        "the DWG library failed while reading the DXF: {}",
+                        panic_message(panic)
+                    ),
+                )
+                .in_file(path))
+            }
         }
-        Err(panic) => {
-            return Err(Error::new(
-                ErrorCode::DwgRead,
-                format!(
-                    "the DWG library failed while reading the drawing: {}",
-                    panic_message(panic)
-                ),
-            )
-            .in_file(path))
+    } else {
+        let mut options = if past_damage {
+            acadrust::DwgReadOptions::failsafe()
+        } else {
+            acadrust::DwgReadOptions::default()
+        };
+        // Pin the mesh face budget to the library's deterministic baseline cap
+        // rather than probing host RAM, so reads and mirrors stay byte-identical
+        // across machines and memory loads (and match WebAssembly).
+        options.max_mesh_faces = Some(acadrust::MeshFaceBudget::BASELINE.max_faces);
+        options.max_mesh_face_indices = Some(acadrust::MeshFaceBudget::BASELINE.max_face_indices);
+        match catch_unwind(AssertUnwindSafe(|| {
+            let mut reader =
+                DwgReader::from_stream_with_options(std::io::Cursor::new(bytes), options);
+            reader.read_with_stats()
+        })) {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(e)) => {
+                return Err(Error::new(
+                    ErrorCode::DwgRead,
+                    format!("the DWG library could not read the drawing: {e}"),
+                )
+                .in_file(path))
+            }
+            Err(panic) => {
+                return Err(Error::new(
+                    ErrorCode::DwgRead,
+                    format!(
+                        "the DWG library failed while reading the drawing: {}",
+                        panic_message(panic)
+                    ),
+                )
+                .in_file(path))
+            }
         }
     };
     // Reject unreadable object streams on both strict and failsafe paths
@@ -2848,11 +3067,19 @@ fn read_drawing_bytes_with_stats(
     if !outcome.stats.record_stream_read
         || (outcome.stats.source_records > 0 && outcome.stats.decoded_source_records == 0)
     {
-        let why = first_read_error(&outcome.document, &outcome.stats)
-            .unwrap_or_else(|| "the DWG's object record stream could not be read".to_owned());
+        let why = first_read_error(&outcome.document, &outcome.stats).unwrap_or_else(|| {
+            if as_dxf {
+                "the DXF holds no drawing sections".to_owned()
+            } else {
+                "the DWG's object record stream could not be read".to_owned()
+            }
+        });
         return Err(Error::new(
             ErrorCode::DwgRead,
-            format!("the DWG library could not read the drawing: {why}"),
+            format!(
+                "the DWG library could not read the {}: {why}",
+                if as_dxf { "DXF" } else { "drawing" }
+            ),
         )
         .in_file(path));
     }

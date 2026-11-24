@@ -79,10 +79,14 @@ pub struct ReadReport {
     pub sheet: String,
     /// What was read, in words.
     pub message: String,
-    /// The DWG version the original is saved in, such as `AC1032` for
+    /// The drawing version the original is saved in, such as `AC1032` for
     /// 2018, which a revision of it keeps (ADR-0006).
     pub dwg_version: String,
-    /// SHA-256 fingerprint of the original DWG bytes read.
+    /// The DXF format (`dxf` for ASCII DXF or `dxf_binary` for binary DXF)
+    /// when reading a DXF file; left out when reading a DWG.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<crate::build::DrawingFormat>,
+    /// SHA-256 fingerprint of the original drawing bytes read.
     pub sha256: String,
     /// The drawing's unit; none when it states none the core knows.
     pub units: Option<Unit>,
@@ -131,14 +135,14 @@ fn is_zero_usize(n: &usize) -> bool {
     *n == 0
 }
 
-/// Reads the original `request.source` and, unless asked not to, writes
-/// its text mirror.
+/// Reads the original `request.source` (a DWG or DXF) and, unless asked not
+/// to, writes its text mirror.
 pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
     let source = &request.source;
-    if !is_dwg(source) {
+    if !is_drawing(source) {
         return Err(Error::usage(
-            "an original to read is a DWG, whose name ends .dwg; a sheet description is read by \
-             query, render and plot",
+            "an original to read is a DWG or DXF, whose name ends .dwg or .dxf; a sheet \
+             description is read by query, render and plot",
         )
         .in_file(source));
     }
@@ -149,10 +153,11 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
         )
         .at_field("mirror"));
     }
+    let kind_word = if is_dxf(source) { "DXF" } else { "DWG" };
     let mut source_file = File::open(source).map_err(|e| {
         Error::new(
             ErrorCode::ReadFailed,
-            format!("could not read the DWG: {e}"),
+            format!("could not read the {kind_word}: {e}"),
         )
         .in_file(source)
     })?;
@@ -164,12 +169,13 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
     source_file.read_to_end(&mut bytes).map_err(|e| {
         Error::new(
             ErrorCode::ReadFailed,
-            format!("could not read the DWG: {e}"),
+            format!("could not read the {kind_word}: {e}"),
         )
         .in_file(source)
     })?;
     drop(source_file);
     let sha256 = fingerprint(&bytes);
+    let detected = dwg::detect_drawing_format(&bytes, source);
     let drawing = dwg::read_bytes_past_damage(&bytes, source)?;
     let resolved_source = on_disk_path(source, source_id);
     let sheet = stem_of(&resolved_source);
@@ -196,6 +202,7 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
         sheet,
         message,
         dwg_version: drawing.dwg_version,
+        format: detected.is_dxf().then_some(detected),
         sha256,
         units: drawing.units,
         decoded: drawing.decode.decoded,
@@ -584,10 +591,24 @@ pub(crate) fn is_dwg(source: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("dwg"))
 }
 
-/// Whether `source` should be read as a DWG file rather than a drawing-set
-/// folder: its name ends `.dwg` (any case) and it is not a directory.
-pub(crate) fn is_dwg_file(source: &Path) -> bool {
-    is_dwg(source) && !source.is_dir()
+/// Whether `source` has a `.dxf` extension, in any case.
+pub(crate) fn is_dxf(source: &Path) -> bool {
+    source
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("dxf"))
+}
+
+/// Whether `source` has a `.dwg` or `.dxf` extension, in any case.
+pub(crate) fn is_drawing(source: &Path) -> bool {
+    is_dwg(source) || is_dxf(source)
+}
+
+/// Whether `source` should be read as a DWG or DXF file rather than a
+/// drawing-set folder: its name ends `.dwg` or `.dxf` (any case) and it is
+/// not a directory.
+pub(crate) fn is_drawing_file(source: &Path) -> bool {
+    is_drawing(source) && !source.is_dir()
 }
 
 /// Whether the mirror path is brand new or an existing AgentDrafter mirror
@@ -618,9 +639,10 @@ fn refuse_to_replace(
     if mirror.file_name().is_none() {
         return Err(Error::usage("the mirror's path does not name a file").at_field("mirror"));
     }
-    if is_dwg(mirror) {
+    if is_drawing(mirror) {
         return Err(Error::usage(
-            "a text mirror is YAML, not a DWG: choose a path for it that does not end .dwg",
+            "a text mirror is YAML, not a DWG or DXF: choose a path for it that does not end \
+             .dwg or .dxf",
         )
         .at_field("mirror"));
     }

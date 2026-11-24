@@ -611,7 +611,7 @@ pub(crate) fn plot_dwg_bytes(
         objects_not_drawn: drawing.objects_not_read,
         not_drawn: drawing.not_read,
         ids: Vec::new(),
-        files: vec![(SourceKind::Dwg, source.to_path_buf(), bytes.to_vec())],
+        files: vec![(SourceKind::of(source), source.to_path_buf(), bytes.to_vec())],
     };
     let title = source
         .file_stem()

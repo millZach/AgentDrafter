@@ -108,7 +108,7 @@ pub enum UndoAction {
 /// entry a commit that never finished left pending is rolled back first,
 /// and the reply says so under `rolled_back`.
 pub fn undo(request: &UndoRequest) -> Reply<UndoReport> {
-    if crate::original::is_dwg_file(&request.set) {
+    if crate::original::is_drawing_file(&request.set) {
         return super::original_journal::undo_original(request);
     }
     match recover(&request.set) {

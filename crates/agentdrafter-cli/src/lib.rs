@@ -31,9 +31,9 @@ use std::process::ExitCode;
 
 use agentdrafter_core::{commands, find_command, Error, ErrorCode, Interface, Reply, Settings};
 use agentdrafter_core::{
-    AcceptRequest, CheckRequest, DisplayListRequest, ImportBlocksRequest, JournalRequest,
-    MeasureTextRequest, ReadRequest, RenderRequest, StaleRequest, UndoRequest, Unit,
-    FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SYSTEM_FONTS_VARIABLE,
+    AcceptRequest, CheckRequest, DisplayListRequest, DrawingFormat, ImportBlocksRequest,
+    JournalRequest, MeasureTextRequest, ReadRequest, RenderRequest, StaleRequest, UndoRequest,
+    Unit, FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SYSTEM_FONTS_VARIABLE,
 };
 use agentdrafter_core::{
     End, Matching, Measure, ObjectRef, Query, QueryRequest, Selection, SelectionBox, SnapKind,
@@ -43,7 +43,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 const BUILD_USAGE: &str =
-    "agentdrafter build <sheet-description | drawing-set-folder> [--output <dwg>] [--overwrite] [--clean | --no-clean] [--fonts <folder>]... [--no-system-fonts]";
+    "agentdrafter build <sheet-description | drawing-set-folder> [--output <dwg-or-dxf>] [--format <dwg | dxf | dxf_binary>] [--overwrite] [--clean | --no-clean] [--fonts <folder>]... [--no-system-fonts]";
 const SCHEMA_USAGE: &str =
     "agentdrafter schema [sheet-description | block-library | template | set | rows | change-set]";
 const OPERATIONS_USAGE: &str = "agentdrafter operations";
@@ -487,13 +487,15 @@ fn parse_display_list(mut args: Args) -> Result<Value, Error> {
     input_of(request, fonts)
 }
 
-/// The input of `build` and `plot`: one sheet description, DWG or drawing
+/// The input of `build` and `plot`: one sheet description, DWG, DXF or drawing
 /// set's folder, which the core tells apart.
 #[derive(Serialize)]
 struct SourceArgs {
     source: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<DrawingFormat>,
     overwrite: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     clean: Option<bool>,
@@ -570,6 +572,7 @@ fn parse_plot(mut args: Args) -> Result<Value, Error> {
     let request = SourceArgs {
         source,
         output,
+        format: None,
         overwrite,
         clean,
         plot_style,
@@ -1432,6 +1435,7 @@ fn parse_read(mut args: Args) -> Result<Value, Error> {
 fn parse_build(mut args: Args) -> Result<Value, Error> {
     let mut description: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
+    let mut format: Option<DrawingFormat> = None;
     let mut overwrite = false;
     let mut clean: Option<bool> = None;
     let mut fonts = FontOptions::default();
@@ -1451,6 +1455,24 @@ fn parse_build(mut args: Args) -> Result<Value, Error> {
                 })?;
                 if output.replace(path.into()).is_some() {
                     return Err(Error::usage("--output is given twice"));
+                }
+            }
+            Some("--format") => {
+                let raw = args
+                    .next()
+                    .ok_or_else(|| {
+                        Error::usage(format!("--format needs a value; usage: {BUILD_USAGE}"))
+                    })?
+                    .into_string()
+                    .map_err(|_| Error::usage("the format is not valid text"))?;
+                let parsed = DrawingFormat::from_name(&raw).ok_or_else(|| {
+                    Error::usage(format!(
+                        "unknown --format `{raw}`; choose `dwg`, `dxf` or `dxf_binary`; usage: \
+                         {BUILD_USAGE}"
+                    ))
+                })?;
+                if format.replace(parsed).is_some() {
+                    return Err(Error::usage("--format is given twice"));
                 }
             }
             Some("--overwrite") => overwrite = true,
@@ -1477,6 +1499,7 @@ fn parse_build(mut args: Args) -> Result<Value, Error> {
     let request = SourceArgs {
         source,
         output,
+        format,
         overwrite,
         clean,
         plot_style: None,

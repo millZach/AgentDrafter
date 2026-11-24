@@ -22,15 +22,16 @@ use acadrust::tables::{Layer as DwgLayer, TableEntry};
 use acadrust::types::{
     Color, DxfVersion, Handle, LineWeight, Transform as DwgTransform, Vector2, Vector3,
 };
-use acadrust::{CadDocument, DwgWriter};
+use acadrust::{CadDocument, DwgWriter, DxfWriter};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::{
-    block, contents, dwg_object, handle_text, ids, kind_of, layer_of, page_setup, panic_message,
-    point, raw_dwg_version, read_drawing_bytes_with_stats, read_layer, read_properties,
-    set_layer_properties, set_properties, text, unit, vector,
+    block, contents, detect_drawing_format, dwg_object, handle_text, ids, kind_of, layer_of,
+    page_setup, panic_message, point, raw_dwg_version, read_drawing_bytes_with_stats, read_layer,
+    read_properties, set_layer_properties, set_properties, text, unit, vector,
 };
+use crate::build::DrawingFormat;
 use crate::description::{
     normalize_degrees, parse_angle_json, parse_length_json, parse_linetype_scale_json,
     parse_object_color_json, parse_object_lineweight_json, parse_object_plot_style_json,
@@ -180,10 +181,11 @@ struct DrawingSnapshot {
     block_records: BTreeMap<String, BlockRecordDigest>,
 }
 
-/// An open original DWG ready for in-place revision, strictly behind the `dwg`
-/// seam.
+/// An open original DWG or DXF ready for in-place revision, strictly behind
+/// the `dwg` seam.
 pub(crate) struct RevisionSession {
     drawing: CadDocument,
+    source_format: DrawingFormat,
     original_header: Option<[u8; 6]>,
     raw_version: Option<String>,
     dwg_version: String,
@@ -206,20 +208,29 @@ pub(crate) struct RevisionSession {
 }
 
 impl RevisionSession {
-    /// Opens an original DWG from `bytes` already read from `path`, trying
-    /// strict reading first and falling back to read-past-damage when a damaged
-    /// DWG still has recoverable records (so `--allow-loss` can revise it and
-    /// record `read_past_damage`, while without `--allow-loss` it is refused
-    /// with `incomplete_decode`).
+    /// Opens an original DWG or DXF from `bytes` already read from `path`,
+    /// trying strict reading first and falling back to read-past-damage when a
+    /// damaged drawing still has recoverable records (so `--allow-loss` can
+    /// revise it and record `read_past_damage`, while without `--allow-loss`
+    /// it is refused with `incomplete_decode`).
     pub(crate) fn open(bytes: &[u8], path: &Path) -> Result<Self, Error> {
-        let original_header: Option<[u8; 6]> = bytes.get(..6).and_then(|s| s.try_into().ok());
-        let raw_version = raw_dwg_version(bytes);
+        let source_format = detect_drawing_format(bytes, path);
+        let original_header: Option<[u8; 6]> = if source_format.is_dwg() {
+            bytes.get(..6).and_then(|s| s.try_into().ok())
+        } else {
+            None
+        };
+        let raw_version = if source_format.is_dwg() {
+            raw_dwg_version(bytes)
+        } else {
+            None
+        };
         let (drawing, stats, read_past_damage) =
             match read_drawing_bytes_with_stats(bytes, path, false) {
                 Ok((drawing, stats)) => (drawing, stats, None),
                 Err(strict_err) => {
-                    // Only attempt read-past-damage on files with a DWG header.
-                    if raw_version.is_none() {
+                    // Only attempt read-past-damage on files with a DWG header or DXF format.
+                    if raw_version.is_none() && !source_format.is_dxf() {
                         return Err(strict_err);
                     }
                     match read_drawing_bytes_with_stats(bytes, path, true) {
@@ -238,6 +249,7 @@ impl RevisionSession {
         let snapshot = snapshot_drawing(&drawing, &dwg_version, &decode);
         Ok(Self {
             drawing,
+            source_format,
             original_header,
             raw_version,
             dwg_version,
@@ -2199,17 +2211,22 @@ impl RevisionSession {
         record
     }
 
-    /// Serializes the revised drawing to DWG bytes in the original's exact 6-byte
-    /// DWG version header, strictly re-reads those bytes, and diffs every
+    /// Serializes the revised drawing to DWG or DXF bytes in the original's
+    /// exact version and format, strictly re-reads those bytes, and diffs every
     /// entity, non-graphical object, symbol table, requested add/delete, and
     /// decode health metric against the pre-edit snapshot.
     pub(crate) fn serialize_and_verify(
         &self,
         revision_path: &Path,
     ) -> Result<RevisionVerification, Error> {
-        self.check_writable_version()?;
-        let bytes = match catch_unwind(AssertUnwindSafe(|| DwgWriter::write_to_vec(&self.drawing)))
-        {
+        if self.source_format.is_dwg() {
+            self.check_writable_version()?;
+        }
+        let bytes = match catch_unwind(AssertUnwindSafe(|| match self.source_format {
+            DrawingFormat::Dwg => DwgWriter::write_to_vec(&self.drawing),
+            DrawingFormat::Dxf => DxfWriter::new(&self.drawing).write_to_vec(),
+            DrawingFormat::DxfBinary => DxfWriter::new_binary(&self.drawing).write_to_vec(),
+        })) {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(e)) => {
                 return Err(Error::new(
@@ -2243,8 +2260,11 @@ impl RevisionSession {
                 ));
             }
         }
-        let written_version =
-            raw_dwg_version(&bytes).unwrap_or_else(|| self.drawing.version.to_string());
+        let written_version = if self.source_format.is_dwg() {
+            raw_dwg_version(&bytes).unwrap_or_else(|| self.drawing.version.to_string())
+        } else {
+            self.drawing.version.to_string()
+        };
         let (re_read, re_stats) = read_drawing_bytes_with_stats(&bytes, revision_path, false)?;
         let re_contents = contents(&re_read, &re_stats, Some(written_version.clone()))?;
         let after = snapshot_drawing(&re_read, &written_version, &re_contents.decode);

@@ -112,7 +112,7 @@ pub fn accept_with(
     settings: &Settings,
     via: Interface,
 ) -> Reply<AcceptReport> {
-    if crate::original::is_dwg_file(&request.set) {
+    if crate::original::is_drawing_file(&request.set) {
         return super::original_journal::accept_original(request, settings, via);
     }
     let rolled_back = match recover(&request.set) {
@@ -367,10 +367,11 @@ fn revision(folder: &Path, set: &SavedSet) -> Result<Vec<FileIssued>, Error> {
             paths.push(beside.join(library));
         }
     }
+    let ext = settings.format.extension();
     for row in &set.rows {
         let dwg = folder
             .join(&settings.output)
-            .join(format!("{}.dwg", row.sheet));
+            .join(format!("{}.{ext}", row.sheet));
         if dwg.is_file() {
             paths.push(dwg);
         }
@@ -504,7 +505,9 @@ impl StampRevision {
 /// settings.
 pub(crate) fn stamp_revision(files: &[(SourceKind, &Path, &[u8])]) -> StampRevision {
     match files {
-        [(SourceKind::Dwg, dwg, bytes), rest @ ..] => dwg_revision(dwg, bytes, rest),
+        [(SourceKind::Dwg | SourceKind::Dxf, dwg, bytes), rest @ ..] => {
+            dwg_revision(dwg, bytes, rest)
+        }
         _ => files_revision(files),
     }
 }

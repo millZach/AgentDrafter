@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 
-use crate::build::{build_with, BuildRequest};
+use crate::build::{build_with_format, BuildRequest, DrawingFormat};
 use crate::change::{accept_with, recover, AcceptRequest, JournalRequest, UndoRequest};
 use crate::change::{
     change_set_schema, change_with, journal, operations, original_change_set_schema, undo,
@@ -60,7 +60,7 @@ use crate::plot::{plot_set_with, plot_with, PlotRequest, PlotSetRequest, BUILT_I
 use crate::query::{query_with, QueryRequest};
 use crate::render::{render_with, RenderRequest};
 use crate::reply::Reply;
-use crate::set::{build_set_with, set_of_dwg, SetBuildRequest, SET_SETTINGS_FILE};
+use crate::set::{build_set_with_format, set_of_dwg, SetBuildRequest, SET_SETTINGS_FILE};
 use crate::settings::{Settings, FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SYSTEM_FONTS_VARIABLE};
 use crate::stamp::{check_stale, SourceKind, StaleRequest};
 use crate::text::measure::{measure_text_with, MeasureTextRequest};
@@ -148,12 +148,12 @@ impl Command {
             && input
                 .get("source")
                 .and_then(Value::as_str)
-                .is_some_and(|s| crate::original::is_dwg_file(Path::new(s)));
+                .is_some_and(|s| crate::original::is_drawing_file(Path::new(s)));
         let dwg_original = matches!(self.name, "change" | "journal" | "undo" | "accept")
             && input
                 .get("set")
                 .and_then(Value::as_str)
-                .is_some_and(|s| crate::original::is_dwg_file(Path::new(s)));
+                .is_some_and(|s| crate::original::is_drawing_file(Path::new(s)));
         let beside =
             matches!(self.name, "look-at" | "looking-at" | "read") || dwg_source || dwg_original;
         let rolled_back = if previews || beside {
@@ -401,6 +401,8 @@ struct BuildInput {
     #[serde(default)]
     output: Option<PathBuf>,
     #[serde(default)]
+    format: Option<DrawingFormat>,
+    #[serde(default)]
     overwrite: bool,
     #[serde(default)]
     clean: Option<bool>,
@@ -408,16 +410,19 @@ struct BuildInput {
 
 fn build_does() -> String {
     format!(
-        "Builds a sheet description into a DWG in the 2018 format (AC1032), with the blocks it \
-         inserts from the block library it names. The DWG goes beside the sheet description with \
-         a .dwg extension unless `output` names another path. An existing file is never replaced \
-         without `overwrite`, and `overwrite` replaces only a DWG AgentDrafter built. The reply \
-         lists the blocks the DWG defines, and each text style whose font is not in the font \
-         folders, with the look-alike measured in its place. Given a folder, builds the drawing \
-         set in it: one DWG per row of its rows, each its template filled in from the row, into \
-         the output folder its settings ({SET_SETTINGS_FILE}) name. A sheet that fails writes \
-         nothing and the others are still built; the reply gives each sheet's outcome under \
-         `sheets`, and is not ok when any sheet failed. {LEFTOVERS_DOES}"
+        "Builds a sheet description into a DWG or DXF (ASCII by default, or binary with \
+         `format: dxf_binary`) in the 2018 format (AC1032), with the blocks it inserts from the \
+         block library it names, carrying the same build mark and object IDs. The drawing goes \
+         beside the sheet description with a .dwg (or .dxf) extension unless `output` names \
+         another path; an `output` ending .dxf writes ASCII DXF unless `format` asks otherwise. \
+         An existing file is never replaced without `overwrite`, and `overwrite` replaces only a \
+         drawing AgentDrafter built. The reply lists the blocks the drawing defines, and each \
+         text style whose font is not in the font folders, with the look-alike measured in its \
+         place. Given a folder, builds the drawing set in it: one DWG or DXF per row of its \
+         rows, each its template filled in from the row, into the output folder its settings \
+         ({SET_SETTINGS_FILE}) name, in `format` or the settings' `format` (`dwg` by default). A \
+         sheet that fails writes nothing and the others are still built; the reply gives each \
+         sheet's outcome under `sheets`, and is not ok when any sheet failed. {LEFTOVERS_DOES}"
     )
 }
 
@@ -443,8 +448,12 @@ fn build_input() -> Value {
     input(
         json!({
             "source": text("The sheet description to build, or a drawing set's folder."),
-            "output": text("Where to write the DWG of one sheet description. Without it, beside the sheet description."),
-            "overwrite": flag("Replace a DWG already there, which is allowed only when AgentDrafter built it."),
+            "output": text("Where to write the DWG or DXF of one sheet description. Without it, beside the sheet description. A path ending .dxf writes ASCII DXF unless `format` asks otherwise."),
+            "format": {
+                "description": "Drawing format to write: `dwg` (2018 DWG, the default), `dxf` (ASCII DXF), or `dxf_binary` (binary DXF). Overrides a drawing set's `format` setting.",
+                "enum": DrawingFormat::ALL.map(DrawingFormat::name),
+            },
+            "overwrite": flag("Replace a drawing already there, which is allowed only when AgentDrafter built it."),
             "clean": clean(),
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),
@@ -462,6 +471,7 @@ fn run_build(
     let BuildInput {
         source,
         output,
+        format,
         overwrite,
         clean,
     } = parse("build", input)?;
@@ -471,7 +481,9 @@ fn run_build(
             overwrite,
             clean,
         };
-        return Ok(sent_warned(build_set_with(&request, &settings)));
+        return Ok(sent_warned(build_set_with_format(
+            &request, format, &settings,
+        )));
     }
     no_clean(clean, "build", "one sheet description")?;
     let request = BuildRequest {
@@ -479,7 +491,7 @@ fn run_build(
         output,
         overwrite,
     };
-    Ok(done_warned(build_with(&request, &settings)))
+    Ok(done_warned(build_with_format(&request, format, &settings)))
 }
 
 // schema
@@ -1218,7 +1230,7 @@ fn run_change(
     let is_dwg = input
         .get("set")
         .and_then(Value::as_str)
-        .is_some_and(|s| crate::original::is_dwg_file(Path::new(s)));
+        .is_some_and(|s| crate::original::is_drawing_file(Path::new(s)));
     if is_dwg {
         let settings = take_settings(&mut input, base, true)?;
         let request: crate::revise::ReviseRequest = parse("change", input)?;
@@ -1857,9 +1869,9 @@ fn read_does() -> String {
 fn read_input() -> Value {
     let mut schema = input(
         json!({
-            "source": text("The original to read: a DWG."),
+            "source": text("The original to read: a DWG or DXF (ASCII or binary)."),
             "mirror": {
-                "description": "Where to write the text mirror, or null for the default beside the original (named after it with .mirror.yaml in place of .dwg). Not given with `no_mirror: true`.",
+                "description": "Where to write the text mirror, or null for the default beside the original (named after it with .mirror.yaml in place of .dwg or .dxf). Not given with `no_mirror: true`.",
                 "type": ["string", "null"],
             },
             "no_mirror": flag("Read only, and write no text mirror."),
@@ -1892,7 +1904,7 @@ fn set_read(input: &Value) -> Option<PathBuf> {
         .find_map(|key| input.get(key))?
         .as_str()?;
     let path = Path::new(named);
-    if SourceKind::of(path) == SourceKind::Dwg && path.is_file() {
+    if SourceKind::of(path).is_drawing() && path.is_file() {
         if let Ok(set) = set_of_dwg(path) {
             return Some(set.folder);
         }

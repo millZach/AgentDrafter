@@ -129,7 +129,7 @@ pub(crate) fn read_record_with_recovery(
         .in_file(source)
     })?;
     drop(file);
-    if kind == SourceKind::Dwg {
+    if kind.is_drawing() {
         let drawing = if read_past_damage {
             dwg::read_bytes_past_damage(&bytes, source)?
         } else {

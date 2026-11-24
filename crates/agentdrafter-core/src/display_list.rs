@@ -1120,7 +1120,7 @@ fn read(
         )
         .at_field("entry"));
     }
-    let name = if is_dwg(source) {
+    let name = if crate::original::is_drawing(source) {
         crate::original::sheet_name(source)
     } else {
         source
@@ -1132,8 +1132,8 @@ fn read(
         return Err(no_such_sheet(sheet, std::slice::from_ref(&name)));
     }
     let record = read_record_with_recovery(source, request.read_past_damage)?;
-    // A DWG's objects carry the IDs its read gives them.
-    let ids: Vec<(String, Option<String>)> = if is_dwg(source) {
+    // A DWG's or DXF's objects carry the IDs its read gives them.
+    let ids: Vec<(String, Option<String>)> = if crate::original::is_drawing(source) {
         record.ids.clone()
     } else {
         let described = read_sheet_record(source)?;
@@ -1151,14 +1151,6 @@ fn read(
         not_drawn: record.not_drawn,
         template: None,
     })
-}
-
-/// Whether `source` is read as a DWG: its name ends `.dwg`, in any case.
-fn is_dwg(source: &Path) -> bool {
-    source
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("dwg"))
 }
 
 /// The error for a sheet to draw that is not among `names`, the sheets
