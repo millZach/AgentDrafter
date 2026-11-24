@@ -42,6 +42,7 @@ pub(crate) mod operations;
 pub(crate) mod original_journal;
 mod proposals;
 mod recover;
+pub(crate) mod replace;
 mod undo;
 
 use std::fs;
@@ -246,9 +247,64 @@ pub struct OperationOutcome {
     /// transformed in place, by ID on the sheet the operation names.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub transformed: Vec<String>,
+    /// Each text, mtext or attribute value a `replace_text` operation changed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub replacements: Vec<TextReplaced>,
+    /// Each insert attribute a `set_attributes` operation changed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attributes_set: Vec<AttributeUpdated>,
     /// Why it did not land.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,
+}
+
+/// One text, multiline text or attribute value changed by `replace_text`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TextReplaced {
+    /// The sheet the object sits on.
+    pub sheet: String,
+    /// The object's ID on that sheet.
+    pub id: String,
+    /// Which kind of text changed: `text`, `mtext`, or `attribute`.
+    pub kind: String,
+    /// The attribute's tag, in capitals, when `kind` is `attribute`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// Which occurrence of a repeated attribute tag changed, counted from 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occurrence: Option<usize>,
+    /// The text before replacement.
+    pub before: String,
+    /// The text after replacement.
+    pub after: String,
+    /// How many matches were replaced in this text.
+    pub count: usize,
+    /// The row value written when the template takes this text from the row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_value: Option<String>,
+}
+
+/// One insert attribute updated by `set_attributes`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AttributeUpdated {
+    /// The sheet the insert sits on.
+    pub sheet: String,
+    /// The insert's ID on that sheet.
+    pub id: String,
+    /// The block the insert places.
+    pub block: String,
+    /// The attribute's tag, in capitals.
+    pub tag: String,
+    /// Which occurrence of a repeated attribute tag was set, counted from 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occurrence: Option<usize>,
+    /// The attribute's value before the operation.
+    pub before: String,
+    /// The attribute's value after the operation.
+    pub after: String,
+    /// The row value written when the template takes this attribute from the row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_value: Option<String>,
 }
 
 /// A copy a copy or an array made: an ordinary object with an ID of its

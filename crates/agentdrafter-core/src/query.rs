@@ -1050,6 +1050,43 @@ fn matched<'a>(
     })
 }
 
+/// Selects matching object indices on a single sheet using the same rules as
+/// `query find` / `query attributes` (including spatial `window`, `crossing`,
+/// and `touching`).
+pub(crate) fn select_on_sheet(
+    selection: &Selection,
+    record: &SheetRecord,
+    settings: &Settings,
+) -> Result<Vec<usize>, Error> {
+    check_touching(&[record], selection)?;
+    let space = selection
+        .is_spatial()
+        .then(|| Space::of(record, selection, settings));
+    let mut out = Vec::new();
+    for index in 0..record.objects.len() {
+        if selection.matches(record, index).is_none() {
+            continue;
+        }
+        if let Some(space) = &space {
+            if space.matches(selection, index).is_none() {
+                continue;
+            }
+        }
+        out.push(index);
+    }
+    Ok(out)
+}
+
+/// Human-readable description of a [`Selection`] for batch operation messages.
+pub(crate) fn selection_words(selection: &Selection) -> String {
+    match (selection.words(), selection.where_words()) {
+        (Some(w), Some(wh)) => format!("{w} {wh}"),
+        (Some(w), None) => w,
+        (None, Some(wh)) => wh,
+        (None, None) => "every insert".to_owned(),
+    }
+}
+
 /// Whether the object a selection's `touching` names is on one of
 /// `sheets`, by its ID or by its name.
 fn touching_found(sheets: &[&SheetRecord], selection: &Selection) -> bool {

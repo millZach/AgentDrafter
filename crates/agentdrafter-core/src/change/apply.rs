@@ -31,10 +31,12 @@ use super::operations::{
     OpPoint, Operation, Pattern, PointSnap, Table, TableOp, Target, TextToFrontWhich, TransformBy,
     ROW_VALUE_KEY,
 };
+use super::replace::{TextMatchKind, TextMatcher, TextScope};
 use super::MARK_FILE;
 use super::{
-    mark_report, quoted_list, read_mark, relative_to, AttributeRemoved, ChangeReport,
-    ChangeRequest, Copied, Fill, OperationOutcome, RowValueSet, SheetChange, SnapResolved,
+    mark_report, quoted_list, read_mark, relative_to, AttributeRemoved, AttributeUpdated,
+    ChangeReport, ChangeRequest, Copied, Fill, OperationOutcome, RowValueSet, SheetChange,
+    SnapResolved, TextReplaced,
 };
 use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
 use crate::description::blocks::tag_in_capitals;
@@ -488,6 +490,10 @@ struct Done {
     transformed: Vec<(String, Vec<usize>)>,
     /// The row values a set created, giving an object its own.
     created_row_values: Vec<String>,
+    /// Each text, mtext or attribute value changed by `replace_text`.
+    replacements: Vec<TextReplaced>,
+    /// Each insert attribute changed by `set_attributes`.
+    attributes_set: Vec<AttributeUpdated>,
     message: String,
 }
 
@@ -553,6 +559,12 @@ fn objects_changed(
                     HowChanged::Changed,
                 );
             }
+        }
+        for r in &d.replacements {
+            add(r.id.clone(), HowChanged::Changed);
+        }
+        for a in &d.attributes_set {
+            add(a.id.clone(), HowChanged::Changed);
         }
         // Each copy is added, on every sheet it is on.
         for (copy, on) in d.copies.iter().zip(&d.copy_sheets) {
@@ -889,7 +901,10 @@ pub(super) fn apply(
                     |d| d.message.clone(),
                 ),
                 sheets: files.names(&op_sheets[i]),
-                record: d.as_ref().map(|d| d.record.display().to_string()),
+                record: d
+                    .as_ref()
+                    .filter(|d| !d.record.as_os_str().is_empty())
+                    .map(|d| d.record.display().to_string()),
                 id: d.as_ref().and_then(|d| d.id.clone()),
                 before: d.as_ref().and_then(|d| d.before.clone()),
                 after: d.as_ref().and_then(|d| d.after.clone()),
@@ -918,6 +933,16 @@ pub(super) fn apply(
                     .as_ref()
                     .filter(|_| included[i])
                     .map(|d| d.created_row_values.clone())
+                    .unwrap_or_default(),
+                replacements: d
+                    .as_ref()
+                    .filter(|_| included[i])
+                    .map(|d| d.replacements.clone())
+                    .unwrap_or_default(),
+                attributes_set: d
+                    .as_ref()
+                    .filter(|_| included[i])
+                    .map(|d| d.attributes_set.clone())
                     .unwrap_or_default(),
                 attributes_removed: d.map(|d| d.attributes_removed).unwrap_or_default(),
                 error: if included[i] {
@@ -1203,6 +1228,25 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::Transform { .. }
             | Body::AddRevisionCloud { .. }
             | Body::DrawOrder { .. } => continue,
+            Body::ReplaceText { sheets, .. } | Body::SetAttributes { sheets, .. } => {
+                if let Some(names) = sheets {
+                    for (i, sheet) in names.iter().enumerate() {
+                        if files.sheet(sheet).is_none() {
+                            return Err(op_error(
+                                op.index,
+                                op.spec.name,
+                                ErrorCode::UnknownName,
+                                format!(
+                                    "the set holds no sheet `{sheet}`; its sheets: {}",
+                                    files.sheet_names()
+                                ),
+                                &format!("sheets[{i}]"),
+                            ));
+                        }
+                    }
+                }
+                continue;
+            }
         };
         if files.sheet(sheet).is_none() {
             return Err(op_error(
@@ -1395,6 +1439,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 copy_sheets: Vec::new(),
                 transformed: Vec::new(),
                 created_row_values: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
                 message: format!(
                     "adds {} {object}, `{id}`, {place}{}",
                     article(object),
@@ -1433,6 +1479,51 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
 
     if let Body::TextToFront { to, which } = &op.body {
         return apply_text_to_front(at, op, to, *which);
+    }
+
+    if let Body::ReplaceText {
+        find,
+        replace,
+        matching,
+        case_sensitive,
+        sheets,
+        scopes,
+        tag,
+        block,
+    } = &op.body
+    {
+        return apply_replace_text(
+            at,
+            op,
+            find,
+            replace,
+            *matching,
+            *case_sensitive,
+            sheets.as_deref(),
+            scopes,
+            tag.as_deref(),
+            block.as_deref(),
+        );
+    }
+
+    if let Body::SetAttributes {
+        selection,
+        sheets,
+        tag,
+        occurrence,
+        value,
+    } = &op.body
+    {
+        return apply_set_attributes(
+            at,
+            op,
+            selection,
+            sheets.as_deref(),
+            tag,
+            *occurrence,
+            value,
+            settings,
+        );
     }
 
     if let Body::Table {
@@ -1515,6 +1606,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::AddRevisionCloud { .. }
         | Body::DrawOrder { .. }
         | Body::TextToFront { .. }
+        | Body::ReplaceText { .. }
+        | Body::SetAttributes { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -1731,6 +1824,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         copy_sheets: Vec::new(),
         transformed: Vec::new(),
         created_row_values: Vec::new(),
+        replacements: Vec::new(),
+        attributes_set: Vec::new(),
         snapped: Vec::new(),
         message: String::new(),
     };
@@ -1926,6 +2021,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::AddRevisionCloud { .. }
         | Body::DrawOrder { .. }
         | Body::TextToFront { .. }
+        | Body::ReplaceText { .. }
+        | Body::SetAttributes { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2754,6 +2851,8 @@ fn apply_table(
             copy_sheets: Vec::new(),
             transformed: Vec::new(),
             created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
             snapped: Vec::new(),
             message: format!("{message}, so on {}", every_sheet(&files.names(&sheets))),
         }),
@@ -2948,6 +3047,8 @@ fn apply_block(
             copy_sheets: Vec::new(),
             transformed: Vec::new(),
             created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
             snapped: Vec::new(),
             message: format!("{what}{removed}{on}"),
         }),
@@ -3121,6 +3222,8 @@ fn apply_import(
             copy_sheets: Vec::new(),
             transformed: Vec::new(),
             created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
             snapped: Vec::new(),
             message: format!(
                 "imports from `{}` into the block library `{written}`: {}{left_out}{on}",
@@ -3837,6 +3940,8 @@ fn apply_dimension_from(
             copy_sheets: Vec::new(),
             transformed: Vec::new(),
             created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
             message: format!(
                 "adds {what}, `{added}`, from `{}`, {place}{}",
                 found.id,
@@ -4199,6 +4304,8 @@ fn apply_transform(
             copy_sheets: Vec::new(),
             transformed,
             created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
             message,
         }),
         sheets: reach,
@@ -4748,6 +4855,8 @@ fn apply_copy(
             copy_sheets,
             transformed: Vec::new(),
             created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
             message,
         }),
         sheets: reach,
@@ -5038,6 +5147,8 @@ fn apply_draw_order(
             copy_sheets: Vec::new(),
             transformed,
             created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
             snapped: Vec::new(),
             message: format!(
                 "moves {} {} in draw order",
@@ -5141,6 +5252,8 @@ fn apply_text_to_front(
             copy_sheets: Vec::new(),
             transformed,
             created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
             snapped: Vec::new(),
             message: format!(
                 "brings {moved_count} {} object{} to the front {place}",
@@ -5149,6 +5262,1014 @@ fn apply_text_to_front(
             ),
         }),
         sheets,
+        refuse: false,
+    }
+}
+
+/// Resolves the target sheet indices for a batch operation (`sheets == None`
+/// means every sheet of the drawing set).
+fn batch_target_sheets(files: &SetFiles, sheets: Option<&[String]>) -> Vec<usize> {
+    match sheets {
+        None => (0..files.rows.len()).collect(),
+        Some(names) => {
+            let mut set = BTreeSet::new();
+            for name in names {
+                if let Some(k) = files.sheet(name) {
+                    set.insert(k);
+                }
+            }
+            set.into_iter().collect()
+        }
+    }
+}
+
+/// Checks whether the object at `(file, list, list_idx)` on sheet `k` sits on
+/// a locked layer.
+fn batch_object_locked_layer(
+    at: &mut Attempt,
+    files: &SetFiles,
+    k: usize,
+    file: FileRef,
+    list: ObjectList,
+    list_idx: usize,
+) -> Option<String> {
+    let layer = at
+        .file(file)
+        .ok()
+        .and_then(|r| r.object_value(list, list_idx, "layer"))
+        .unwrap_or_else(|| "0".to_owned());
+    let t = files.template_of[k];
+    let locked = at
+        .template(t)
+        .ok()
+        .and_then(|tmpl| tmpl.table_value(Table::Layer.key(), &layer, "locked"))
+        .as_deref()
+        == Some("true");
+    locked.then_some(layer)
+}
+
+/// Refuses a literal edit to an object in shared template `t` when `target_set`
+/// names only a strict subset of the sheets built from `t`.
+fn check_shared_template_scope(
+    files: &SetFiles,
+    t: usize,
+    target_set: &BTreeSet<usize>,
+    obj_id: &str,
+    op: &Operation,
+) -> Option<Error> {
+    let missing: Vec<&str> = files.templates[t]
+        .sheets
+        .iter()
+        .filter(|s| !target_set.contains(s))
+        .map(|&s| files.name(s))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    Some(op_error(
+        op.index,
+        op.spec.name,
+        ErrorCode::BadValue,
+        format!(
+            "`{obj_id}` is written literally in shared template `{}`, which also builds {}; \
+             include those sheets under `sheets` or omit `sheets` to edit it across the template",
+            files.templates[t].written,
+            quoted_list(&missing)
+        ),
+        "sheets",
+    ))
+}
+
+/// Applies a row-value update derived from `binding` (`{row: NAME}` or list of
+/// parts) on sheet `k`, skipping writes for any `(k, row_value)` already
+/// updated earlier in the same batch operation so shared row values are never
+/// double-replaced. Returns the first row-value name updated (for reporting).
+#[allow(clippy::too_many_arguments)]
+fn apply_batch_from_row(
+    at: &mut Attempt,
+    op: &Operation,
+    k: usize,
+    binding: &FromRow,
+    new_text: &str,
+    is_mtext: bool,
+    obj_id: &str,
+    set_what: &str,
+    text_field: &str,
+    edited_row_values: &mut BTreeSet<(usize, String)>,
+    row_value_override: Option<&str>,
+) -> Result<Option<String>, Error> {
+    let files = at.files;
+    let op_err =
+        |code, message, field: &str| op_error(op.index, op.spec.name, code, message, field);
+    let sets: Vec<(String, String)> = match (binding, row_value_override) {
+        (FromRow::Whole(name), None) => vec![(name.clone(), new_text.to_owned())],
+        (FromRow::Whole(name), Some(asked)) if asked == name => {
+            vec![(name.clone(), new_text.to_owned())]
+        }
+        (FromRow::Whole(name), Some(asked)) => {
+            return Err(op_err(
+                ErrorCode::BadValue,
+                format!(
+                    "row_value names `{asked}`, but the template takes {set_what} whole from the \
+                     row's value {name}; name {name}, or leave row_value out"
+                ),
+                ROW_VALUE_KEY,
+            ));
+        }
+        (FromRow::Parts(held), Some(asked)) => {
+            let names = parts::names(held);
+            if !names.iter().any(|n| n == asked) {
+                return Err(op_err(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "row_value names `{asked}`, which is not one of the row values of the \
+                         parts {} the template joins {set_what} from; they are {}",
+                        parts::pattern(held),
+                        names.join(", ")
+                    ),
+                    ROW_VALUE_KEY,
+                ));
+            }
+            vec![(asked.to_owned(), new_text.to_owned())]
+        }
+        (FromRow::Parts(held), None) => {
+            let pattern = parts::pattern(held);
+            let split = if is_mtext {
+                parts::split(&parts::shown_mtext_parts(held), &shown_mtext(new_text))
+            } else {
+                parts::split(held, new_text)
+            };
+            let mut values = match split {
+                Ok(v) => v,
+                Err(Unsplit::Differs) => {
+                    return Err(op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{new_text}` does not match the parts {pattern} the template joins \
+                             {set_what} from: its fixed text differs"
+                        ),
+                        text_field,
+                    ));
+                }
+                Err(Unsplit::Ambiguous(first, second)) => {
+                    let each = |vals: &[(String, String)]| {
+                        vals.iter()
+                            .map(|(n, v)| format!("{n} `{v}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    return Err(op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{new_text}` splits more than one way into the parts {pattern} the \
+                             template joins {set_what} from, such as {} or {}",
+                            each(&first),
+                            each(&second)
+                        ),
+                        text_field,
+                    ));
+                }
+                Err(Unsplit::Unclear) => {
+                    return Err(op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{new_text}` cannot be split uniquely into the parts {pattern} the \
+                             template joins {set_what} from"
+                        ),
+                        text_field,
+                    ));
+                }
+            };
+            // Drop parts whose value did not change compared to the current row.
+            let row = files.rows[k].index;
+            let (rows, _) = at.row_record(k);
+            let joined: String = held
+                .iter()
+                .map(|part| match part {
+                    parts::Part::Text(text) => text.clone(),
+                    parts::Part::Row(name) => rows.row_value(row, name).unwrap_or_default(),
+                })
+                .collect();
+            let now = if is_mtext {
+                parts::split(&parts::shown_mtext_parts(held), &shown_mtext(&joined))
+            } else {
+                parts::split(held, &joined)
+            };
+            if let Ok(now) = now {
+                values.retain(|(name, value)| {
+                    now.iter().find(|(n, _)| n == name).map(|(_, v)| v) != Some(value)
+                });
+            }
+            values
+        }
+    };
+    let t = files.template_of[k];
+    let counts = carried_by_blocks(at, t);
+    let carries = |block: &str, tag: &str| {
+        counts
+            .iter()
+            .find(|(b, _)| b == block)
+            .map(|(_, tags)| tags.iter().filter(|t| *t == tag).count())
+    };
+    // Verify no place filled by any updated row value sits on a locked layer.
+    if let Ok(template) = at.template(t) {
+        let listed = template.objects(ObjectList::Template);
+        for (name, _) in &sets {
+            for (i, _) in template.row_value_places(name, &carries) {
+                let layer = template
+                    .object_value(ObjectList::Template, i, "layer")
+                    .unwrap_or_else(|| "0".to_owned());
+                if template
+                    .table_value(Table::Layer.key(), &layer, "locked")
+                    .as_deref()
+                    == Some("true")
+                {
+                    let filled = format!("{}{ID_SEPARATOR}{}", files.name(k), listed[i].id);
+                    return Err(op_err(
+                        ErrorCode::Locked,
+                        format!(
+                            "`{filled}` is on layer `{layer}`, which is locked; unlock it first \
+                             with change_layer, set: {{\"locked\": false}}"
+                        ),
+                        text_field,
+                    ));
+                }
+            }
+        }
+    }
+    let first_name = sets.first().map(|(n, _)| n.clone());
+    for (name, value) in sets {
+        if !edited_row_values.insert((k, name.clone())) {
+            continue;
+        }
+        let row = files.rows[k].index;
+        let (record, _) = at.row_record(k);
+        record
+            .set_row_value(row, &name, &value)
+            .map_err(|e| op_err(e.code, format!("{obj_id}: {}", e.message), text_field))?;
+        at.values.retain(|(r, n, _)| !(*r == k && *n == name));
+        at.values.push((k, name, op.index));
+    }
+    Ok(first_name)
+}
+
+type BatchSnapshot = (
+    usize,
+    SheetRecord,
+    Vec<(FileRef, ObjectList, usize, Listed)>,
+);
+type TemplatePlaceKey = (usize, usize, Option<(String, Option<usize>)>);
+
+/// Finds and replaces text across texts, mtexts and insert attributes on the
+/// targeted sheets (`replace_text` / AutoCAD `FIND`).
+#[allow(clippy::too_many_arguments)]
+fn apply_replace_text(
+    at: &mut Attempt,
+    op: &Operation,
+    find: &str,
+    replace: &str,
+    matching: TextMatchKind,
+    case_sensitive: bool,
+    sheets: Option<&[String]>,
+    scopes: &[TextScope],
+    tag_filter: Option<&str>,
+    block_filter: Option<&str>,
+) -> Applied {
+    let files = at.files;
+    let op_err =
+        |code, message, field: &str| op_error(op.index, op.spec.name, code, message, field);
+    let fail = |sheets: Vec<usize>, error: Error| Applied {
+        sheets,
+        outcome: Err(error),
+        refuse: false,
+    };
+    let matcher = match TextMatcher::compile(find, matching, case_sensitive) {
+        Ok(m) => m,
+        Err(e) => {
+            return Applied {
+                sheets: Vec::new(),
+                outcome: Err(op_err(e.code, e.message, "find")),
+                refuse: true,
+            };
+        }
+    };
+    let target_sheets = batch_target_sheets(files, sheets);
+    let target_set: BTreeSet<usize> = target_sheets.iter().copied().collect();
+    let rows_now = match at.rows_now() {
+        Ok(r) => r,
+        Err(e) => return fail(target_sheets, e),
+    };
+    // Snapshot every targeted sheet before mutating so shared row values and
+    // shared template literals are read consistently and never double-replaced.
+    let mut snapshots: Vec<BatchSnapshot> = Vec::with_capacity(target_sheets.len());
+    for &k in &target_sheets {
+        let record = match sheet_record(at, &rows_now, k, &mut Vec::new()) {
+            Ok(r) => r,
+            Err(e) => return fail(vec![k], e),
+        };
+        let objects = match at.objects(k) {
+            Ok(o) => o,
+            Err(e) => return fail(vec![k], e),
+        };
+        snapshots.push((k, record, objects));
+    }
+
+    let mut edited_template_places: BTreeSet<TemplatePlaceKey> = BTreeSet::new();
+    let mut edited_row_values: BTreeSet<(usize, String)> = BTreeSet::new();
+    let mut replacements: Vec<TextReplaced> = Vec::new();
+    let mut touched_sheets: BTreeSet<usize> = BTreeSet::new();
+    let mut first_record: Option<PathBuf> = None;
+
+    for (k, record, objects_k) in snapshots {
+        let sheet_name = files.name(k).to_owned();
+        let t = files.template_of[k];
+        let mut sheet_touched = false;
+
+        for (obj_idx, object) in record.sheet.objects.iter().enumerate() {
+            let Some(&(file, list, list_idx, ref listed)) = objects_k.get(obj_idx) else {
+                continue;
+            };
+            let obj_id = format!("{sheet_name}{ID_SEPARATOR}{}", listed.id);
+            match object {
+                Object::Text(text) if scopes.contains(&TextScope::Text) => {
+                    let Some((after, count)) = matcher.replace(&text.contents, replace) else {
+                        continue;
+                    };
+                    let binding = at
+                        .file(file)
+                        .ok()
+                        .and_then(|r| r.text_binding(list, list_idx, None));
+                    let row_val = if let Some(binding) = binding {
+                        match apply_batch_from_row(
+                            at,
+                            op,
+                            k,
+                            &binding,
+                            &after,
+                            false,
+                            &obj_id,
+                            &format!("the contents of `{obj_id}`"),
+                            "replace",
+                            &mut edited_row_values,
+                            None,
+                        ) {
+                            Ok(rv) => {
+                                first_record.get_or_insert_with(|| {
+                                    files.rows_files[files.rows[k].file_index].path.clone()
+                                });
+                                rv
+                            }
+                            Err(e) => return fail(vec![k], e),
+                        }
+                    } else {
+                        if let Some(layer) =
+                            batch_object_locked_layer(at, files, k, file, list, list_idx)
+                        {
+                            let reach = at.reach(file, k);
+                            return fail(
+                                reach,
+                                op_err(
+                                    ErrorCode::Locked,
+                                    format!(
+                                        "`{obj_id}` is on layer `{layer}`, which is locked; \
+                                         unlock it first with change_layer, set: {{\"locked\": false}}"
+                                    ),
+                                    "find",
+                                ),
+                            );
+                        }
+                        if let FileRef::Template(t_idx) = file {
+                            if let Some(e) =
+                                check_shared_template_scope(files, t_idx, &target_set, &obj_id, op)
+                            {
+                                return fail(vec![k], e);
+                            }
+                            if let Some(refusal) = many_paths(files, file, op, "sheets") {
+                                return refusal;
+                            }
+                            if edited_template_places.insert((t_idx, list_idx, None)) {
+                                let mut set = serde_json::Map::new();
+                                set.insert("contents".to_owned(), Value::String(after.clone()));
+                                if let Err(e) = at.file(file).and_then(|r| {
+                                    r.change(list, list_idx, &set, files.units, op.index)
+                                }) {
+                                    return fail(
+                                        at.reach(file, k),
+                                        op_err(e.code, e.message, "replace"),
+                                    );
+                                }
+                                first_record
+                                    .get_or_insert_with(|| files.templates[t_idx].path.clone());
+                            }
+                        } else if let FileRef::Rows(f_idx) = file {
+                            let mut set = serde_json::Map::new();
+                            set.insert("contents".to_owned(), Value::String(after.clone()));
+                            if let Err(e) = at
+                                .file(file)
+                                .and_then(|r| r.change(list, list_idx, &set, files.units, op.index))
+                            {
+                                return fail(vec![k], op_err(e.code, e.message, "replace"));
+                            }
+                            first_record
+                                .get_or_insert_with(|| files.rows_files[f_idx].path.clone());
+                        }
+                        None
+                    };
+                    replacements.push(TextReplaced {
+                        sheet: sheet_name.clone(),
+                        id: obj_id,
+                        kind: "text".to_owned(),
+                        tag: None,
+                        occurrence: None,
+                        before: text.contents.clone(),
+                        after,
+                        count,
+                        row_value: row_val,
+                    });
+                    sheet_touched = true;
+                }
+                Object::MText(mtext) if scopes.contains(&TextScope::MText) => {
+                    let Some((after, count)) = matcher.replace(&mtext.contents, replace) else {
+                        continue;
+                    };
+                    let binding = at
+                        .file(file)
+                        .ok()
+                        .and_then(|r| r.text_binding(list, list_idx, None));
+                    let row_val = if let Some(binding) = binding {
+                        match apply_batch_from_row(
+                            at,
+                            op,
+                            k,
+                            &binding,
+                            &after,
+                            true,
+                            &obj_id,
+                            &format!("the contents of `{obj_id}`"),
+                            "replace",
+                            &mut edited_row_values,
+                            None,
+                        ) {
+                            Ok(rv) => {
+                                first_record.get_or_insert_with(|| {
+                                    files.rows_files[files.rows[k].file_index].path.clone()
+                                });
+                                rv
+                            }
+                            Err(e) => return fail(vec![k], e),
+                        }
+                    } else {
+                        if let Some(layer) =
+                            batch_object_locked_layer(at, files, k, file, list, list_idx)
+                        {
+                            let reach = at.reach(file, k);
+                            return fail(
+                                reach,
+                                op_err(
+                                    ErrorCode::Locked,
+                                    format!(
+                                        "`{obj_id}` is on layer `{layer}`, which is locked; \
+                                         unlock it first with change_layer, set: {{\"locked\": false}}"
+                                    ),
+                                    "find",
+                                ),
+                            );
+                        }
+                        if let FileRef::Template(t_idx) = file {
+                            if let Some(e) =
+                                check_shared_template_scope(files, t_idx, &target_set, &obj_id, op)
+                            {
+                                return fail(vec![k], e);
+                            }
+                            if let Some(refusal) = many_paths(files, file, op, "sheets") {
+                                return refusal;
+                            }
+                            if edited_template_places.insert((t_idx, list_idx, None)) {
+                                let mut set = serde_json::Map::new();
+                                set.insert("contents".to_owned(), Value::String(after.clone()));
+                                if let Err(e) = at.file(file).and_then(|r| {
+                                    r.change(list, list_idx, &set, files.units, op.index)
+                                }) {
+                                    return fail(
+                                        at.reach(file, k),
+                                        op_err(e.code, e.message, "replace"),
+                                    );
+                                }
+                                first_record
+                                    .get_or_insert_with(|| files.templates[t_idx].path.clone());
+                            }
+                        } else if let FileRef::Rows(f_idx) = file {
+                            let mut set = serde_json::Map::new();
+                            set.insert("contents".to_owned(), Value::String(after.clone()));
+                            if let Err(e) = at
+                                .file(file)
+                                .and_then(|r| r.change(list, list_idx, &set, files.units, op.index))
+                            {
+                                return fail(vec![k], op_err(e.code, e.message, "replace"));
+                            }
+                            first_record
+                                .get_or_insert_with(|| files.rows_files[f_idx].path.clone());
+                        }
+                        None
+                    };
+                    replacements.push(TextReplaced {
+                        sheet: sheet_name.clone(),
+                        id: obj_id,
+                        kind: "mtext".to_owned(),
+                        tag: None,
+                        occurrence: None,
+                        before: mtext.contents.clone(),
+                        after,
+                        count,
+                        row_value: row_val,
+                    });
+                    sheet_touched = true;
+                }
+                Object::Insert(insert) if scopes.contains(&TextScope::Attribute) => {
+                    if let Some(block) = block_filter {
+                        if !insert.block.eq_ignore_ascii_case(block) {
+                            continue;
+                        }
+                    }
+                    let mut tag_totals: BTreeMap<String, usize> = BTreeMap::new();
+                    for attr in &insert.attributes {
+                        *tag_totals.entry(tag_in_capitals(&attr.tag)).or_default() += 1;
+                    }
+                    let mut tag_seen: BTreeMap<String, usize> = BTreeMap::new();
+                    for attr in &insert.attributes {
+                        let cap_tag = tag_in_capitals(&attr.tag);
+                        let occ_0 = {
+                            let entry = tag_seen.entry(cap_tag.clone()).or_default();
+                            let current = *entry;
+                            *entry += 1;
+                            current
+                        };
+                        let repeated = tag_totals.get(&cap_tag).copied().unwrap_or(0) > 1;
+                        let slot = repeated.then_some(occ_0);
+                        let occ_1 = repeated.then_some(occ_0 + 1);
+                        if let Some(wanted_tag) = tag_filter {
+                            if !cap_tag.eq_ignore_ascii_case(wanted_tag) {
+                                continue;
+                            }
+                        }
+                        let Some((after, count)) = matcher.replace(&attr.value, replace) else {
+                            continue;
+                        };
+                        let binding = at
+                            .file(file)
+                            .ok()
+                            .and_then(|r| r.text_binding(list, list_idx, Some((&cap_tag, slot))));
+                        let row_val = if let Some(binding) = binding {
+                            match apply_batch_from_row(
+                                at,
+                                op,
+                                k,
+                                &binding,
+                                &after,
+                                false,
+                                &obj_id,
+                                &format!("attribute `{cap_tag}` of `{obj_id}`"),
+                                "replace",
+                                &mut edited_row_values,
+                                None,
+                            ) {
+                                Ok(rv) => {
+                                    first_record.get_or_insert_with(|| {
+                                        files.rows_files[files.rows[k].file_index].path.clone()
+                                    });
+                                    rv
+                                }
+                                Err(e) => return fail(vec![k], e),
+                            }
+                        } else {
+                            if let Some(layer) =
+                                batch_object_locked_layer(at, files, k, file, list, list_idx)
+                            {
+                                let reach = at.reach(file, k);
+                                return fail(
+                                    reach,
+                                    op_err(
+                                        ErrorCode::Locked,
+                                        format!(
+                                            "`{obj_id}` is on layer `{layer}`, which is locked; \
+                                             unlock it first with change_layer, set: {{\"locked\": false}}"
+                                        ),
+                                        "find",
+                                    ),
+                                );
+                            }
+                            if let FileRef::Template(t_idx) = file {
+                                if let Some(e) = check_shared_template_scope(
+                                    files,
+                                    t_idx,
+                                    &target_set,
+                                    &obj_id,
+                                    op,
+                                ) {
+                                    return fail(vec![k], e);
+                                }
+                                if let Some(refusal) = many_paths(files, file, op, "sheets") {
+                                    return refusal;
+                                }
+                                if edited_template_places.insert((
+                                    t_idx,
+                                    list_idx,
+                                    Some((cap_tag.clone(), slot)),
+                                )) {
+                                    if let Err(e) = at.file(file).and_then(|r| {
+                                        r.set_attribute(
+                                            list, list_idx, &cap_tag, slot, &after, op.index,
+                                        )
+                                    }) {
+                                        return fail(
+                                            at.reach(file, k),
+                                            op_err(e.code, e.message, "replace"),
+                                        );
+                                    }
+                                    first_record
+                                        .get_or_insert_with(|| files.templates[t_idx].path.clone());
+                                }
+                            } else if let FileRef::Rows(f_idx) = file {
+                                if let Err(e) = at.file(file).and_then(|r| {
+                                    r.set_attribute(
+                                        list, list_idx, &cap_tag, slot, &after, op.index,
+                                    )
+                                }) {
+                                    return fail(vec![k], op_err(e.code, e.message, "replace"));
+                                }
+                                first_record
+                                    .get_or_insert_with(|| files.rows_files[f_idx].path.clone());
+                            }
+                            None
+                        };
+                        replacements.push(TextReplaced {
+                            sheet: sheet_name.clone(),
+                            id: obj_id.clone(),
+                            kind: "attribute".to_owned(),
+                            tag: Some(cap_tag),
+                            occurrence: occ_1,
+                            before: attr.value.clone(),
+                            after,
+                            count,
+                            row_value: row_val,
+                        });
+                        sheet_touched = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let _ = t;
+        if sheet_touched {
+            touched_sheets.insert(k);
+        }
+    }
+
+    let sheets_out: Vec<usize> = touched_sheets.into_iter().collect();
+    let total_matches: usize = replacements.iter().map(|r| r.count).sum();
+    let message = if replacements.is_empty() {
+        format!("found no {} matches for `{find}`", matching.name())
+    } else {
+        format!(
+            "replaces {total_matches} match{} of `{find}` with `{replace}` in {} place{} across {} sheet{}",
+            if total_matches == 1 { "" } else { "es" },
+            replacements.len(),
+            if replacements.len() == 1 { "" } else { "s" },
+            sheets_out.len(),
+            if sheets_out.len() == 1 { "" } else { "s" },
+        )
+    };
+    Applied {
+        outcome: Ok(Done {
+            record: first_record.unwrap_or_default(),
+            id: None,
+            before: None,
+            after: None,
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements,
+            attributes_set: Vec::new(),
+            snapped: Vec::new(),
+            message,
+        }),
+        sheets: sheets_out,
+        refuse: false,
+    }
+}
+
+/// Sets an attribute on every insert matching `selection` across the targeted
+/// sheets (`set_attributes` / AutoCAD `GATTE`).
+#[allow(clippy::too_many_arguments)]
+fn apply_set_attributes(
+    at: &mut Attempt,
+    op: &Operation,
+    selection: &crate::query::Selection,
+    sheets: Option<&[String]>,
+    tag: &str,
+    occurrence: Option<usize>,
+    value: &str,
+    settings: &Settings,
+) -> Applied {
+    let files = at.files;
+    let op_err =
+        |code, message, field: &str| op_error(op.index, op.spec.name, code, message, field);
+    let fail = |sheets: Vec<usize>, error: Error| Applied {
+        sheets,
+        outcome: Err(error),
+        refuse: false,
+    };
+    let cap_tag = tag_in_capitals(tag);
+    let target_sheets = batch_target_sheets(files, sheets);
+    let target_set: BTreeSet<usize> = target_sheets.iter().copied().collect();
+    let rows_now = match at.rows_now() {
+        Ok(r) => r,
+        Err(e) => return fail(target_sheets, e),
+    };
+    let mut snapshots: Vec<BatchSnapshot> = Vec::with_capacity(target_sheets.len());
+    for &k in &target_sheets {
+        let record = match sheet_record(at, &rows_now, k, &mut Vec::new()) {
+            Ok(r) => r,
+            Err(e) => return fail(vec![k], e),
+        };
+        let objects = match at.objects(k) {
+            Ok(o) => o,
+            Err(e) => return fail(vec![k], e),
+        };
+        snapshots.push((k, record, objects));
+    }
+
+    let mut edited_template_places: BTreeSet<(usize, usize, String, Option<usize>)> =
+        BTreeSet::new();
+    let mut edited_row_values: BTreeSet<(usize, String)> = BTreeSet::new();
+    let mut attributes_set: Vec<AttributeUpdated> = Vec::new();
+    let mut touched_sheets: BTreeSet<usize> = BTreeSet::new();
+    let mut first_record: Option<PathBuf> = None;
+
+    for (k, record, objects_k) in snapshots {
+        let sheet_name = files.name(k).to_owned();
+        let selected = match crate::query::select_on_sheet(selection, &record, settings) {
+            Ok(s) => s,
+            Err(e) => return fail(vec![k], op_err(e.code, e.message, "where")),
+        };
+        let mut sheet_touched = false;
+        for obj_idx in selected {
+            let Object::Insert(insert) = &record.sheet.objects[obj_idx] else {
+                continue;
+            };
+            let Some(&(file, list, list_idx, ref listed)) = objects_k.get(obj_idx) else {
+                continue;
+            };
+            let obj_id = format!("{sheet_name}{ID_SEPARATOR}{}", listed.id);
+            let editable_values: Vec<&str> = insert
+                .attributes
+                .iter()
+                .filter(|a| tag_in_capitals(&a.tag) == cap_tag)
+                .map(|a| a.value.as_str())
+                .collect();
+            let has_constant = record.sheet.block_for_insert(insert).is_some_and(|b| {
+                b.objects.iter().any(|o| match o {
+                    Object::AttributeDefinition(d) => {
+                        d.constant && tag_in_capitals(&d.tag) == cap_tag
+                    }
+                    _ => false,
+                })
+            });
+            let (slot, occ_1, before) = match (editable_values.len(), occurrence) {
+                (0, _) => {
+                    if has_constant {
+                        return fail(
+                            vec![k],
+                            op_err(
+                                ErrorCode::BadValue,
+                                format!(
+                                    "attribute `{cap_tag}` on `{obj_id}` (block `{}`) is constant \
+                                     and cannot be set",
+                                    insert.block
+                                ),
+                                "tag",
+                            ),
+                        );
+                    }
+                    let available: Vec<String> = insert
+                        .attributes
+                        .iter()
+                        .map(|a| tag_in_capitals(&a.tag))
+                        .collect();
+                    let msg = if available.is_empty() {
+                        format!(
+                            "`{obj_id}` (block `{}`) has no editable attributes; cannot set `{cap_tag}`",
+                            insert.block
+                        )
+                    } else {
+                        format!(
+                            "`{obj_id}` (block `{}`) has no attribute `{cap_tag}`; its attributes: {}",
+                            insert.block,
+                            available.join(", ")
+                        )
+                    };
+                    return fail(vec![k], op_err(ErrorCode::UnknownName, msg, "tag"));
+                }
+                (1, None | Some(1)) => (None, None, editable_values[0].to_owned()),
+                (1, Some(o)) => {
+                    return fail(
+                        vec![k],
+                        op_err(
+                            ErrorCode::BadValue,
+                            format!(
+                                "block `{}` defines `{cap_tag}` once, so occurrence is 1 or left \
+                                 out, not {o}",
+                                insert.block
+                            ),
+                            "occurrence",
+                        ),
+                    );
+                }
+                (n, None) => {
+                    return fail(
+                        vec![k],
+                        op_err(
+                            ErrorCode::MissingKey,
+                            format!(
+                                "block `{}` defines `{cap_tag}` {n} times on `{obj_id}`; give \
+                                 `occurrence` (1 to {n})",
+                                insert.block
+                            ),
+                            "occurrence",
+                        ),
+                    );
+                }
+                (n, Some(o)) if o > n => {
+                    return fail(
+                        vec![k],
+                        op_err(
+                            ErrorCode::BadValue,
+                            format!(
+                                "block `{}` defines `{cap_tag}` {n} times on `{obj_id}`, so \
+                                 occurrence is 1 to {n}, not {o}",
+                                insert.block
+                            ),
+                            "occurrence",
+                        ),
+                    );
+                }
+                (_, Some(o)) => (Some(o - 1), Some(o), editable_values[o - 1].to_owned()),
+            };
+
+            let binding = at
+                .file(file)
+                .ok()
+                .and_then(|r| r.text_binding(list, list_idx, Some((&cap_tag, slot))));
+            if let (Some(asked), None) = (&op.row_value, &binding) {
+                return fail(
+                    vec![k],
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "row_value names `{asked}`, but `{obj_id}` does not take `{cap_tag}` \
+                             from the row"
+                        ),
+                        ROW_VALUE_KEY,
+                    ),
+                );
+            }
+            let (after_shown, row_val) = if let Some(binding) = binding {
+                let rv = match apply_batch_from_row(
+                    at,
+                    op,
+                    k,
+                    &binding,
+                    value,
+                    false,
+                    &obj_id,
+                    &format!("attribute `{cap_tag}` of `{obj_id}`"),
+                    "value",
+                    &mut edited_row_values,
+                    op.row_value.as_deref(),
+                ) {
+                    Ok(rv) => rv,
+                    Err(e) => return fail(vec![k], e),
+                };
+                first_record
+                    .get_or_insert_with(|| files.rows_files[files.rows[k].file_index].path.clone());
+                let after = match (&binding, op.row_value.as_deref()) {
+                    (FromRow::Parts(held), Some(_)) => {
+                        let row = files.rows[k].index;
+                        let (rows, _) = at.row_record(k);
+                        held.iter()
+                            .map(|p| match p {
+                                parts::Part::Text(t) => t.clone(),
+                                parts::Part::Row(n) => rows.row_value(row, n).unwrap_or_default(),
+                            })
+                            .collect()
+                    }
+                    _ => value.to_owned(),
+                };
+                (after, rv)
+            } else {
+                if let Some(layer) = batch_object_locked_layer(at, files, k, file, list, list_idx) {
+                    let reach = at.reach(file, k);
+                    return fail(
+                        reach,
+                        op_err(
+                            ErrorCode::Locked,
+                            format!(
+                                "`{obj_id}` is on layer `{layer}`, which is locked; unlock it \
+                                 first with change_layer, set: {{\"locked\": false}}"
+                            ),
+                            "where",
+                        ),
+                    );
+                }
+                if let FileRef::Template(t_idx) = file {
+                    if let Some(e) =
+                        check_shared_template_scope(files, t_idx, &target_set, &obj_id, op)
+                    {
+                        return fail(vec![k], e);
+                    }
+                    if let Some(refusal) = many_paths(files, file, op, "sheets") {
+                        return refusal;
+                    }
+                    if edited_template_places.insert((t_idx, list_idx, cap_tag.clone(), slot)) {
+                        if let Err(e) = at.file(file).and_then(|r| {
+                            r.set_attribute(list, list_idx, &cap_tag, slot, value, op.index)
+                        }) {
+                            return fail(at.reach(file, k), op_err(e.code, e.message, "value"));
+                        }
+                        first_record.get_or_insert_with(|| files.templates[t_idx].path.clone());
+                    }
+                } else if let FileRef::Rows(f_idx) = file {
+                    if let Err(e) = at.file(file).and_then(|r| {
+                        r.set_attribute(list, list_idx, &cap_tag, slot, value, op.index)
+                    }) {
+                        return fail(vec![k], op_err(e.code, e.message, "value"));
+                    }
+                    first_record.get_or_insert_with(|| files.rows_files[f_idx].path.clone());
+                }
+                (value.to_owned(), None)
+            };
+
+            attributes_set.push(AttributeUpdated {
+                sheet: sheet_name.clone(),
+                id: obj_id,
+                block: insert.block.clone(),
+                tag: cap_tag.clone(),
+                occurrence: occ_1,
+                before,
+                after: after_shown,
+                row_value: row_val,
+            });
+            sheet_touched = true;
+        }
+        if sheet_touched {
+            touched_sheets.insert(k);
+        }
+    }
+
+    let sheets_out: Vec<usize> = touched_sheets.into_iter().collect();
+    let message = if attributes_set.is_empty() {
+        format!(
+            "no insert matches {} on the targeted sheets",
+            crate::query::selection_words(selection)
+        )
+    } else {
+        format!(
+            "sets `{cap_tag}` to `{value}` on {} insert{} across {} sheet{}",
+            attributes_set.len(),
+            if attributes_set.len() == 1 { "" } else { "s" },
+            sheets_out.len(),
+            if sheets_out.len() == 1 { "" } else { "s" },
+        )
+    };
+    Applied {
+        outcome: Ok(Done {
+            record: first_record.unwrap_or_default(),
+            id: None,
+            before: None,
+            after: None,
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set,
+            snapped: Vec::new(),
+            message,
+        }),
+        sheets: sheets_out,
         refuse: false,
     }
 }
@@ -5451,6 +6572,8 @@ fn apply_revision_cloud_around(
             copy_sheets: Vec::new(),
             transformed: Vec::new(),
             created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
             message: format!(
                 "adds a revision_cloud, `{id}`, around {}, {place}",
                 quoted_list(&around_ids)
@@ -6338,6 +7461,10 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         Body::Block { library, .. } => {
             files.library(library.as_deref()).ok() == files.library_of[files.template_of[k]]
         }
+        Body::ReplaceText { sheets, .. } | Body::SetAttributes { sheets, .. } => match sheets {
+            None => true,
+            Some(names) => names.iter().any(|s| files.sheet(s) == Some(k)),
+        },
     }
 }
 
@@ -6467,6 +7594,14 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
                 rest.to_owned()
             } else {
                 "state".to_owned()
+            }
+        }
+        Body::ReplaceText { .. } => "replace".to_owned(),
+        Body::SetAttributes { .. } => {
+            if code == ErrorCode::UnknownName {
+                "tag".to_owned()
+            } else {
+                "value".to_owned()
             }
         }
     }
@@ -6661,6 +7796,8 @@ fn target_words(op: &Operation) -> String {
             to: Some(AddTo::Sheet(s)),
             ..
         } => format!("to sheet `{s}`"),
+        Body::ReplaceText { find, .. } => format!("`{find}`"),
+        Body::SetAttributes { tag, .. } => format!("`{tag}` on matching inserts"),
         Body::Add {
             to: AddTo::Template(t),
             ..

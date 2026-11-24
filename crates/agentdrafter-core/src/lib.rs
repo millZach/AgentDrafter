@@ -112,8 +112,9 @@ pub use change::{
 };
 pub use change::{
     change, change_set_schema, change_with, operation_name, operations, AttributeRemoved,
-    ChangeReport, ChangeRequest, Copied, Failure, Fill, Inconsistent, OperationInfo, OperationList,
-    OperationOutcome, RowValueSet, SheetChange, SnapResolved, MARK_FILE,
+    AttributeUpdated, ChangeReport, ChangeRequest, Copied, Failure, Fill, Inconsistent,
+    OperationInfo, OperationList, OperationOutcome, RowValueSet, SheetChange, SnapResolved,
+    TextReplaced, MARK_FILE,
 };
 pub use change::{
     discard, keep_with, proposals, propose_with, DiscardReport, DiscardRequest, KeepReport,

@@ -26,7 +26,10 @@ use crate::change::operations::{
     Operation, Pattern, Table, TableOp, Target, TransformBy,
 };
 use crate::change::original_journal::OriginalJournal;
-use crate::change::{HowChanged, ObjectChanged, OriginalRevisionMeta, SnapResolved};
+use crate::change::replace::{TextMatcher, TextScope};
+use crate::change::{
+    AttributeUpdated, HowChanged, ObjectChanged, OriginalRevisionMeta, SnapResolved, TextReplaced,
+};
 use crate::check::{check_dwg_bytes, CheckReport};
 use crate::description::{
     parse_added_object_json, parse_layer_patch_json, parse_length_json, parse_new_layer_json,
@@ -116,6 +119,10 @@ pub struct RevisionOperationOutcome {
     pub copies: Vec<RevisionCopy>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub snapped: Vec<SnapResolved>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub replacements: Vec<TextReplaced>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attributes_set: Vec<AttributeUpdated>,
 }
 
 /// The active working revision a chained revision was built on top of.
@@ -1658,6 +1665,8 @@ fn apply_revision_op(
                 handles_deleted: handles.deleted,
                 copies: Vec::new(),
                 snapped,
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         Body::AddRevisionCloud {
@@ -1891,6 +1900,8 @@ fn apply_revision_op(
                 handles_deleted: handles.deleted,
                 copies: Vec::new(),
                 snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         Body::DrawOrder { targets, order } => {
@@ -1985,6 +1996,8 @@ fn apply_revision_op(
                 handles_deleted: Vec::new(),
                 copies: Vec::new(),
                 snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         Body::TextToFront { to, which } => {
@@ -2031,6 +2044,8 @@ fn apply_revision_op(
                 handles_deleted: Vec::new(),
                 copies: Vec::new(),
                 snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         Body::SetAttribute {
@@ -2067,6 +2082,8 @@ fn apply_revision_op(
                 handles_deleted: handles.deleted,
                 copies: Vec::new(),
                 snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         Body::SetBlockState { target, state } => {
@@ -2129,6 +2146,333 @@ fn apply_revision_op(
                 handles_deleted: handles.deleted,
                 copies: Vec::new(),
                 snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
+            })
+        }
+        Body::ReplaceText {
+            find,
+            replace,
+            matching,
+            case_sensitive,
+            sheets,
+            scopes,
+            tag,
+            block,
+        } => {
+            if let Some(names) = sheets {
+                if !names.iter().any(|s| s.eq_ignore_ascii_case(sheet_name)) {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::UnknownName,
+                        format!(
+                            "`sheets` does not include this drawing `{sheet_name}`; omit `sheets` \
+                             or include `{sheet_name}`"
+                        ),
+                        "sheets",
+                    ));
+                }
+            }
+            let matcher = TextMatcher::compile(find, *matching, *case_sensitive)
+                .map_err(|e| op_error(index, op_name, e.code, e.message, "find"))?;
+            let loaded = ensure_record(session, cached, source, sheet_name)?;
+            let record = &loaded.record;
+            enum PendingReplace {
+                Contents {
+                    handle: String,
+                    id: String,
+                    kind: &'static str,
+                    before: String,
+                    after: String,
+                    count: usize,
+                },
+                Attribute {
+                    handle: String,
+                    id: String,
+                    tag: String,
+                    occurrence: Option<usize>,
+                    before: String,
+                    after: String,
+                    count: usize,
+                },
+            }
+            let mut pending = Vec::new();
+            for (obj_idx, obj) in record.sheet.objects.iter().enumerate() {
+                let Some(handle) = record.handle_of(obj_idx).map(str::to_owned) else {
+                    continue;
+                };
+                let id = record.id(obj_idx);
+                match obj {
+                    Object::Text(t) if scopes.contains(&TextScope::Text) => {
+                        if let Some((after, count)) = matcher.replace(&t.contents, replace) {
+                            pending.push(PendingReplace::Contents {
+                                handle,
+                                id,
+                                kind: "text",
+                                before: t.contents.clone(),
+                                after,
+                                count,
+                            });
+                        }
+                    }
+                    Object::MText(t) if scopes.contains(&TextScope::MText) => {
+                        if let Some((after, count)) = matcher.replace(&t.contents, replace) {
+                            pending.push(PendingReplace::Contents {
+                                handle,
+                                id,
+                                kind: "mtext",
+                                before: t.contents.clone(),
+                                after,
+                                count,
+                            });
+                        }
+                    }
+                    Object::Insert(ins) if scopes.contains(&TextScope::Attribute) => {
+                        if let Some(b) = block {
+                            if !ins.block.eq_ignore_ascii_case(b) {
+                                continue;
+                            }
+                        }
+                        let mut totals: std::collections::BTreeMap<String, usize> =
+                            std::collections::BTreeMap::new();
+                        for a in &ins.attributes {
+                            *totals.entry(a.tag.to_ascii_uppercase()).or_default() += 1;
+                        }
+                        let mut seen: std::collections::BTreeMap<String, usize> =
+                            std::collections::BTreeMap::new();
+                        for a in &ins.attributes {
+                            let cap_tag = a.tag.to_ascii_uppercase();
+                            let occ_0 = {
+                                let e = seen.entry(cap_tag.clone()).or_default();
+                                let cur = *e;
+                                *e += 1;
+                                cur
+                            };
+                            let repeated = totals.get(&cap_tag).copied().unwrap_or(0) > 1;
+                            let occ_1 = repeated.then_some(occ_0 + 1);
+                            if let Some(wanted_tag) = tag {
+                                if !cap_tag.eq_ignore_ascii_case(wanted_tag) {
+                                    continue;
+                                }
+                            }
+                            if let Some((after, count)) = matcher.replace(&a.value, replace) {
+                                pending.push(PendingReplace::Attribute {
+                                    handle: handle.clone(),
+                                    id: id.clone(),
+                                    tag: cap_tag,
+                                    occurrence: occ_1,
+                                    before: a.value.clone(),
+                                    after,
+                                    count,
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let existing_names: HashSet<String> = record
+                .objects
+                .iter()
+                .filter_map(|o| o.name.as_ref().map(|n| n.to_lowercase()))
+                .collect();
+            let fonts = SheetFonts::find(&record.sheet, settings);
+            let start_of = |t: &crate::text::Text| fonts.start(t);
+            let mut handles_touched = Vec::new();
+            let mut replacements = Vec::new();
+            for item in pending {
+                match item {
+                    PendingReplace::Contents {
+                        handle,
+                        id,
+                        kind,
+                        before,
+                        after,
+                        count,
+                    } => {
+                        check_unlocked(session, &handle, &id, op, "find")?;
+                        let mut set = serde_json::Map::new();
+                        set.insert("contents".to_owned(), Value::String(after.clone()));
+                        let (_, handles) = session
+                            .change_object(
+                                &handle,
+                                &set,
+                                units,
+                                sheet_name,
+                                &existing_names,
+                                &start_of,
+                            )
+                            .map_err(|e| op_error(index, op_name, e.code, e.message, "replace"))?;
+                        handles_touched.extend(handles.touched);
+                        replacements.push(TextReplaced {
+                            sheet: sheet_name.to_owned(),
+                            id,
+                            kind: kind.to_owned(),
+                            tag: None,
+                            occurrence: None,
+                            before,
+                            after,
+                            count,
+                            row_value: None,
+                        });
+                    }
+                    PendingReplace::Attribute {
+                        handle,
+                        id,
+                        tag: cap_tag,
+                        occurrence,
+                        before,
+                        after,
+                        count,
+                    } => {
+                        check_unlocked(session, &handle, &id, op, "find")?;
+                        let (_, handles) = session
+                            .set_attribute(&handle, &cap_tag, occurrence, &after)
+                            .map_err(|e| op_error(index, op_name, e.code, e.message, "replace"))?;
+                        handles_touched.extend(handles.touched);
+                        replacements.push(TextReplaced {
+                            sheet: sheet_name.to_owned(),
+                            id,
+                            kind: "attribute".to_owned(),
+                            tag: Some(cap_tag),
+                            occurrence,
+                            before,
+                            after,
+                            count,
+                            row_value: None,
+                        });
+                    }
+                }
+            }
+            let total_matches: usize = replacements.iter().map(|r| r.count).sum();
+            let message = if replacements.is_empty() {
+                format!("found no {} matches for `{find}`", matching.name())
+            } else {
+                format!(
+                    "replaces {total_matches} match{} of `{find}` with `{replace}` in {} place{}",
+                    if total_matches == 1 { "" } else { "es" },
+                    replacements.len(),
+                    if replacements.len() == 1 { "" } else { "s" },
+                )
+            };
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message,
+                id: None,
+                handle: None,
+                handles_touched,
+                handles_added: Vec::new(),
+                handles_deleted: Vec::new(),
+                copies: Vec::new(),
+                snapped: Vec::new(),
+                replacements,
+                attributes_set: Vec::new(),
+            })
+        }
+        Body::SetAttributes {
+            selection,
+            sheets,
+            tag,
+            occurrence,
+            value,
+        } => {
+            if op.row_value.is_some() {
+                return Err(op_error(
+                    index,
+                    op_name,
+                    ErrorCode::Usage,
+                    "`row_value` belongs to a drawing set template and cannot be used on an \
+                     original DWG",
+                    "row_value",
+                ));
+            }
+            if let Some(names) = sheets {
+                if !names.iter().any(|s| s.eq_ignore_ascii_case(sheet_name)) {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::UnknownName,
+                        format!(
+                            "`sheets` does not include this drawing `{sheet_name}`; omit `sheets` \
+                             or include `{sheet_name}`"
+                        ),
+                        "sheets",
+                    ));
+                }
+            }
+            let loaded = ensure_record(session, cached, source, sheet_name)?;
+            let record = &loaded.record;
+            let selected = crate::query::select_on_sheet(selection, record, settings)
+                .map_err(|e| op_error(index, op_name, e.code, e.message, "where"))?;
+            let cap_tag = tag.to_ascii_uppercase();
+            let mut pending: Vec<(String, String, String, Option<usize>, String)> = Vec::new();
+            for obj_idx in selected {
+                let Object::Insert(ins) = &record.sheet.objects[obj_idx] else {
+                    continue;
+                };
+                let Some(handle) = record.handle_of(obj_idx).map(str::to_owned) else {
+                    continue;
+                };
+                let id = record.id(obj_idx);
+                let editable: Vec<&str> = ins
+                    .attributes
+                    .iter()
+                    .filter(|a| a.tag.eq_ignore_ascii_case(&cap_tag))
+                    .map(|a| a.value.as_str())
+                    .collect();
+                let occ_idx = occurrence.unwrap_or(1).saturating_sub(1);
+                let before = editable.get(occ_idx).copied().unwrap_or("").to_owned();
+                let reported_occ = (editable.len() > 1).then_some(occurrence.unwrap_or(1));
+                pending.push((handle, id, ins.block.clone(), reported_occ, before));
+            }
+            let mut handles_touched = Vec::new();
+            let mut attributes_set = Vec::new();
+            for (handle, id, block, reported_occ, before) in pending {
+                check_unlocked(session, &handle, &id, op, "where")?;
+                let (_, handles) = session
+                    .set_attribute(&handle, &cap_tag, *occurrence, value)
+                    .map_err(|e| op_error(index, op_name, e.code, e.message, "tag"))?;
+                handles_touched.extend(handles.touched);
+                attributes_set.push(AttributeUpdated {
+                    sheet: sheet_name.to_owned(),
+                    id,
+                    block,
+                    tag: cap_tag.clone(),
+                    occurrence: reported_occ,
+                    before,
+                    after: value.clone(),
+                    row_value: None,
+                });
+            }
+            let message = if attributes_set.is_empty() {
+                format!(
+                    "no insert matches {}",
+                    crate::query::selection_words(selection)
+                )
+            } else {
+                format!(
+                    "sets `{cap_tag}` to `{value}` on {} insert{}",
+                    attributes_set.len(),
+                    if attributes_set.len() == 1 { "" } else { "s" },
+                )
+            };
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message,
+                id: None,
+                handle: None,
+                handles_touched,
+                handles_added: Vec::new(),
+                handles_deleted: Vec::new(),
+                copies: Vec::new(),
+                snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set,
             })
         }
         Body::Change {
@@ -2202,6 +2546,8 @@ fn apply_revision_op(
                 handles_deleted: handles.deleted,
                 copies: Vec::new(),
                 snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         Body::Move { target, motion } => {
@@ -2228,6 +2574,8 @@ fn apply_revision_op(
                 handles_deleted: handles.deleted,
                 copies: Vec::new(),
                 snapped,
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         Body::Delete { target } => {
@@ -2249,6 +2597,8 @@ fn apply_revision_op(
                 handles_deleted: handles.deleted,
                 copies: Vec::new(),
                 snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         Body::Transform { targets, by } => {
@@ -2314,6 +2664,8 @@ fn apply_revision_op(
                 handles_deleted: all_handles.deleted,
                 copies: Vec::new(),
                 snapped,
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         Body::Copy { targets, pattern } => {
@@ -2505,6 +2857,8 @@ fn apply_revision_op(
                 handles_deleted: all_handles.deleted,
                 copies,
                 snapped,
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         Body::Table {
@@ -2541,6 +2895,8 @@ fn apply_revision_op(
                 handles_deleted: handles.deleted,
                 copies: Vec::new(),
                 snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         Body::Table {
@@ -2581,6 +2937,8 @@ fn apply_revision_op(
                 handles_deleted: handles.deleted,
                 copies: Vec::new(),
                 snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
             })
         }
         _ => Err(op_error(
