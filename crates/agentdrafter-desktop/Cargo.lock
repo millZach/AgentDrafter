@@ -52,6 +52,7 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "pdf-writer",
  "png",
+ "regex",
  "saphyr-parser",
  "serde",
  "serde_json",
