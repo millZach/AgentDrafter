@@ -119,6 +119,10 @@ fn samples() -> Vec<(&'static str, Value)> {
             "read",
             json!({"source": "missing.dwg", "mirror": "missing.mirror.yaml"}),
         ),
+        (
+            "convert",
+            json!({"source": "missing.dwg", "version": "2010", "output": "missing.2010.dwg", "format": "dwg", "overwrite": false, "allow_loss": false, "dry_run": true}),
+        ),
     ]
 }
 
