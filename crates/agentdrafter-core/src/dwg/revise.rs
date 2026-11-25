@@ -80,6 +80,8 @@ pub(crate) struct RevisionTables {
     pub styles: Vec<TextStyle>,
     pub blocks: Vec<Block>,
     pub layouts: Vec<String>,
+    pub dimension_styles: Vec<crate::model::DimensionStyle>,
+    pub mline_styles: Vec<crate::model::MLineStyle>,
 }
 
 /// An entity's space in the drawing: model space or a named layout's paper space.
@@ -202,6 +204,7 @@ pub(crate) struct RevisionSession {
     expected_linetypes_added: HashSet<String>,
     expected_text_styles_added: HashSet<String>,
     expected_block_records_added: HashSet<String>,
+    expected_block_handles_added: HashSet<u64>,
     expected_block_records_changed: HashSet<String>,
     expected_block_records_removed: HashSet<String>,
     expected_non_graphical_changed: HashSet<u64>,
@@ -211,6 +214,7 @@ pub(crate) struct RevisionSession {
     revcloud_app_registered: bool,
     transparency_app_registered: bool,
     annotative_app_registered: bool,
+    center_app_registered: bool,
 }
 
 impl RevisionSession {
@@ -271,6 +275,7 @@ impl RevisionSession {
             expected_linetypes_added: HashSet::new(),
             expected_text_styles_added: HashSet::new(),
             expected_block_records_added: HashSet::new(),
+            expected_block_handles_added: HashSet::new(),
             expected_block_records_changed: HashSet::new(),
             expected_block_records_removed: HashSet::new(),
             expected_non_graphical_changed: HashSet::new(),
@@ -280,6 +285,7 @@ impl RevisionSession {
             revcloud_app_registered: false,
             transparency_app_registered: false,
             annotative_app_registered: false,
+            center_app_registered: false,
         })
     }
 
@@ -395,12 +401,16 @@ impl RevisionSession {
             .collect();
         let blocks = self.all_insertable_blocks();
         let layouts = self.layout_names();
+        let (dimension_styles, _) = super::dimension::read_dimension_styles(&self.drawing);
+        let mline_styles = super::extra::read_mline_styles(&self.drawing);
         RevisionTables {
             layers,
             linetypes,
             styles,
             blocks,
             layouts,
+            dimension_styles,
+            mline_styles,
         }
     }
 
@@ -630,6 +640,83 @@ impl RevisionSession {
                 for changed in media_handles.changed {
                     self.expected_non_graphical_changed.insert(changed);
                 }
+                e
+            }
+            Object::MLine(ml) => {
+                let styles = super::extra::read_mline_styles(&self.drawing);
+                let style = styles
+                    .iter()
+                    .find(|s| s.name.eq_ignore_ascii_case(&ml.style))
+                    .cloned()
+                    .unwrap_or_else(crate::model::MLineStyle::standard);
+                let style_handle = self.drawing.objects.iter().find_map(|(h, obj)| {
+                    if let ObjectType::MLineStyle(st) = obj {
+                        if st.name.eq_ignore_ascii_case(&ml.style) {
+                            return Some(*h);
+                        }
+                    }
+                    None
+                });
+                let mut e = EntityType::MLine(super::extra::dwg_mline(ml, &style, style_handle));
+                ml.layer.clone_into(&mut e.common_mut().layer);
+                super::set_properties(e.common_mut(), &ml.properties);
+                e
+            }
+            Object::Tolerance(tol) => {
+                let mut e =
+                    EntityType::Tolerance(super::extra::dwg_tolerance(&self.drawing, tol, None));
+                tol.layer.clone_into(&mut e.common_mut().layer);
+                super::set_properties(e.common_mut(), &tol.properties);
+                e
+            }
+            Object::CenterMark(cm) => {
+                self.center_app_registered = true;
+                let before_entities: HashSet<u64> = self
+                    .drawing
+                    .entities()
+                    .map(|ent| ent.common().handle.value())
+                    .collect();
+                let mut counter = self.drawing.block_records.len();
+                let ins = super::extra::dwg_center_mark(&mut self.drawing, cm, &mut counter);
+                self.expected_block_records_added
+                    .insert(ins.block_name.to_lowercase());
+                if let Some(br) = self.drawing.block_records.get(&ins.block_name) {
+                    self.expected_block_handles_added.insert(br.handle.value());
+                }
+                for ent in self.drawing.entities() {
+                    let h = ent.common().handle.value();
+                    if !before_entities.contains(&h) {
+                        self.expected_added.insert(h);
+                    }
+                }
+                let mut e = EntityType::Insert(ins);
+                cm.layer.clone_into(&mut e.common_mut().layer);
+                super::set_properties(e.common_mut(), &cm.properties);
+                e
+            }
+            Object::CenterLine(cl) => {
+                self.center_app_registered = true;
+                let mut e = EntityType::Line(super::extra::dwg_center_line(&mut self.drawing, cl));
+                cl.layer.clone_into(&mut e.common_mut().layer);
+                super::set_properties(e.common_mut(), &cl.properties);
+                e
+            }
+            Object::Shape(sh) => {
+                let before_styles: HashSet<String> = self
+                    .drawing
+                    .text_styles
+                    .iter()
+                    .map(|ts| ts.name.to_lowercase())
+                    .collect();
+                let mut e = EntityType::Shape(super::extra::dwg_shape(&mut self.drawing, sh, None));
+                for ts in self.drawing.text_styles.iter() {
+                    let key = ts.name.to_lowercase();
+                    if !before_styles.contains(&key) {
+                        self.expected_text_styles_added.insert(key);
+                    }
+                }
+                sh.layer.clone_into(&mut e.common_mut().layer);
+                super::set_properties(e.common_mut(), &sh.properties);
                 e
             }
             _ => dwg_object(object, start_of, &blocks)?,
@@ -3036,6 +3123,72 @@ impl RevisionSession {
         ))
     }
 
+    /// Updates the drawing's `PDMODE` and/or `PDSIZE` header variables
+    /// (`set_point_style` / `DDPTYPE` / `PTYPE`).
+    pub(crate) fn set_point_style(
+        &mut self,
+        pdmode: Option<i16>,
+        pdsize: Option<f64>,
+    ) -> Result<String, Error> {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(mode) = pdmode {
+            if !crate::model::is_valid_pdmode(mode) {
+                return Err(Error::new(
+                    ErrorCode::BadValue,
+                    format!("`pdmode` {mode} is not a valid AutoCAD PDMODE"),
+                )
+                .at_field("pdmode"));
+            }
+            self.drawing.header.point_display_mode = mode;
+            parts.push(format!("pdmode = {mode}"));
+        }
+        if let Some(size) = pdsize {
+            if !size.is_finite() {
+                return Err(
+                    Error::new(ErrorCode::BadValue, "`pdsize` must be finite").at_field("pdsize")
+                );
+            }
+            self.drawing.header.point_display_size = size;
+            parts.push(format!("pdsize = {size}"));
+        }
+        Ok(format!("set point style ({})", parts.join("; ")))
+    }
+
+    /// Adds or updates a named multiline style in `ACAD_MLINESTYLE`
+    /// (`add_mline_style` / `MLSTYLE`).
+    pub(crate) fn add_mline_style(
+        &mut self,
+        style: &crate::model::MLineStyle,
+    ) -> Result<(String, MutationHandles), Error> {
+        let before_handles: HashSet<u64> = self.drawing.objects.keys().map(|h| h.value()).collect();
+        let dict_handle = self.drawing.header.acad_mlinestyle_dict_handle;
+        let dict_existed = !dict_handle.is_null() && before_handles.contains(&dict_handle.value());
+        let handles_map =
+            super::extra::add_mline_styles(&mut self.drawing, std::slice::from_ref(style));
+        let mut record = MutationHandles::default();
+        if dict_existed {
+            self.expected_non_graphical_changed
+                .insert(dict_handle.value());
+            record.touched.push(handle_text(dict_handle));
+        }
+        let key = style.name.to_lowercase();
+        let updated = if let Some(&h) = handles_map.get(&key) {
+            if before_handles.contains(&h.value()) {
+                self.expected_non_graphical_changed.insert(h.value());
+                record.touched.push(handle_text(h));
+                true
+            } else {
+                self.expected_non_graphical_added.insert(h.value());
+                record.added.push(handle_text(h));
+                false
+            }
+        } else {
+            false
+        };
+        let verb = if updated { "updated" } else { "added" };
+        Ok((format!("{verb} multiline style `{}`", style.name), record))
+    }
+
     /// Updates the drawing's `ACAD_SCALELIST`, `CANNOSCALE`, and/or
     /// `ANNOALLVISIBLE` (`set_annotation_scale` / `CANNOSCALE` / `SCALELISTEDIT`).
     pub(crate) fn set_annotation_scale(
@@ -3786,6 +3939,7 @@ impl RevisionSession {
             self.revcloud_app_registered,
             self.transparency_app_registered,
             self.annotative_app_registered,
+            self.center_app_registered,
             &mut unexpected,
         );
         diff_named_table("UCS", &before.ucss, &after.ucss, &mut unexpected);
@@ -3828,6 +3982,7 @@ impl RevisionSession {
         for (key, now) in &after.block_records {
             if !before.block_records.contains_key(key)
                 && !self.expected_block_records_added.contains(key)
+                && !self.expected_block_handles_added.contains(&now.handle)
             {
                 unexpected.push(UnexpectedChange {
                     kind: "BLOCK_RECORD".to_owned(),
@@ -4608,6 +4763,8 @@ fn translate_entity(object: &mut EntityType, delta: Vector3) -> Result<(), Error
         | EntityType::Point(_)
         | EntityType::Ray(_)
         | EntityType::XLine(_)
+        | EntityType::Tolerance(_)
+        | EntityType::Shape(_)
         | EntityType::Text(_)
         | EntityType::MText(_)
         | EntityType::Insert(_)
@@ -4619,6 +4776,13 @@ fn translate_entity(object: &mut EntityType, delta: Vector3) -> Result<(), Error
             // projection for all OCS entities (handling -Z and tilted normals
             // accurately) and translates world-space XDATA along with the entity.
             object.translate(delta);
+            Ok(())
+        }
+        EntityType::MLine(ml) => {
+            ml.start_point = ml.start_point + delta;
+            for v in &mut ml.vertices {
+                v.position = v.position + delta;
+            }
             Ok(())
         }
         other => Err(Error::new(
@@ -4688,6 +4852,12 @@ fn rotate_entity(object: &mut EntityType, about: [f64; 3], degrees: f64) -> Resu
             | EntityType::Hatch(_)
             | EntityType::RasterImage(_)
             | EntityType::Underlay(_)
+            | EntityType::Point(_)
+            | EntityType::XLine(_)
+            | EntityType::Ray(_)
+            | EntityType::MLine(_)
+            | EntityType::Tolerance(_)
+            | EntityType::Shape(_)
     ) {
         return Err(Error::new(
             ErrorCode::BadValue,
@@ -4834,6 +5004,34 @@ fn rotate_entity(object: &mut EntityType, about: [f64; 3], degrees: f64) -> Resu
             u.insertion_point = rot_pt(u.insertion_point, about, sin, cos);
             u.rotation = normalize_degrees(u.rotation.to_degrees() + degrees).to_radians();
         }
+        EntityType::Point(p) => {
+            p.location = rot_pt(p.location, about, sin, cos);
+            p.x_axis_angle = normalize_degrees(p.x_axis_angle.to_degrees() + degrees).to_radians();
+        }
+        EntityType::XLine(xl) => {
+            xl.base_point = rot_pt(xl.base_point, about, sin, cos);
+            xl.direction = rot_vec3(xl.direction, sin, cos).normalize();
+        }
+        EntityType::Ray(r) => {
+            r.base_point = rot_pt(r.base_point, about, sin, cos);
+            r.direction = rot_vec3(r.direction, sin, cos).normalize();
+        }
+        EntityType::MLine(ml) => {
+            ml.start_point = rot_pt(ml.start_point, about, sin, cos);
+            for v in &mut ml.vertices {
+                v.position = rot_pt(v.position, about, sin, cos);
+                v.direction = rot_vec3(v.direction, sin, cos).normalize();
+                v.miter = rot_vec3(v.miter, sin, cos).normalize();
+            }
+        }
+        EntityType::Tolerance(t) => {
+            t.insertion_point = rot_pt(t.insertion_point, about, sin, cos);
+            t.direction = rot_vec3(t.direction, sin, cos).normalize();
+        }
+        EntityType::Shape(s) => {
+            s.insertion_point = rot_pt(s.insertion_point, about, sin, cos);
+            s.rotation = normalize_degrees(s.rotation.to_degrees() + degrees).to_radians();
+        }
         other => {
             return Err(Error::new(
                 ErrorCode::BadValue,
@@ -4896,6 +5094,12 @@ fn scale_entity(object: &mut EntityType, about: [f64; 3], factor: f64) -> Result
             | EntityType::Hatch(_)
             | EntityType::RasterImage(_)
             | EntityType::Underlay(_)
+            | EntityType::Point(_)
+            | EntityType::XLine(_)
+            | EntityType::Ray(_)
+            | EntityType::MLine(_)
+            | EntityType::Tolerance(_)
+            | EntityType::Shape(_)
     ) {
         return Err(Error::new(
             ErrorCode::BadValue,
@@ -5067,6 +5271,38 @@ fn scale_entity(object: &mut EntityType, about: [f64; 3], factor: f64) -> Result
             u.y_scale *= factor;
             u.z_scale *= factor;
         }
+        EntityType::Point(p) => {
+            p.location = scale_pt(p.location, about, factor);
+        }
+        EntityType::XLine(xl) => {
+            xl.base_point = scale_pt(xl.base_point, about, factor);
+        }
+        EntityType::Ray(r) => {
+            r.base_point = scale_pt(r.base_point, about, factor);
+        }
+        EntityType::MLine(ml) => {
+            ml.start_point = scale_pt(ml.start_point, about, factor);
+            ml.scale_factor *= factor;
+            for v in &mut ml.vertices {
+                v.position = scale_pt(v.position, about, factor);
+                for seg in &mut v.segments {
+                    for p in &mut seg.parameters {
+                        *p *= factor;
+                    }
+                    for p in &mut seg.area_fill_parameters {
+                        *p *= factor;
+                    }
+                }
+            }
+        }
+        EntityType::Tolerance(t) => {
+            t.insertion_point = scale_pt(t.insertion_point, about, factor);
+            t.text_height *= factor;
+        }
+        EntityType::Shape(s) => {
+            s.insertion_point = scale_pt(s.insertion_point, about, factor);
+            s.size *= factor;
+        }
         other => {
             return Err(Error::new(
                 ErrorCode::BadValue,
@@ -5113,6 +5349,12 @@ fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> 
             | EntityType::MText(_)
             | EntityType::Insert(_)
             | EntityType::Hatch(_)
+            | EntityType::Point(_)
+            | EntityType::XLine(_)
+            | EntityType::Ray(_)
+            | EntityType::MLine(_)
+            | EntityType::Tolerance(_)
+            | EntityType::Shape(_)
     ) {
         return Err(Error::new(
             ErrorCode::BadValue,
@@ -5330,6 +5572,36 @@ fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> 
                 }
             }
         }
+        EntityType::Point(p) => {
+            p.location = mp(p.location);
+            p.x_axis_angle = mdeg(p.x_axis_angle.to_degrees()).to_radians();
+        }
+        EntityType::XLine(xl) => {
+            xl.base_point = mp(xl.base_point);
+            xl.direction = mdir3(xl.direction).normalize();
+        }
+        EntityType::Ray(r) => {
+            r.base_point = mp(r.base_point);
+            r.direction = mdir3(r.direction).normalize();
+        }
+        EntityType::MLine(ml) => {
+            ml.start_point = mp(ml.start_point);
+            for v in &mut ml.vertices {
+                v.position = mp(v.position);
+                v.direction = mdir3(v.direction).normalize();
+                v.miter = mdir3(v.miter).normalize();
+            }
+        }
+        EntityType::Tolerance(t) => {
+            t.insertion_point = mp(t.insertion_point);
+            let dir_deg = readable(mdeg(t.direction.y.atan2(t.direction.x).to_degrees()));
+            let (s, c) = sin_cos_degrees(dir_deg);
+            t.direction = Vector3::new(c, s, 0.0);
+        }
+        EntityType::Shape(s) => {
+            s.insertion_point = mp(s.insertion_point);
+            s.rotation = mdeg(s.rotation.to_degrees()).to_radians();
+        }
         other => {
             return Err(Error::new(
                 ErrorCode::BadValue,
@@ -5471,6 +5743,7 @@ fn diff_named_table_allowing_added(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn diff_app_id_table(
     before: &BTreeMap<String, String>,
     after: &BTreeMap<String, String>,
@@ -5478,6 +5751,7 @@ fn diff_app_id_table(
     revcloud_app_registered: bool,
     transparency_app_registered: bool,
     annotative_app_registered: bool,
+    center_app_registered: bool,
     out: &mut Vec<UnexpectedChange>,
 ) {
     for (key, orig) in before {
@@ -5505,7 +5779,11 @@ fn diff_app_id_table(
             || (transparency_app_registered
                 && name.eq_ignore_ascii_case(page_setup::LAYER_TRANSPARENCY_APP))
             || (annotative_app_registered
-                && name.eq_ignore_ascii_case(super::annotation_scale::ANNOTATIVE_APP));
+                && name.eq_ignore_ascii_case(super::annotation_scale::ANNOTATIVE_APP))
+            || (center_app_registered
+                && (name.eq_ignore_ascii_case(acadrust::entities::CENTERMARK_XDATA_APPLICATION)
+                    || name
+                        .eq_ignore_ascii_case(acadrust::entities::CENTERLINE_XDATA_APPLICATION)));
         if !before.contains_key(key) && !is_expected_app {
             out.push(UnexpectedChange {
                 kind: "APPID".to_owned(),

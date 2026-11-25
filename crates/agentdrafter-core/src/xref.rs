@@ -99,10 +99,14 @@ pub(crate) fn check_drawing_xrefs(
         table_styles: drawing.table_styles.clone(),
         mleader_styles: drawing.mleader_styles.clone(),
         dimension_styles: drawing.dimension_styles.clone(),
+        mline_styles: drawing.mline_styles.clone(),
+        pdmode: drawing.pdmode,
+        pdsize: drawing.pdsize,
         blocks: drawing.blocks.clone(),
         xrefs: drawing.xrefs.clone(),
         resolved_xrefs: Vec::new(),
         resolved_media: Vec::new(),
+        resolved_shapes: Vec::new(),
         objects: Vec::new(),
         paper: None,
         page_setup: None,
@@ -611,6 +615,38 @@ pub(crate) fn prefix_object(object: &mut Object, prefix: &str, block_renames: &[
             prefix_properties(&mut o.properties, prefix);
         }
         Object::PdfUnderlay(o) => {
+            rewrite_layer(&mut o.layer);
+            prefix_properties(&mut o.properties, prefix);
+        }
+        Object::Point(o) => {
+            rewrite_layer(&mut o.layer);
+            prefix_properties(&mut o.properties, prefix);
+        }
+        Object::XLine(o) => {
+            rewrite_layer(&mut o.layer);
+            prefix_properties(&mut o.properties, prefix);
+        }
+        Object::Ray(o) => {
+            rewrite_layer(&mut o.layer);
+            prefix_properties(&mut o.properties, prefix);
+        }
+        Object::MLine(o) => {
+            rewrite_layer(&mut o.layer);
+            prefix_properties(&mut o.properties, prefix);
+        }
+        Object::Tolerance(o) => {
+            rewrite_layer(&mut o.layer);
+            prefix_properties(&mut o.properties, prefix);
+        }
+        Object::CenterMark(o) => {
+            rewrite_layer(&mut o.layer);
+            prefix_properties(&mut o.properties, prefix);
+        }
+        Object::CenterLine(o) => {
+            rewrite_layer(&mut o.layer);
+            prefix_properties(&mut o.properties, prefix);
+        }
+        Object::Shape(o) => {
             rewrite_layer(&mut o.layer);
             prefix_properties(&mut o.properties, prefix);
         }

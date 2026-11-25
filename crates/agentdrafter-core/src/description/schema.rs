@@ -96,7 +96,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, image_frame_key, custom_properties_key, annotation_scales_key, annotation_scale_key, anno_all_visible_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, xrefs_key, objects_key, groups_key, paper_key, page_setup_key, layout_key, layouts_key] =
+    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, image_frame_key, pdmode_key, pdsize_key, custom_properties_key, annotation_scales_key, annotation_scale_key, anno_all_visible_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, mline_styles_key, xrefs_key, objects_key, groups_key, paper_key, page_setup_key, layout_key, layouts_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -130,6 +130,8 @@ pub fn sheet_description_schema() -> Value {
                                 shown and plotted) or `display` (2, shown on screen, not plotted).",
                 "enum": super::wipeout::WIPEOUT_FRAME_NAMES,
             },
+            pdmode_key: super::extra::pdmode_property(),
+            pdsize_key: super::extra::pdsize_property(),
             custom_properties_key: super::field::custom_properties_property(),
             annotation_scales_key: super::annotation_scale::annotation_scales_property(),
             annotation_scale_key: super::annotation_scale::annotation_scale_property(),
@@ -141,6 +143,7 @@ pub fn sheet_description_schema() -> Value {
             table_styles_key: table_schema::table_styles_property(),
             mleader_styles_key: leader_schema::mleader_styles_property(),
             dimension_styles_key: dimension_schema::dimension_styles_property(),
+            mline_styles_key: super::extra::mline_styles_property(),
             xrefs_key: super::xref::xrefs_property(),
             objects_key: {
                 "description": "The objects on the sheet, in drawing order. Each is a mapping \
@@ -190,8 +193,9 @@ fn sheet_defs() -> Map<String, Value> {
     let mut defs = defs();
     for (name, _) in OBJECT_TYPES {
         if let Some(properties) = defs
-            .get_mut(name)
-            .and_then(|def| def["properties"].as_object_mut())
+            .get_mut(object_def_name(name))
+            .and_then(|def| def.get_mut("properties"))
+            .and_then(Value::as_object_mut)
         {
             for key in SHEET_OBJECT_KEYS {
                 let def = match key {
@@ -347,16 +351,27 @@ fn library_defs() -> Map<String, Value> {
     defs
 }
 
+/// The `$defs` key for an object type: `"point_object"` for `"point"` (since
+/// `$defs/point` is the `[x, y, z]` coordinate tuple), otherwise `name` itself.
+pub(crate) fn object_def_name(name: &str) -> &str {
+    if name == "point" {
+        "point_object"
+    } else {
+        name
+    }
+}
+
 /// One choice of object for each of `types`: a mapping with that one key.
 pub(super) fn object_choices(types: &[(&str, &[&str])]) -> Vec<Value> {
     types
         .iter()
         .map(|(name, _)| {
+            let def = object_def_name(name);
             json!({
                 "type": "object",
                 "required": [name],
                 "additionalProperties": false,
-                "properties": { *name: { "$ref": format!("#/$defs/{name}") } },
+                "properties": { *name: { "$ref": format!("#/$defs/{def}") } },
             })
         })
         .collect()
@@ -900,6 +915,7 @@ fn defs() -> Map<String, Value> {
     );
     defs.insert("image".into(), super::media::image_def());
     defs.insert("pdf_underlay".into(), super::media::pdf_underlay_def());
+    super::extra::add_object_defs(&mut defs);
     defs.insert(
         "arc".into(),
         object_def(
@@ -1304,6 +1320,10 @@ mod tests {
             keys(&defs["dimension_style"]["properties"]),
             sorted(&super::super::dimension::DIMENSION_STYLE_KEYS)
         );
+        assert_eq!(
+            keys(&defs["mline_style"]["properties"]),
+            sorted(&super::super::extra::MLINE_STYLE_KEYS)
+        );
         let listed: Vec<String> = schema["properties"]["objects"]["items"]["oneOf"]
             .as_array()
             .unwrap()
@@ -1319,7 +1339,7 @@ mod tests {
                 .copied()
                 .collect();
             assert_eq!(
-                keys(&defs[name]["properties"]),
+                keys(&defs[object_def_name(name)]["properties"]),
                 sorted(&on_a_sheet),
                 "the keys of {name}"
             );
@@ -1345,7 +1365,7 @@ mod tests {
         assert_eq!(listed, types);
         for (name, object_keys) in BLOCK_OBJECT_TYPES {
             assert_eq!(
-                keys(&defs[name]["properties"]),
+                keys(&defs[object_def_name(name)]["properties"]),
                 sorted(object_keys),
                 "the keys of {name}"
             );

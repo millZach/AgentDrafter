@@ -333,6 +333,79 @@ impl<'a> Reader<'a> {
                     .collect();
                 outline(&corners)
             }
+            Object::CenterLine(cl) => {
+                let (a, b) = cl.extended_endpoints();
+                one(Curve::Segment { a: p3(a), b: p3(b) })
+            }
+            Object::CenterMark(cm) => cm
+                .segments()
+                .into_iter()
+                .enumerate()
+                .map(|(i, [a, b])| {
+                    (
+                        format!("segments[{i}]"),
+                        Curve::Segment { a: p3(a), b: p3(b) },
+                    )
+                })
+                .collect(),
+            Object::MLine(ml) => {
+                let style = self
+                    .sheet
+                    .mline_style(&ml.style)
+                    .unwrap_or_else(crate::model::MLineStyle::standard);
+                let (chains, _, _) = crate::draw::extra::mline_geometry(ml, &style);
+                let z = ml.points.first().map_or(0.0, |p| p.z);
+                let closed = ml.closed && ml.points.len() >= 3;
+                let mut segs = Vec::new();
+                for (ei, chain) in chains.iter().enumerate() {
+                    let count = if closed {
+                        chain.len()
+                    } else {
+                        chain.len().saturating_sub(1)
+                    };
+                    for i in 0..count {
+                        let a = chain[i];
+                        let b = chain[(i + 1) % chain.len()];
+                        segs.push((
+                            format!("elements[{ei}][{i}]"),
+                            Curve::Segment {
+                                a: [a[0], a[1], z],
+                                b: [b[0], b[1], z],
+                            },
+                        ));
+                    }
+                }
+                segs
+            }
+            Object::XLine(xl) => {
+                let d = xl.unit_direction();
+                let span = 1e6;
+                one(Curve::Segment {
+                    a: [
+                        xl.through.x - d.x * span,
+                        xl.through.y - d.y * span,
+                        xl.through.z - d.z * span,
+                    ],
+                    b: [
+                        xl.through.x + d.x * span,
+                        xl.through.y + d.y * span,
+                        xl.through.z + d.z * span,
+                    ],
+                })
+            }
+            Object::Ray(ray) => {
+                let d = ray.unit_direction();
+                let span = 1e6;
+                one(Curve::Segment {
+                    a: p3(ray.from),
+                    b: [
+                        ray.from.x + d.x * span,
+                        ray.from.y + d.y * span,
+                        ray.from.z + d.z * span,
+                    ],
+                })
+            }
+            Object::Point(_) | Object::Tolerance(_) | Object::Shape(_) => Vec::new(),
             Object::Solid(solid) => {
                 let corners: Vec<P3> = solid.corners.iter().map(|&p| p3(p)).collect();
                 outline(&corners)
@@ -666,6 +739,44 @@ impl<'a> Reader<'a> {
                     let cy = corners.iter().map(|p| p[1]).sum::<f64>() / n;
                     out.push((Center, String::new(), [cx, cy, underlay.position.z]));
                 }
+            }
+            Object::Point(pt) => {
+                out.push((Node, String::new(), p3(pt.position)));
+            }
+            Object::XLine(_) => {}
+            Object::Ray(ray) => {
+                out.push((Endpoint, "from".into(), p3(ray.from)));
+            }
+            Object::MLine(ml) => {
+                for (name, p) in named("points", &ml.points) {
+                    out.push((Endpoint, name, p));
+                }
+                for (place, curve) in self.curves(object) {
+                    out.push((Midpoint, place, curve.point(0.5)));
+                }
+            }
+            Object::Tolerance(tol) => {
+                out.push((Insertion, String::new(), p3(tol.position)));
+            }
+            Object::CenterMark(cm) => {
+                out.push((Center, String::new(), p3(cm.center)));
+                for (i, [a, b]) in cm.segments().into_iter().enumerate() {
+                    out.push((Endpoint, format!("segments[{i}].from"), p3(a)));
+                    out.push((Endpoint, format!("segments[{i}].to"), p3(b)));
+                }
+            }
+            Object::CenterLine(cl) => {
+                let (a, b) = cl.extended_endpoints();
+                out.push((Endpoint, "from".into(), p3(a)));
+                out.push((Endpoint, "to".into(), p3(b)));
+                out.push((
+                    Midpoint,
+                    String::new(),
+                    [(a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5],
+                ));
+            }
+            Object::Shape(sh) => {
+                out.push((Insertion, String::new(), p3(sh.position)));
             }
             Object::Arc(_) => {
                 for (_, curve) in self.curves(object) {

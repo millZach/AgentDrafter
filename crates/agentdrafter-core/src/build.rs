@@ -288,10 +288,29 @@ pub(crate) fn prepare_sheet_as(
         refuse_unless_built(output)?;
     }
 
-    let sheet = &record.sheet;
+    let has_shapes = record
+        .sheet
+        .objects
+        .iter()
+        .chain(record.sheet.blocks.iter().flat_map(|b| b.objects.iter()))
+        .any(|o| matches!(o, crate::model::Object::Shape(_)));
+    let resolved_record;
+    let effective_record = if has_shapes && record.sheet.resolved_shapes.is_empty() {
+        let mut cloned = record.clone();
+        if let Some(dir) = description.parent() {
+            crate::text::fonts::resolve_sheet_shapes(&mut cloned.sheet, settings, &[dir]);
+        } else {
+            crate::text::fonts::resolve_sheet_shapes(&mut cloned.sheet, settings, &[]);
+        }
+        resolved_record = cloned;
+        &resolved_record
+    } else {
+        record
+    };
+    let sheet = &effective_record.sheet;
     let fonts = SheetFonts::find(sheet, settings);
     let bytes = dwg::write_new_sheet_as(
-        record,
+        effective_record,
         &|text| fonts.start(text),
         &|text| crate::draw::mtext_box(text, &fonts),
         mark,

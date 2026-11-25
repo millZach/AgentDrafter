@@ -344,6 +344,14 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("add_wipeout", "WIPEOUT"),
             ("add_image", "IMAGEATTACH"),
             ("add_pdf_underlay", "PDFATTACH"),
+            ("add_point", "POINT"),
+            ("add_xline", "XLINE"),
+            ("add_ray", "RAY"),
+            ("add_mline", "MLINE"),
+            ("add_tolerance", "TOLERANCE"),
+            ("add_center_mark", "CENTERMARK"),
+            ("add_center_line", "CENTERLINE"),
+            ("add_shape", "SHAPE"),
             ("insert_block", "INSERT"),
             ("add_table", "TABLE"),
             ("add_mleader", "MLEADER"),
@@ -421,6 +429,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("edit_group", "GROUPEDIT"),
             ("set_annotation_scale", "CANNOSCALE"),
             ("set_object_scales", "OBJECTSCALE"),
+            ("set_point_style", "DDPTYPE"),
+            ("add_mline_style", "MLSTYLE"),
         ]
     );
     let samples = [
@@ -439,6 +449,14 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "WIPEOUT", "sheet": "S", "points": [[0, 0, 0], [2, 0, 0], [2, 1, 0], [0, 1, 0]], "draw_order": "back"}),
         json!({"op": "IMAGEATTACH", "sheet": "S", "path": "logo.png", "position": [0, 0, 0], "width": 20, "fade": 10}),
         json!({"op": "PDFATTACH", "sheet": "S", "path": "ref.pdf", "page": "1", "position": [0, 0, 0], "scale": 1.0, "draw_order": "back"}),
+        json!({"op": "POINT", "sheet": "S", "position": [5, 5, 0], "angle": 45}),
+        json!({"op": "XLINE", "sheet": "S", "through": [0, 0, 0], "direction": [1, 0, 0]}),
+        json!({"op": "RAY", "sheet": "S", "from": [0, 0, 0], "direction": [0, 1, 0]}),
+        json!({"op": "MLINE", "sheet": "S", "points": [[0, 0, 0], [10, 0, 0], [10, 10, 0]], "style": "Standard", "scale": 2.0}),
+        json!({"op": "TOLERANCE", "sheet": "S", "position": [10, 10, 0], "text": "{\\Fgdt;j}%%v{\\Fgdt;n}0.05%%vA"}),
+        json!({"op": "CENTERMARK", "sheet": "S", "center": [20, 20, 0], "radius": 10}),
+        json!({"op": "CENTERLINE", "sheet": "S", "from": [0, 5, 0], "to": [20, 5, 0], "start_extension": 2, "end_extension": 2}),
+        json!({"op": "SHAPE", "sheet": "S", "file": "custom.shx", "shape": "MARKER", "position": [30, 30, 0], "size": 5}),
         json!({"op": "INSERT", "sheet": "S", "block": "B", "position": [0, 0, 0], "attributes": {"TAG": "X", "NOTE": ["a", null]}}),
         json!({"op": "TABLE", "sheet": "S", "position": [0, 10, 0], "columns": [5, 5], "rows": [2], "cells": [["A", {"text": "B", "height": 1}]]}),
         json!({"op": "MLEADER", "sheet": "S", "leaders": [[[0, 0, 0], [10, 5, 0]], [[0, 8, 0], [10, 5, 0]]], "content": {"text": "TB-1", "attachment": "middle_of_text"}, "arrowhead": "dot"}),
@@ -516,6 +534,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "GROUPEDIT", "sheet": "S", "name": "FT-101", "add": [{"id": "S/c"}], "rename": "FT-102", "selectable": false}),
         json!({"op": "CANNOSCALE", "sheet": "S", "scale": "1:50", "anno_all_visible": false, "add_scales": {"1:50": [1, 50]}}),
         json!({"op": "OBJECTSCALE", "target": {"id": "S/note"}, "annotative": true, "add": ["1:50", "1:100"]}),
+        json!({"op": "DDPTYPE", "sheet": "S", "pdmode": 35, "pdsize": 2.5}),
+        json!({"op": "MLSTYLE", "sheet": "S", "name": "WALL", "elements": [{"offset": 0.5}, {"offset": -0.5}], "start_square_cap": true, "end_square_cap": true}),
     ];
     for (info, sample) in listed.operations.iter().zip(&samples) {
         assert!(info.does.contains(&info.alias), "{}", info.does);

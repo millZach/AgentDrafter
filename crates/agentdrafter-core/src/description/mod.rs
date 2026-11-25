@@ -23,6 +23,7 @@ mod dimension_schema;
 pub(crate) mod dynamic_block;
 pub(crate) mod edit;
 mod emit;
+pub(crate) mod extra;
 pub(crate) mod field;
 pub(crate) mod group;
 mod hatch;
@@ -92,12 +93,14 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 23] = [
+pub(crate) const SHEET_KEYS: [&str; 26] = [
     "units",
     "block_library",
     "ltscale",
     "wipeout_frame",
     media::IMAGE_FRAME_KEY,
+    extra::PDMODE_KEY,
+    extra::PDSIZE_KEY,
     field::CUSTOM_PROPERTIES_KEY,
     annotation_scale::ANNOTATION_SCALES_KEY,
     annotation_scale::ANNOTATION_SCALE_KEY,
@@ -109,6 +112,7 @@ pub(crate) const SHEET_KEYS: [&str; 23] = [
     "table_styles",
     "mleader_styles",
     "dimension_styles",
+    extra::MLINE_STYLES_KEY,
     xref::XREFS_KEY,
     "objects",
     group::GROUPS_KEY,
@@ -425,6 +429,18 @@ fn sheet_and_records(
         Some(node) => dimension::dimension_styles(node, units, &text_styles)?,
         None => Vec::new(),
     };
+    let mline_styles = match fields.get(extra::MLINE_STYLES_KEY) {
+        Some(node) => extra::read_mline_styles(node, units, &linetypes)?,
+        None => Vec::new(),
+    };
+    let pdmode = match fields.get(extra::PDMODE_KEY) {
+        Some(node) => extra::read_pdmode(node, extra::PDMODE_KEY)?,
+        None => 0,
+    };
+    let pdsize = match fields.get(extra::PDSIZE_KEY) {
+        Some(node) => extra::read_pdsize(node, extra::PDSIZE_KEY, units)?,
+        None => 0.0,
+    };
     let xrefs = match fields.get(xref::XREFS_KEY) {
         Some(node) => xref::xrefs(node, library.as_ref())?,
         None => Vec::new(),
@@ -515,6 +531,7 @@ fn sheet_and_records(
         table_styles: &table_styles,
         mleader_styles: &mleader_styles,
         dimension_styles: &dimension_styles,
+        mline_styles: &mline_styles,
         layouts: &layout_names,
         annotation_scales: &annotation_scales,
     };
@@ -599,10 +616,14 @@ fn sheet_and_records(
         table_styles,
         mleader_styles,
         dimension_styles,
+        mline_styles,
+        pdmode,
+        pdsize,
         blocks: Vec::new(),
         xrefs,
         resolved_xrefs: Vec::new(),
         resolved_media: Vec::new(),
+        resolved_shapes: Vec::new(),
         objects,
         // A sheet drawn in layouts is on its first layout's paper.
         paper: layout.as_ref().and_then(|l| l.paper.clone()).or(paper),
@@ -989,6 +1010,8 @@ pub(crate) fn parse_added_object_json(
     styles: &[crate::text::TextStyle],
     blocks: &[crate::model::Block],
     layouts: &[String],
+    dimension_styles: &[crate::model::DimensionStyle],
+    mline_styles: &[crate::model::MLineStyle],
 ) -> Result<ParsedAddedObject, Error> {
     let wrapper = Node::new(Kind::Mapping(vec![Entry {
         key: kind.to_owned(),
@@ -1011,7 +1034,8 @@ pub(crate) fn parse_added_object_json(
         styles,
         table_styles: &[],
         mleader_styles: &[],
-        dimension_styles: &[],
+        dimension_styles,
+        mline_styles,
         annotation_scales: &[],
         layouts,
     };
@@ -1046,6 +1070,29 @@ pub(crate) fn parse_added_object_json(
         id,
         name,
         space,
+    })
+}
+
+/// Parses one multiline style from an `add_mline_style` operation's JSON keys.
+pub(crate) fn parse_mline_style_json(
+    name: &str,
+    keys: &serde_json::Map<String, serde_json::Value>,
+    units: Unit,
+    linetypes: &[crate::model::Linetype],
+) -> Result<crate::model::MLineStyle, Error> {
+    let wrapper = Node::new(Kind::Mapping(vec![Entry {
+        key: name.to_owned(),
+        key_at: Pos { line: 0, column: 0 },
+        key_end: 0,
+        value: json_to_node(&serde_json::Value::Object(keys.clone())),
+    }]));
+    let mut styles =
+        extra::read_mline_styles(&wrapper, units, linetypes).map_err(strip_zero_pos)?;
+    styles.pop().ok_or_else(|| {
+        Error::new(
+            ErrorCode::BadValue,
+            format!("could not parse multiline style `{name}`"),
+        )
     })
 }
 

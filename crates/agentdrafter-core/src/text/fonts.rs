@@ -239,6 +239,105 @@ pub(crate) struct Line {
     pub extent: Option<Rect>,
 }
 
+/// Finds and parses an `.shx` shape file by name from `extra_dirs` (such as a
+/// sheet's folder) followed by `settings.font_folders`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn load_shape_file(
+    file: &str,
+    settings: &Settings,
+    extra_dirs: &[&Path],
+) -> Option<super::shx::ShxShapeFile> {
+    if file.trim().is_empty() {
+        return None;
+    }
+    let direct = Path::new(file);
+    let candidate_name = direct.file_name().and_then(|n| n.to_str()).unwrap_or(file);
+    let with_ext = if candidate_name.to_ascii_lowercase().ends_with(".shx") {
+        candidate_name.to_owned()
+    } else {
+        format!("{candidate_name}.shx")
+    };
+    let found = if direct.is_absolute() && direct.is_file() {
+        Some(direct.to_path_buf())
+    } else {
+        extra_dirs
+            .iter()
+            .find_map(|dir| {
+                let joined = dir.join(file);
+                if joined.is_file() {
+                    Some(joined)
+                } else {
+                    file_in(dir, &with_ext)
+                }
+            })
+            .or_else(|| {
+                settings
+                    .font_folders
+                    .iter()
+                    .find_map(|folder| file_in(folder, &with_ext))
+            })
+    }?;
+    let bytes = fs::read(&found).ok()?;
+    super::shx::ShxShapeFile::parse(&bytes).ok()
+}
+
+/// Populates `sheet.resolved_shapes` for every [`crate::model::ShxShape`] on
+/// `sheet` and inside its blocks (and fills missing shape `number`/`name` pairs
+/// when resolved from the `.shx` file).
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn resolve_sheet_shapes(
+    _sheet: &mut crate::model::Sheet,
+    _settings: &Settings,
+    _extra_dirs: &[&Path],
+) {
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn resolve_sheet_shapes(
+    sheet: &mut crate::model::Sheet,
+    settings: &Settings,
+    extra_dirs: &[&Path],
+) {
+    use std::collections::HashMap;
+    let mut cache: HashMap<String, Option<super::shx::ShxShapeFile>> = HashMap::new();
+    let mut resolved = Vec::new();
+    let mut seen: HashSet<(String, i32, String)> = HashSet::new();
+
+    let mut visit = |shape: &crate::model::ShxShape| {
+        let key = shape.file.to_lowercase();
+        let loaded = cache
+            .entry(key.clone())
+            .or_insert_with(|| load_shape_file(&shape.file, settings, extra_dirs));
+        if let Some(shx) = loaded.as_ref() {
+            if let Some((num, name, strokes)) = shx.resolve(shape.number, &shape.name, 0.02) {
+                let dedup = (key, num, name.to_lowercase());
+                if seen.insert(dedup) {
+                    resolved.push(crate::model::ResolvedShape {
+                        file: shape.file.clone(),
+                        name,
+                        number: num,
+                        strokes,
+                    });
+                }
+            }
+        }
+    };
+
+    for obj in &sheet.objects {
+        if let crate::model::Object::Shape(s) = obj {
+            visit(s);
+        }
+    }
+    for block in sheet.blocks.iter().chain(&sheet.resolved_xrefs) {
+        for obj in &block.objects {
+            if let crate::model::Object::Shape(s) = obj {
+                visit(s);
+            }
+        }
+    }
+    sheet.resolved_shapes = resolved;
+}
+
 /// The font a style names, found in the font folders, or its look-alike,
 /// with a report of which was used.
 pub(crate) fn find(name: &str, settings: &Settings) -> (Font, FontUsed) {

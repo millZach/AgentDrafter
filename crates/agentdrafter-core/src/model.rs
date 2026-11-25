@@ -20,6 +20,7 @@ pub(crate) mod annotation_scale;
 pub(crate) mod block;
 pub(crate) mod dimension;
 pub(crate) mod dynamic_block;
+pub(crate) mod extra;
 pub(crate) mod field;
 pub(crate) mod group;
 pub(crate) mod hatch;
@@ -45,6 +46,11 @@ pub use dimension::{
 pub use dynamic_block::{
     is_default_state, resolve_state, DynamicParameter, DynamicParameterKind, DynamicValue,
     LookupRow, VisibilityState,
+};
+pub use extra::{
+    is_valid_pdmode, normalize_point3, CenterLine, CenterMark, MLine, MLineElement,
+    MLineJustification, MLineStyle, Point, Ray, ResolvedShape, ShxShape, Tolerance, XLine,
+    STANDARD_MLINE_STYLE,
 };
 pub use field::{FieldItem, FieldKind, TextField, DEFAULT_FIELD_TEMPLATE, UNEVALUATED_FIELD};
 pub use group::Group;
@@ -373,6 +379,25 @@ pub enum Object {
     RasterImage(RasterImage),
     /// An attached PDF underlay (`PDFUNDERLAY` / `PDFATTACH`).
     PdfUnderlay(PdfUnderlay),
+    /// A point entity (`POINT`).
+    Point(Point),
+    /// An infinite construction line (`XLINE`).
+    #[serde(rename = "xline")]
+    XLine(XLine),
+    /// A semi-infinite ray (`RAY`).
+    Ray(Ray),
+    /// A multiline (`MLINE`).
+    #[serde(rename = "mline")]
+    MLine(MLine),
+    /// A geometric tolerance feature control frame (`TOLERANCE`).
+    Tolerance(Tolerance),
+    /// A circular centre mark (`CENTERMARK`).
+    CenterMark(CenterMark),
+    /// A straight centre line (`CENTERLINE`).
+    CenterLine(CenterLine),
+    /// An SHX shape entity (`SHAPE`).
+    #[serde(rename = "shape")]
+    Shape(ShxShape),
 }
 
 impl Object {
@@ -401,6 +426,14 @@ impl Object {
             Object::Viewport(_) => "viewport",
             Object::RasterImage(_) => "image",
             Object::PdfUnderlay(_) => "pdf_underlay",
+            Object::Point(_) => "point",
+            Object::XLine(_) => "xline",
+            Object::Ray(_) => "ray",
+            Object::MLine(_) => "mline",
+            Object::Tolerance(_) => "tolerance",
+            Object::CenterMark(_) => "center_mark",
+            Object::CenterLine(_) => "center_line",
+            Object::Shape(_) => "shape",
         }
     }
 
@@ -429,6 +462,14 @@ impl Object {
             Object::Viewport(o) => &o.layer,
             Object::RasterImage(o) => &o.layer,
             Object::PdfUnderlay(o) => &o.layer,
+            Object::Point(o) => &o.layer,
+            Object::XLine(o) => &o.layer,
+            Object::Ray(o) => &o.layer,
+            Object::MLine(o) => &o.layer,
+            Object::Tolerance(o) => &o.layer,
+            Object::CenterMark(o) => &o.layer,
+            Object::CenterLine(o) => &o.layer,
+            Object::Shape(o) => &o.layer,
         }
     }
 
@@ -457,6 +498,14 @@ impl Object {
             Object::Viewport(o) => &o.properties,
             Object::RasterImage(o) => &o.properties,
             Object::PdfUnderlay(o) => &o.properties,
+            Object::Point(o) => &o.properties,
+            Object::XLine(o) => &o.properties,
+            Object::Ray(o) => &o.properties,
+            Object::MLine(o) => &o.properties,
+            Object::Tolerance(o) => &o.properties,
+            Object::CenterMark(o) => &o.properties,
+            Object::CenterLine(o) => &o.properties,
+            Object::Shape(o) => &o.properties,
         }
     }
 
@@ -484,6 +533,14 @@ impl Object {
             Object::Viewport(o) => &mut o.properties,
             Object::RasterImage(o) => &mut o.properties,
             Object::PdfUnderlay(o) => &mut o.properties,
+            Object::Point(o) => &mut o.properties,
+            Object::XLine(o) => &mut o.properties,
+            Object::Ray(o) => &mut o.properties,
+            Object::MLine(o) => &mut o.properties,
+            Object::Tolerance(o) => &mut o.properties,
+            Object::CenterMark(o) => &mut o.properties,
+            Object::CenterLine(o) => &mut o.properties,
+            Object::Shape(o) => &mut o.properties,
         }
     }
 
@@ -949,6 +1006,17 @@ pub struct Sheet {
     /// listing it; listing it here sets what it draws with.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dimension_styles: Vec<DimensionStyle>,
+    /// The multiline styles the sheet defines (`MLSTYLE`). Style `Standard`
+    /// is built in; listing it here sets its elements and caps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mline_styles: Vec<MLineStyle>,
+    /// Point display mode (`PDMODE`), controlling how `point` objects draw.
+    #[serde(default, skip_serializing_if = "extra::is_zero_i16")]
+    pub pdmode: i16,
+    /// Point display size (`PDSIZE`): positive for absolute drawing units,
+    /// `0` for 5% of viewport/drawing height, negative for `|pdsize|%`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pdsize: f64,
     /// The blocks the sheet's inserts place, as the block library defines
     /// them. The layers, linetypes and text styles their objects use are
     /// among the sheet's.
@@ -966,6 +1034,10 @@ pub struct Sheet {
     /// drawing, querying and checking. Never serialized into sheet descriptions.
     #[serde(skip)]
     pub resolved_media: Vec<ResolvedMedia>,
+    /// Runtime-resolved SHX shape strokes decoded from `.shx` shape files on
+    /// disk for drawing and DWG shape-number lookup. Never serialized.
+    #[serde(skip)]
+    pub resolved_shapes: Vec<ResolvedShape>,
     pub objects: Vec<Object>,
     /// The paper the sheet is drawn on, if its sheet description or
     /// template declares it. Only the checker reads it: a build, a render
@@ -1241,6 +1313,28 @@ impl Sheet {
             .or_else(|| DimensionStyle::built_in(name, self.units))
     }
 
+    /// The multiline style named `name` an [`MLine`] draws with: one the sheet
+    /// defines, or `Standard` when not overridden.
+    pub fn mline_style(&self, name: &str) -> Option<MLineStyle> {
+        self.mline_styles
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
+            .cloned()
+            .or_else(|| {
+                name.eq_ignore_ascii_case(STANDARD_MLINE_STYLE)
+                    .then(MLineStyle::standard)
+            })
+    }
+
+    /// Returns the runtime-resolved SHX shape strokes matching `shape`, if loaded.
+    pub fn resolved_shape_for(&self, shape: &ShxShape) -> Option<&ResolvedShape> {
+        self.resolved_shapes.iter().find(|r| {
+            r.file.eq_ignore_ascii_case(&shape.file)
+                && (shape.number.is_some_and(|n| r.number == n)
+                    || (!shape.name.is_empty() && r.name.eq_ignore_ascii_case(&shape.name)))
+        })
+    }
+
     /// Active annotation scale name (`CANNOSCALE`), defaulting to `"1:1"`.
     pub fn active_annotation_scale_name(&self) -> &str {
         self.annotation_scale
@@ -1454,6 +1548,15 @@ pub struct DrawingContents {
     /// own `Standard` that no dimension draws with is not counted.
     #[serde(default)]
     pub dimension_styles_not_read: usize,
+    /// The drawing's multiline styles (`ACAD_MLINESTYLE`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mline_styles: Vec<MLineStyle>,
+    /// Point display mode (`PDMODE`), read from header.
+    #[serde(default, skip_serializing_if = "extra::is_zero_i16")]
+    pub pdmode: i16,
+    /// Point display size (`PDSIZE`), read from header.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pdsize: f64,
     /// The drawing's block definitions the core has a model for, in table
     /// order, leaving out model space and the layouts.
     pub blocks: Vec<Block>,

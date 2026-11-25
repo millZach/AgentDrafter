@@ -314,6 +314,36 @@ impl Outline {
                     }
                     crossed(pieces, true)
                 }
+                Object::Point(pt) => crossed(
+                    vec![Piece::Segment(flat(pt.position), flat(pt.position))],
+                    false,
+                ),
+                Object::CenterLine(cl) => {
+                    let (a, b) = cl.extended_endpoints();
+                    crossed(vec![Piece::Segment(flat(a), flat(b))], true)
+                }
+                Object::CenterMark(cm) => {
+                    let pieces = cm
+                        .segments()
+                        .into_iter()
+                        .map(|[a, b]| Piece::Segment(flat(a), flat(b)))
+                        .collect();
+                    crossed(pieces, true)
+                }
+                Object::MLine(ml) => {
+                    let mut pieces = Vec::new();
+                    for w in ml.points.windows(2) {
+                        pieces.push(Piece::Segment(flat(w[0]), flat(w[1])));
+                    }
+                    if ml.closed && ml.points.len() >= 3 {
+                        pieces.push(Piece::Segment(
+                            flat(*ml.points.last().unwrap()),
+                            flat(ml.points[0]),
+                        ));
+                    }
+                    crossed(pieces, true)
+                }
+                Object::XLine(_) | Object::Ray(_) | Object::Tolerance(_) | Object::Shape(_) => {}
                 Object::Arc(a) => crossed(
                     vec![degrees_arc(a.center, a.radius, a.start_angle, a.end_angle)],
                     true,

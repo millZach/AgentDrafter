@@ -9,6 +9,11 @@ use super::blocks::{
     attribute_definition, insert, Noticed, ATTDEF_KEYS, BLOCK_TEXT_KEYS, INSERT_KEYS,
 };
 use super::dimension::{dimension, DIMENSION_KEYS};
+use super::extra::{
+    read_center_line, read_center_mark, read_mline, read_point, read_ray, read_shape,
+    read_tolerance, read_xline, CENTER_LINE_KEYS, CENTER_MARK_KEYS, MLINE_KEYS, POINT_KEYS,
+    RAY_KEYS, SHAPE_KEYS, TOLERANCE_KEYS, XLINE_KEYS,
+};
 use super::hatch::{self, HATCH_KEYS};
 use super::ids::{object_record, ObjectRecord, SHEET_OBJECT_KEYS};
 use super::layers::{layer_name, properties};
@@ -37,7 +42,7 @@ use crate::units::Unit;
 type ObjectType = (&'static str, &'static [&'static str]);
 
 /// The drawn objects both a sheet and a block hold, and the keys each takes.
-const DRAWN_OBJECT_TYPES: [ObjectType; 15] = [
+const DRAWN_OBJECT_TYPES: [ObjectType; 23] = [
     ("line", &LINE_KEYS),
     ("polyline", &POLYLINE_KEYS),
     ("arc", &ARC_KEYS),
@@ -53,11 +58,19 @@ const DRAWN_OBJECT_TYPES: [ObjectType; 15] = [
     ("wipeout", &WIPEOUT_KEYS),
     ("image", &IMAGE_KEYS),
     ("pdf_underlay", &PDF_UNDERLAY_KEYS),
+    ("point", &POINT_KEYS),
+    ("xline", &XLINE_KEYS),
+    ("ray", &RAY_KEYS),
+    ("mline", &MLINE_KEYS),
+    ("tolerance", &TOLERANCE_KEYS),
+    ("center_mark", &CENTER_MARK_KEYS),
+    ("center_line", &CENTER_LINE_KEYS),
+    ("shape", &SHAPE_KEYS),
 ];
 
 /// The drawn objects followed by one more object type.
-const fn drawn_and(last: ObjectType) -> [ObjectType; 16] {
-    let mut types = [last; 16];
+const fn drawn_and(last: ObjectType) -> [ObjectType; 24] {
+    let mut types = [last; 24];
     let mut i = 0;
     while i < DRAWN_OBJECT_TYPES.len() {
         types[i] = DRAWN_OBJECT_TYPES[i];
@@ -69,18 +82,18 @@ const fn drawn_and(last: ObjectType) -> [ObjectType; 16] {
 /// Every object type a sheet description can hold, and the keys each takes:
 /// the drawn objects, inserts, tables, multileaders, older leaders,
 /// dimensions and viewports.
-pub(crate) const OBJECT_TYPES: [ObjectType; 21] = {
+pub(crate) const OBJECT_TYPES: [ObjectType; 29] = {
     let drawn = drawn_and(("insert", &INSERT_KEYS));
-    let mut types = [("table", &TABLE_KEYS as &[&str]); 21];
+    let mut types = [("table", &TABLE_KEYS as &[&str]); 29];
     let mut i = 0;
     while i < drawn.len() {
         types[i] = drawn[i];
         i += 1;
     }
-    types[17] = ("mleader", &MLEADER_KEYS);
-    types[18] = ("leader", &LEADER_KEYS);
-    types[19] = ("dimension", &DIMENSION_KEYS);
-    types[20] = ("viewport", &VIEWPORT_KEYS);
+    types[25] = ("mleader", &MLEADER_KEYS);
+    types[26] = ("leader", &LEADER_KEYS);
+    types[27] = ("dimension", &DIMENSION_KEYS);
+    types[28] = ("viewport", &VIEWPORT_KEYS);
     types
 };
 
@@ -88,9 +101,9 @@ pub(crate) const OBJECT_TYPES: [ObjectType; 21] = {
 /// each takes: the drawn objects a sheet holds, attribute definitions, and
 /// inserts of the library's other blocks. A text in a block takes its cell
 /// as well.
-pub(crate) const BLOCK_OBJECT_TYPES: [ObjectType; 17] = {
+pub(crate) const BLOCK_OBJECT_TYPES: [ObjectType; 25] = {
     let drawn = drawn_and(("attdef", &ATTDEF_KEYS));
-    let mut types = [("insert", &INSERT_KEYS as &[&str]); 17];
+    let mut types = [("insert", &INSERT_KEYS as &[&str]); 25];
     let mut i = 0;
     while i < drawn.len() {
         types[i] = drawn[i];
@@ -136,6 +149,8 @@ pub(super) struct Tables<'a> {
     pub mleader_styles: &'a [MLeaderStyle],
     /// The dimension styles a sheet's dimensions may name; none in a block.
     pub dimension_styles: &'a [DimensionStyle],
+    /// The multiline styles a sheet's multilines may name; none in a block.
+    pub mline_styles: &'a [crate::model::MLineStyle],
     /// The names of the layouts the sheet is drawn in, in order, so that
     /// its objects may be in one's paper space; none in a block.
     pub layouts: &'a [String],
@@ -299,7 +314,9 @@ const SPLINE_KEYS: [&str; 10] = [
 /// The article an object type takes in a message: `an` for `arc`,
 /// `ellipse`, `insert` and `mtext`, `a` for the others.
 pub(crate) fn article(object: &str) -> &'static str {
-    if object.starts_with(['a', 'e', 'i', 'o', 'u']) || object == "mtext" || object == "mleader" {
+    if object.starts_with(['a', 'e', 'i', 'o', 'u'])
+        || matches!(object, "mtext" | "mleader" | "xline" | "mline")
+    {
         "an"
     } else {
         "a"
@@ -383,6 +400,16 @@ pub(super) fn object(
         ("wipeout", _) => wipeout(&fields, units, layer).map(Object::Wipeout),
         ("image", _) => raster_image(&fields, units, layer).map(Object::RasterImage),
         ("pdf_underlay", _) => pdf_underlay(&fields, units, layer).map(Object::PdfUnderlay),
+        ("point", _) => read_point(&fields, units, layer).map(Object::Point),
+        ("xline", _) => read_xline(&fields, units, layer).map(Object::XLine),
+        ("ray", _) => read_ray(&fields, units, layer).map(Object::Ray),
+        ("mline", _) => read_mline(&fields, units, layer, tables.mline_styles).map(Object::MLine),
+        ("tolerance", _) => {
+            read_tolerance(&fields, units, layer, tables.dimension_styles).map(Object::Tolerance)
+        }
+        ("center_mark", _) => read_center_mark(&fields, units, layer).map(Object::CenterMark),
+        ("center_line", _) => read_center_line(&fields, units, layer).map(Object::CenterLine),
+        ("shape", _) => read_shape(&fields, units, layer).map(Object::Shape),
         ("arc", _) => arc(&fields, units, layer).map(Object::Arc),
         ("circle", _) => circle(&fields, units, layer).map(Object::Circle),
         ("ellipse", _) => ellipse(&fields, units, layer).map(Object::Ellipse),

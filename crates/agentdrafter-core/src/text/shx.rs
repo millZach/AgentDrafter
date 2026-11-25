@@ -186,6 +186,89 @@ impl ShxFont {
         Some(((pen.x * scale, pen.y * scale), strokes))
     }
 
+    /// Reads an SHX shape file (with or without a shape 0 font header) into a
+    /// [`ShxShapeFile`] whose shapes can be looked up by name or number.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn parse_shape_file(bytes: &[u8]) -> Result<ShxShapeFile, String> {
+        let end_of_header = bytes
+            .iter()
+            .position(|&b| b == 0x1a)
+            .filter(|&at| at < 40)
+            .ok_or("it does not start with an SHX header")?;
+        let header = String::from_utf8_lossy(&bytes[..end_of_header]);
+        let header = header.trim_end();
+        let mut reader = Reader {
+            bytes,
+            at: end_of_header + 1,
+        };
+        let mut names_by_number: HashMap<u32, String> = HashMap::new();
+        let mut numbers_by_name: HashMap<String, u32> = HashMap::new();
+        let mut shapes: HashMap<u32, Vec<u8>> = HashMap::new();
+        let unifont = match header {
+            "AutoCAD-86 unifont 1.0" => {
+                let count = reader.u32()?;
+                let info_length = usize::from(reader.u16()?);
+                let _info = reader.take(info_length)?;
+                for _ in 1..count {
+                    if reader.at >= reader.bytes.len() {
+                        break;
+                    }
+                    let number = u32::from(reader.u16()?);
+                    let length = usize::from(reader.u16()?);
+                    let definition = reader.take(length)?;
+                    let (name, program) = split_name_and_program(definition);
+                    if !name.is_empty() {
+                        numbers_by_name.insert(name.to_lowercase(), number);
+                        names_by_number.insert(number, name);
+                    }
+                    shapes.insert(number, program.to_vec());
+                }
+                true
+            }
+            "AutoCAD-86 shapes 1.0" | "AutoCAD-86 shapes 1.1" => {
+                let _first = reader.u16()?;
+                let _last = reader.u16()?;
+                let count = usize::from(reader.u16()?);
+                let mut index = Vec::with_capacity(count);
+                for _ in 0..count {
+                    index.push((reader.u16()?, usize::from(reader.u16()?)));
+                }
+                for (number, length) in index {
+                    let definition = reader.take(length)?;
+                    if number == 0 {
+                        continue;
+                    }
+                    let num = u32::from(number);
+                    let (name, program) = split_name_and_program(definition);
+                    if !name.is_empty() {
+                        numbers_by_name.insert(name.to_lowercase(), num);
+                        names_by_number.insert(num, name);
+                    }
+                    shapes.insert(num, program.to_vec());
+                }
+                false
+            }
+            "AutoCAD-86 bigfont 1.0" => {
+                return Err("it is a big font, which AgentDrafter does not read".to_owned());
+            }
+            other => {
+                return Err(format!(
+                    "its header `{other}` is not one AgentDrafter reads"
+                ));
+            }
+        };
+        Ok(ShxShapeFile {
+            font: ShxFont {
+                above: 1.0,
+                below: 0.0,
+                unifont,
+                shapes,
+            },
+            names_by_number,
+            numbers_by_name,
+        })
+    }
+
     /// The shape that draws `c`: its own, or `?` when the font has none.
     fn shape_for(&self, c: char) -> u32 {
         let number = u32::from(c);
@@ -414,6 +497,78 @@ fn half_through_180(start: f64, sweep: f64) -> bool {
         start > SLACK && start < PI - SLACK
     } else {
         start > PI + SLACK && start < TAU - SLACK
+    }
+}
+
+/// A compiled SHX shape file (`.shx`), indexed by both shape number and name.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub(crate) struct ShxShapeFile {
+    font: ShxFont,
+    names_by_number: HashMap<u32, String>,
+    numbers_by_name: HashMap<String, u32>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ShxShapeFile {
+    /// Parses an SHX shape file from raw bytes.
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, String> {
+        ShxFont::parse_shape_file(bytes)
+    }
+
+    /// Resolves a shape by optional number and/or name (case-insensitive) and
+    /// traces its vector strokes in the file's own shape units.
+    pub(crate) fn resolve(
+        &self,
+        number: Option<i32>,
+        name: &str,
+        tolerance: f64,
+    ) -> Option<(i32, String, Strokes)> {
+        let num = if let Some(n) = number.filter(|&n| n > 0) {
+            let u = n as u32;
+            if self.font.shapes.contains_key(&u) {
+                u
+            } else if !name.is_empty() {
+                *self.numbers_by_name.get(&name.to_lowercase())?
+            } else {
+                return None;
+            }
+        } else if !name.is_empty() {
+            *self.numbers_by_name.get(&name.to_lowercase())?
+        } else {
+            return None;
+        };
+        let mut pen = Pen {
+            trace: Some(Trace {
+                runs: Vec::new(),
+                open: false,
+                tolerance: tolerance.max(1e-4),
+            }),
+            ..Pen::default()
+        };
+        self.font.run(num, &mut pen, 0).ok()?;
+        let runs = pen.trace.map_or_else(Vec::new, |trace| trace.runs);
+        let strokes: Strokes = runs
+            .into_iter()
+            .map(|run| run.into_iter().map(|(x, y)| [x, y]).collect())
+            .collect();
+        let resolved_name = self
+            .names_by_number
+            .get(&num)
+            .cloned()
+            .unwrap_or_else(|| name.to_owned());
+        Some((num as i32, resolved_name, strokes))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn split_name_and_program(definition: &[u8]) -> (String, &[u8]) {
+    match definition.iter().position(|&b| b == 0) {
+        Some(end) => (
+            String::from_utf8_lossy(&definition[..end]).into_owned(),
+            &definition[end + 1..],
+        ),
+        None => (String::new(), definition),
     }
 }
 

@@ -172,6 +172,10 @@ pub use model::{
     DynamicParameterKind, DynamicValue, Insert, LookupRow, VisibilityState,
 };
 pub use model::{
+    is_valid_pdmode, CenterLine, CenterMark, MLine, MLineElement, MLineJustification, MLineStyle,
+    Point, Ray, ResolvedShape, ShxShape, Tolerance, XLine, STANDARD_MLINE_STYLE,
+};
+pub use model::{
     AngularUnit, DecimalSeparator, Dimension, DimensionKind, DimensionPart, DimensionStyle,
     FractionFormat, LaidDimension, Measured, OrdinateAxis, TextPlacement, UnitFormat, DEGREE_SIGN,
     DIAMETER_SIGN, ISO_DIMENSION_STYLE, STANDARD_DIMENSION_STYLE,

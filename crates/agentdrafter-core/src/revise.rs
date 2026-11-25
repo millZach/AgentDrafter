@@ -1034,6 +1034,73 @@ fn prepare_revision(
                     created: Vec::new(),
                 }
             }
+            Body::SetPointStyle { to, pdmode, pdsize } => {
+                check_add_target_sheet(to, &sheet_name, op)?;
+                let msg = session.set_point_style(*pdmode, *pdsize).map_err(|e| {
+                    let f = e.field.as_deref().unwrap_or("");
+                    op_error(op.index, op.spec.name, e.code, e.message, f)
+                })?;
+                RevisionOperationOutcome {
+                    index: op.index,
+                    op: op.spec.name.to_owned(),
+                    ok: true,
+                    message: msg,
+                    id: None,
+                    handle: None,
+                    handles_touched: Vec::new(),
+                    handles_added: Vec::new(),
+                    handles_deleted: Vec::new(),
+                    copies: Vec::new(),
+                    snapped: Vec::new(),
+                    replacements: Vec::new(),
+                    attributes_set: Vec::new(),
+                    split_id: None,
+                    deleted: Vec::new(),
+                    transformed: Vec::new(),
+                    created: Vec::new(),
+                }
+            }
+            Body::AddMLineStyle { to, name, style } => {
+                check_add_target_sheet(to, &sheet_name, op)?;
+                let tables = session.tables_for_parsing();
+                let parsed_style = crate::description::parse_mline_style_json(
+                    name,
+                    style,
+                    units.unwrap_or(Unit::Mm),
+                    &tables.linetypes,
+                )
+                .map_err(|e| {
+                    let f = e.field.as_deref().unwrap_or("");
+                    op_error(op.index, op.spec.name, e.code, e.message, f)
+                })?;
+                let (msg, handles) = session.add_mline_style(&parsed_style).map_err(|e| {
+                    let f = e.field.as_deref().unwrap_or("");
+                    op_error(op.index, op.spec.name, e.code, e.message, f)
+                })?;
+                RevisionOperationOutcome {
+                    index: op.index,
+                    op: op.spec.name.to_owned(),
+                    ok: true,
+                    message: msg,
+                    id: None,
+                    handle: handles
+                        .added
+                        .first()
+                        .or_else(|| handles.touched.first())
+                        .cloned(),
+                    handles_touched: handles.touched,
+                    handles_added: handles.added,
+                    handles_deleted: handles.deleted,
+                    copies: Vec::new(),
+                    snapped: Vec::new(),
+                    replacements: Vec::new(),
+                    attributes_set: Vec::new(),
+                    split_id: None,
+                    deleted: Vec::new(),
+                    transformed: Vec::new(),
+                    created: Vec::new(),
+                }
+            }
             Body::SetObjectScales {
                 targets,
                 annotative,
@@ -2021,10 +2088,14 @@ fn revise_bind_xref(
         table_styles: Vec::new(),
         mleader_styles: Vec::new(),
         dimension_styles: Vec::new(),
+        mline_styles: Vec::new(),
+        pdmode: 0,
+        pdsize: 0.0,
         blocks: Vec::new(),
         xrefs: Vec::new(),
         resolved_xrefs: Vec::new(),
         resolved_media: Vec::new(),
+        resolved_shapes: Vec::new(),
         objects: Vec::new(),
         paper: None,
         page_setup: None,
@@ -2106,6 +2177,14 @@ fn apply_revision_op(
                             | "wipeout"
                             | "image"
                             | "pdf_underlay"
+                            | "point"
+                            | "xline"
+                            | "ray"
+                            | "mline"
+                            | "tolerance"
+                            | "center_mark"
+                            | "center_line"
+                            | "shape"
                             | "insert"
                     ) =>
                 {
@@ -2160,6 +2239,8 @@ fn apply_revision_op(
                 &tables.styles,
                 &tables.blocks,
                 &tables.layouts,
+                &tables.dimension_styles,
+                &tables.mline_styles,
             )
             .map_err(|e| {
                 let field = e.field.as_deref().unwrap_or("");
@@ -2401,6 +2482,8 @@ fn apply_revision_op(
                 &tables.styles,
                 &tables.blocks,
                 &tables.layouts,
+                &tables.dimension_styles,
+                &tables.mline_styles,
             )
             .map_err(|e| {
                 let field = e.field.as_deref().unwrap_or("");
@@ -4580,7 +4663,9 @@ fn apply_revision_op(
         | Body::Ungroup { .. }
         | Body::EditGroup { .. }
         | Body::SetAnnotationScale { .. }
-        | Body::SetObjectScales { .. } => {
+        | Body::SetObjectScales { .. }
+        | Body::SetPointStyle { .. }
+        | Body::AddMLineStyle { .. } => {
             unreachable!("handled before apply_revision_op")
         }
         Body::Table {

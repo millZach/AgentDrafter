@@ -290,7 +290,12 @@ pub fn plot_with(request: &PlotRequest, settings: &Settings) -> Result<PlotRepor
         .map(|name| plot_style(Some(name), settings))
         .transpose()?;
     let source = request.source.as_path();
-    let record = read_record(source)?;
+    let mut record = read_record(source)?;
+    if let Some(dir) = source.parent() {
+        crate::text::fonts::resolve_sheet_shapes(&mut record.sheet, settings, &[dir]);
+    } else {
+        crate::text::fonts::resolve_sheet_shapes(&mut record.sheet, settings, &[]);
+    }
     let style = match explicit_style {
         Some(style) => style,
         None => plot_style_for_sheet(&record.sheet, settings)?,
@@ -610,10 +615,14 @@ pub(crate) fn plot_dwg_bytes(
         table_styles: drawing.table_styles,
         mleader_styles: drawing.mleader_styles,
         dimension_styles: drawing.dimension_styles,
+        mline_styles: drawing.mline_styles,
+        pdmode: drawing.pdmode,
+        pdsize: drawing.pdsize,
         blocks: drawing.blocks,
         xrefs: drawing.xrefs,
         resolved_xrefs: Vec::new(),
         resolved_media: Vec::new(),
+        resolved_shapes: Vec::new(),
         objects: drawing.objects,
         paper: drawing.paper,
         page_setup: drawing.page_setup,
@@ -633,6 +642,11 @@ pub(crate) fn plot_dwg_bytes(
     files.extend(resolved_xrefs.files);
     let resolved_media = crate::media::resolve_sheet_media_for_host(&mut sheet, source);
     files.extend(resolved_media.files);
+    if let Some(dir) = source.parent() {
+        crate::text::fonts::resolve_sheet_shapes(&mut sheet, settings, &[dir]);
+    } else {
+        crate::text::fonts::resolve_sheet_shapes(&mut sheet, settings, &[]);
+    }
     let record = Record {
         sheet,
         units: drawing.units,

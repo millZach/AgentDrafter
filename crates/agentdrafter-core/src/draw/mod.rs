@@ -57,6 +57,7 @@
 mod clip;
 pub(crate) mod color;
 pub(crate) mod curves;
+pub(crate) mod extra;
 pub(crate) mod hatch;
 mod layout;
 mod linetype;
@@ -740,9 +741,132 @@ struct Drawer<'a> {
     /// Whether annotative model-space objects draw even when their supported
     /// scale list does not match `annotation_scale` (`ANNOALLVISIBLE`).
     anno_all_visible: bool,
+    /// Optional explicit viewport bounds in model coordinates (for clipping
+    /// `xline`/`ray` and sizing `pdsize <= 0` points).
+    view_bounds: Option<Bounds>,
 }
 
 impl<'a> Drawer<'a> {
+    /// Bounds used to clip infinite `xline` / `ray` entities and compute
+    /// relative `PDSIZE <= 0` point marker sizes.
+    fn effective_view_bounds(&self) -> Bounds {
+        if let Some(b) = self.view_bounds {
+            return b;
+        }
+        if let Some(paper) = &self.sheet.paper {
+            return Bounds {
+                min: [0.0, 0.0],
+                max: [paper.width, paper.height],
+            };
+        }
+        let mut bounds: Option<Bounds> = None;
+        let mut include = |p: Point2| {
+            bounds = Some(match bounds {
+                None => Bounds { min: p, max: p },
+                Some(b) => Bounds {
+                    min: [b.min[0].min(p[0]), b.min[1].min(p[1])],
+                    max: [b.max[0].max(p[0]), b.max[1].max(p[1])],
+                },
+            });
+        };
+        for obj in &self.sheet.objects {
+            match obj {
+                Object::Line(o) => {
+                    include(flat(o.from));
+                    include(flat(o.to));
+                }
+                Object::Polyline(o) => {
+                    for &p in &o.points {
+                        include(flat(p));
+                    }
+                }
+                Object::Arc(o) => {
+                    let c = flat(o.center);
+                    include([c[0] - o.radius, c[1] - o.radius]);
+                    include([c[0] + o.radius, c[1] + o.radius]);
+                }
+                Object::Circle(o) => {
+                    let c = flat(o.center);
+                    include([c[0] - o.radius, c[1] - o.radius]);
+                    include([c[0] + o.radius, c[1] + o.radius]);
+                }
+                Object::Ellipse(o) => {
+                    let c = flat(o.center);
+                    let r = o.major_axis.x.hypot(o.major_axis.y);
+                    include([c[0] - r, c[1] - r]);
+                    include([c[0] + r, c[1] + r]);
+                }
+                Object::Spline(o) => {
+                    for &p in o.fit_points.iter().chain(&o.control_points) {
+                        include(flat(p));
+                    }
+                }
+                Object::Point(o) => include(flat(o.position)),
+                Object::MLine(o) => {
+                    for &p in &o.points {
+                        include(flat(p));
+                    }
+                }
+                Object::Tolerance(o) => include(flat(o.position)),
+                Object::CenterMark(o) => {
+                    let c = flat(o.center);
+                    let r = o.radius + o.effective_extension();
+                    include([c[0] - r, c[1] - r]);
+                    include([c[0] + r, c[1] + r]);
+                }
+                Object::CenterLine(o) => {
+                    let (a, b) = o.extended_endpoints();
+                    include(flat(a));
+                    include(flat(b));
+                }
+                Object::Shape(o) => include(flat(o.position)),
+                Object::Text(o) => include(flat(o.position)),
+                Object::MText(o) => include(flat(o.position)),
+                Object::Insert(o) => include(flat(o.position)),
+                Object::Solid(o) => {
+                    for &p in &o.corners {
+                        include(flat(p));
+                    }
+                }
+                Object::Donut(o) => {
+                    let c = flat(o.center);
+                    let r = o.outside_diameter * 0.5;
+                    include([c[0] - r, c[1] - r]);
+                    include([c[0] + r, c[1] + r]);
+                }
+                Object::Wipeout(o) => {
+                    for &p in &o.points {
+                        include(flat(p));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(b) = bounds {
+            let pad = b.width().max(b.height()).max(10.0) * 0.1;
+            return Bounds {
+                min: [b.min[0] - pad, b.min[1] - pad],
+                max: [b.max[0] + pad, b.max[1] + pad],
+            };
+        }
+        for obj in &self.sheet.objects {
+            let p = match obj {
+                Object::XLine(x) => Some(flat(x.through)),
+                Object::Ray(r) => Some(flat(r.from)),
+                _ => None,
+            };
+            if let Some(c) = p {
+                return Bounds {
+                    min: [c[0] - 50.0, c[1] - 50.0],
+                    max: [c[0] + 50.0, c[1] + 50.0],
+                };
+            }
+        }
+        Bounds {
+            min: [-50.0, -50.0],
+            max: [50.0, 50.0],
+        }
+    }
     /// How an object with `properties` on the layer named `layer` draws:
     /// with `by_block` where a property is `ByBlock`, the pen of the insert
     /// that draws it, if any.
@@ -899,6 +1023,20 @@ impl<'a> Drawer<'a> {
             self.dimension(index, dimension, inv, tolerance, list);
             return;
         }
+        if let Object::MLine(mline) = object {
+            extra::draw_mline(
+                self,
+                index,
+                &[],
+                mline,
+                &mline.layer,
+                None,
+                tolerance,
+                None,
+                list,
+            );
+            return;
+        }
         let shown = self.shown(object.layer());
         if shown == Shown::Hidden {
             return;
@@ -1034,6 +1172,24 @@ impl<'a> Drawer<'a> {
             // the block's box.
             let shown = self.shown(layer);
             if shown == Shown::Hidden {
+                continue;
+            }
+            if let Object::MLine(ml) = object {
+                let start_len = list.items.len();
+                extra::draw_mline(
+                    self,
+                    index,
+                    &here,
+                    ml,
+                    layer,
+                    Some(insert_pen),
+                    within,
+                    Some(&placed),
+                    list,
+                );
+                let new_pts = list.items[start_len..].iter().flat_map(Item::points);
+                let had = own.into_iter().flat_map(|b| [b.min, b.max]);
+                own = Bounds::of(had.chain(new_pts.map(|p| placed.back(p))));
                 continue;
             }
             let pen = self.pen(layer, object.properties(), Some(insert_pen));
@@ -1411,13 +1567,32 @@ impl<'a> Drawer<'a> {
                 pen.lineweight,
                 tolerance,
             )),
-            // An insert, a table and a leader draw nothing here: their own
-            // methods of [`Drawer`] draw them.
+            Object::Point(pt) => {
+                let vh = self.effective_view_bounds().height();
+                extra::draw_point(
+                    pt,
+                    self.sheet.pdmode,
+                    self.sheet.pdsize,
+                    vh,
+                    pen,
+                    tolerance,
+                    placed,
+                )
+            }
+            Object::XLine(xl) => extra::draw_xline(xl, self.effective_view_bounds(), pen, placed),
+            Object::Ray(ray) => extra::draw_ray(ray, self.effective_view_bounds(), pen, placed),
+            Object::Tolerance(tol) => extra::draw_tolerance(self, tol, pen, tolerance, placed),
+            Object::CenterMark(cm) => extra::draw_center_mark(cm, pen, placed),
+            Object::CenterLine(cl) => extra::draw_center_line(cl, pen, placed),
+            Object::Shape(sh) => extra::draw_shape(self, sh, pen, placed),
+            // An insert, a table, a leader and a multiline draw nothing here:
+            // their own methods of [`Drawer`] draw them.
             Object::Insert(_)
             | Object::Table(_)
             | Object::MLeader(_)
             | Object::Leader(_)
-            | Object::Dimension(_) => Drawn::default(),
+            | Object::Dimension(_)
+            | Object::MLine(_) => Drawn::default(),
         }
     }
 
@@ -1918,6 +2093,7 @@ pub(crate) fn draw_sheet_for(
         } else {
             sheet.anno_all_visible.unwrap_or(true)
         },
+        view_bounds: None,
     };
     let mut list = DisplayList::default();
     populate_images(sheet, &mut list);
@@ -1969,6 +2145,7 @@ pub(crate) fn draw_objects(
         frozen_here: &[],
         annotation_scale: sheet.active_annotation_scale().factor(),
         anno_all_visible: true,
+        view_bounds: None,
     };
     let mut list = DisplayList::default();
     populate_images(sheet, &mut list);
