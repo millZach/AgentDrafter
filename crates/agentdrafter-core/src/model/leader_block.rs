@@ -57,13 +57,15 @@ enum Piece {
 }
 
 /// Where a nested block's points land in the outermost block's
-/// coordinates: moved, scaled uniformly and turned.
+/// coordinates: moved, scaled uniformly, optionally mirrored and turned.
 #[derive(Clone, Copy, Debug)]
 struct Frame {
     origin: [f64; 2],
     scale: f64,
-    cos: f64,
-    sin: f64,
+    /// Linear map `[[xx, xy], [yx, yy]]` carrying vectors from the nested
+    /// block's coordinates into the outermost block's coordinates.
+    m: [[f64; 2]; 2],
+    mirrored: bool,
     base: [f64; 2],
 }
 
@@ -71,43 +73,55 @@ impl Frame {
     const OWN: Frame = Frame {
         origin: [0.0, 0.0],
         scale: 1.0,
-        cos: 1.0,
-        sin: 0.0,
+        m: [[1.0, 0.0], [0.0, 1.0]],
+        mirrored: false,
         base: [0.0, 0.0],
     };
 
     fn point(&self, p: [f64; 2]) -> [f64; 2] {
-        let x = (p[0] - self.base[0]) * self.scale;
-        let y = (p[1] - self.base[1]) * self.scale;
+        let dx = p[0] - self.base[0];
+        let dy = p[1] - self.base[1];
         [
-            self.origin[0] + x * self.cos - y * self.sin,
-            self.origin[1] + x * self.sin + y * self.cos,
+            self.origin[0] + self.m[0][0] * dx + self.m[0][1] * dy,
+            self.origin[1] + self.m[1][0] * dx + self.m[1][1] * dy,
         ]
     }
 
     fn vector(&self, v: [f64; 2]) -> [f64; 2] {
-        let (x, y) = (v[0] * self.scale, v[1] * self.scale);
-        [x * self.cos - y * self.sin, x * self.sin + y * self.cos]
+        [
+            self.m[0][0] * v[0] + self.m[0][1] * v[1],
+            self.m[1][0] * v[0] + self.m[1][1] * v[1],
+        ]
     }
 
-    fn angle(&self) -> f64 {
-        self.sin.atan2(self.cos)
-    }
-
-    /// The frame of an insert at `position`, `scale` and `degrees`, of a
-    /// block whose base point is `base`, placed in this frame.
-    fn within(&self, position: Point3, scale: f64, degrees: f64, base: Point3) -> Frame {
-        let (sin, cos) = degrees.to_radians().sin_cos();
-        let origin = self.point([position.x, position.y]);
-        let (s, c) = (
-            self.sin * cos + self.cos * sin,
-            self.cos * cos - self.sin * sin,
-        );
+    /// The frame of an insert at `position`, `scale`, `degrees` and
+    /// `mirrored`, of a block whose base point is `base`, placed in this frame.
+    fn within(
+        &self,
+        position: Point3,
+        scale: f64,
+        degrees: f64,
+        mirrored: bool,
+        base: Point3,
+    ) -> Frame {
+        let (sin, cos) = crate::description::sin_cos_degrees(degrees);
+        let sx = if mirrored { -scale } else { scale };
+        let im = [[sx * cos, -scale * sin], [sx * sin, scale * cos]];
+        let m = [
+            [
+                self.m[0][0] * im[0][0] + self.m[0][1] * im[1][0],
+                self.m[0][0] * im[0][1] + self.m[0][1] * im[1][1],
+            ],
+            [
+                self.m[1][0] * im[0][0] + self.m[1][1] * im[1][0],
+                self.m[1][0] * im[0][1] + self.m[1][1] * im[1][1],
+            ],
+        ];
         Frame {
-            origin,
+            origin: self.point([position.x, position.y]),
             scale: self.scale * scale,
-            cos: c,
-            sin: s,
+            m,
+            mirrored: self.mirrored ^ mirrored,
             base: [base.x, base.y],
         }
     }
@@ -120,12 +134,15 @@ impl Frame {
                 radius,
                 start,
                 sweep,
-            } => Piece::Arc {
-                center: self.point(center),
-                radius: radius * self.scale,
-                start: start + self.angle(),
-                sweep,
-            },
+            } => {
+                let d = self.vector([start.cos(), start.sin()]);
+                Piece::Arc {
+                    center: self.point(center),
+                    radius: radius * self.scale,
+                    start: libm::atan2(d[1], d[0]),
+                    sweep: if self.mirrored { -sweep } else { sweep },
+                }
+            }
             Piece::Ellipse {
                 center,
                 major,
@@ -435,6 +452,7 @@ impl Outline {
                         inner.position,
                         inner.scale,
                         inner.rotation,
+                        inner.mirrored,
                         nested.base_point,
                     );
                     self.add(nested, blocks, within, false, depth + 1)?;
@@ -1047,5 +1065,72 @@ mod tests {
             1.0,
         );
         close(placed.position, 236.36, 6.0);
+    }
+
+    #[test]
+    fn a_nested_mirrored_insert_mirrors_its_outline() {
+        // An asymmetric inner block occupying x in [2, 10], y in [-4, 4], with
+        // an arc on its right half (angles -90..90) and an offset ellipse.
+        let inner = block(
+            "INNER",
+            vec![
+                Object::Line(Line {
+                    from: p(2.0, -4.0),
+                    to: p(10.0, 4.0),
+                    layer: "0".into(),
+                    properties: Properties::default(),
+                }),
+                Object::Arc(crate::model::Arc {
+                    center: p(6.0, 0.0),
+                    radius: 4.0,
+                    start_angle: 270.0,
+                    end_angle: 90.0,
+                    layer: "0".into(),
+                    properties: Properties::default(),
+                }),
+            ],
+        );
+        let mirrored_insert = Object::Insert(Insert {
+            block: "INNER".into(),
+            position: p(0.0, 0.0),
+            scale: 1.0,
+            rotation: 0.0,
+            mirrored: true,
+            readable_attributes: false,
+            attributes: Vec::new(),
+            state: std::collections::BTreeMap::new(),
+            evaluated_block: None,
+            name: None,
+            layer: "0".into(),
+            properties: Properties::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
+        });
+        let outer = block("OUTER", vec![mirrored_insert]);
+        let blocks = [inner, outer.clone()];
+        let outline = Outline::of(&outer, &blocks).unwrap();
+        // Mirrored across Y: x in [-10, -2], y in [-4, 4].
+        // The mirrored arc sits around center (-6, 0), radius 4, sweeping the
+        // left semicircle (x = -10 at y = 0). Extents centre is (-6, 0).
+        // The landing's line along +X through (-6, 0) crosses at -10 (arc)
+        // and -6 (line from (-2, -4) to (-10, 4)): first crossing is -4 from
+        // attach (-6, 0), so placing with landing_end (100, 0) on the right
+        // puts attach at (104, 0) and block base (0, 0) at (110, 0).
+        let ext = outline.extents().unwrap();
+        assert!((ext[0][0] - (-10.0)).abs() < 1e-9, "{ext:?}");
+        assert!((ext[1][0] - (-2.0)).abs() < 1e-9, "{ext:?}");
+        assert!((ext[0][1] - (-4.0)).abs() < 1e-9, "{ext:?}");
+        assert!((ext[1][1] - 4.0).abs() < 1e-9, "{ext:?}");
+        let placed = place(
+            &outer,
+            &outline,
+            BlockConnection::Extents,
+            1.0,
+            0.0,
+            false,
+            p(100.0, 0.0),
+            1.0,
+        );
+        close(placed.position, 110.0, 0.0);
     }
 }

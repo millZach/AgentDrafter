@@ -261,12 +261,14 @@ impl Curve {
     }
 
     /// The curve placed by `place`, which moves, scales evenly by `scale`,
-    /// may mirror, when `mirrored`, and turns about the Z axis: `angle`
-    /// gives the direction, in radians, a direction of the curve's own
-    /// takes. A mirror reverses the way an arc runs.
+    /// may mirror, when `mirrored`, and turns about the Z axis: `vector`
+    /// transforms a 2D direction directly without translating through the
+    /// origin, and `angle` gives the direction, in radians, a direction of the
+    /// curve's own takes. A mirror reverses the way an arc runs.
     pub(crate) fn placed(
         &self,
         place: &dyn Fn(P3) -> P3,
+        vector: &dyn Fn([f64; 2]) -> [f64; 2],
         scale: f64,
         angle: &dyn Fn(f64) -> f64,
         mirrored: bool,
@@ -293,20 +295,13 @@ impl Curve {
                 minor,
                 start,
                 sweep,
-            } => {
-                let at = place(*center);
-                let vector = |v: [f64; 2]| {
-                    let tip = place([center[0] + v[0], center[1] + v[1], center[2]]);
-                    [tip[0] - at[0], tip[1] - at[1]]
-                };
-                Curve::Ellipse {
-                    center: at,
-                    major: vector(*major),
-                    minor: vector(*minor),
-                    start: *start,
-                    sweep: *sweep,
-                }
-            }
+            } => Curve::Ellipse {
+                center: place(*center),
+                major: vector(*major),
+                minor: vector(*minor),
+                start: *start,
+                sweep: *sweep,
+            },
             Curve::Spline(s) => Curve::Spline(s.placed(place)),
         }
     }
@@ -1417,5 +1412,56 @@ mod tests {
         let apart = parabola(-1.001, 0.999);
         assert!(crossings(&cup, &apart).is_empty());
         assert!(crossings(&apart, &cup).is_empty());
+    }
+
+    #[test]
+    fn ellipse_placed_through_insert_near_1e16_keeps_its_axes() {
+        let insert = crate::model::Insert {
+            block: "E".into(),
+            position: crate::model::Point3::new(1e16, 1e16, 0.0),
+            scale: 2.0,
+            rotation: 90.0,
+            mirrored: true,
+            readable_attributes: false,
+            attributes: Vec::new(),
+            state: std::collections::BTreeMap::new(),
+            evaluated_block: None,
+            name: None,
+            layer: "0".into(),
+            properties: Default::default(),
+            annotative: false,
+            annotation_scales: Vec::new(),
+        };
+        let placement =
+            crate::model::block::Placement::of(&insert, crate::model::Point3::new(0.0, 0.0, 0.0));
+        let ellipse = Curve::Ellipse {
+            center: [0.0, 0.0, 0.0],
+            major: [10.0, 0.0],
+            minor: [0.0, 4.0],
+            start: 0.0,
+            sweep: TAU,
+        };
+        let placed = ellipse.placed(
+            &|p| {
+                let q = placement.point(crate::model::Point3::new(p[0], p[1], p[2]));
+                [q.x, q.y, q.z]
+            },
+            &|v| placement.vector(v),
+            placement.scale(),
+            &|a| placement.radians(a),
+            placement.mirrored(),
+        );
+        match placed {
+            Curve::Ellipse { major, minor, .. } => {
+                // Mirrored (x -> -x), scaled by 2, rotated +90°:
+                // major [10, 0] -> [-20, 0] -> [0, -20]
+                // minor [0, 4]  -> [0, 8]   -> [-8, 0]
+                close(major[0], 0.0);
+                close(major[1], -20.0);
+                close(minor[0], -8.0);
+                close(minor[1], 0.0);
+            }
+            other => panic!("expected ellipse, got {other:?}"),
+        }
     }
 }

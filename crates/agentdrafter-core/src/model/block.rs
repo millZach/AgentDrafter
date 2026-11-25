@@ -445,6 +445,98 @@ pub fn attribute_mtext(
     }
 }
 
+/// Alternate [`attribute_text`] when the readable-direction cutoff at 90°/270°
+/// is close enough that a DWG's radian round trip could move the angle across
+/// the boundary (#250): the opposite side of the flip (rotation + 180°, and for
+/// a mirrored insert the opposite justification flip).
+pub(crate) fn attribute_text_alt(
+    insert: &Insert,
+    block: &Block,
+    definition: &AttributeDefinition,
+    value: &str,
+) -> Option<Text> {
+    let mut text = attribute_text(insert, block, definition, value);
+    if insert.mirrored {
+        let reflected = insert.rotation + 180.0 - definition.rotation;
+        if !near_readable_cutoff(definition.rotation) && !near_readable_cutoff(reflected) {
+            return None;
+        }
+        let (_, flip_horizontal) = mirrored_text_direction(definition.rotation, reflected);
+        let alt_flip_horizontal = !flip_horizontal;
+        let raw = normalize_degrees(reflected);
+        text.rotation = if alt_flip_horizontal {
+            normalize_degrees(raw + 180.0)
+        } else {
+            raw
+        };
+        text.justify = if alt_flip_horizontal {
+            definition.justify.flip_horizontal()
+        } else {
+            definition.justify.flip_vertical()
+        };
+        Some(text)
+    } else if insert.readable_attributes && !definition.constant {
+        let sum = definition.rotation + insert.rotation;
+        if !near_readable_cutoff(sum) {
+            return None;
+        }
+        text.rotation = normalize_degrees(text.rotation + 180.0);
+        Some(text)
+    } else {
+        None
+    }
+}
+
+/// Alternate [`attribute_mtext`] on the opposite side of the 90°/270°
+/// readable-direction cutoff when a DWG radian round trip could cross it
+/// (#250).
+pub(crate) fn attribute_mtext_alt(
+    insert: &Insert,
+    block: &Block,
+    definition: &AttributeDefinition,
+    value: &str,
+) -> Option<MText> {
+    let mut mtext = attribute_mtext(insert, block, definition, value);
+    if insert.mirrored {
+        let reflected = insert.rotation + 180.0 - definition.rotation;
+        if !near_readable_cutoff(definition.rotation) && !near_readable_cutoff(reflected) {
+            return None;
+        }
+        let (_, flip_horizontal) = mirrored_text_direction(definition.rotation, reflected);
+        let alt_flip_horizontal = !flip_horizontal;
+        let raw = normalize_degrees(reflected);
+        mtext.rotation = if alt_flip_horizontal {
+            normalize_degrees(raw + 180.0)
+        } else {
+            raw
+        };
+        let att = definition.attachment();
+        mtext.justify = if alt_flip_horizontal {
+            att.flip_horizontal()
+        } else {
+            att.flip_vertical()
+        };
+        Some(mtext)
+    } else if insert.readable_attributes && !definition.constant {
+        let sum = definition.rotation + insert.rotation;
+        if !near_readable_cutoff(sum) {
+            return None;
+        }
+        mtext.rotation = normalize_degrees(mtext.rotation + 180.0);
+        Some(mtext)
+    } else {
+        None
+    }
+}
+
+/// Whether `degrees` lies close enough to the 90°/270° readable-direction
+/// cutoff that a DWG's radian round trip can nudge it across the boundary
+/// (#250).
+pub(crate) fn near_readable_cutoff(degrees: f64) -> bool {
+    let d = normalize_degrees(degrees);
+    (d - 90.0).abs() <= 1e-6 || (d - 270.0).abs() <= 1e-6
+}
+
 /// Whether `degrees` reads left-to-right or upwards: in `[0, 90]` or
 /// `(270, 360)` (within [`CUTOFF_NOISE`] of the 90°/270° boundary).
 pub(crate) fn is_upright(degrees: f64) -> bool {
@@ -574,6 +666,15 @@ impl Placement {
             self.position.y + x * self.sin + y * self.cos,
             self.position.z + z,
         )
+    }
+
+    /// Where a 2D vector in the block's own coordinates points on the sheet,
+    /// transformed directly without translating through `position` (keeping
+    /// precision far from the origin).
+    pub(crate) fn vector(&self, v: [f64; 2]) -> [f64; 2] {
+        let x = v[0] * self.x_scale();
+        let y = v[1] * self.scale;
+        [x * self.cos - y * self.sin, x * self.sin + y * self.cos]
     }
 
     /// Where a placed point `[x, y]` is in the block's own coordinates.

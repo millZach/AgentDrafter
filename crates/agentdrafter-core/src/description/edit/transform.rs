@@ -115,6 +115,16 @@ impl Transform {
         matches!(self.how, How::Mirror(_))
     }
 
+    /// Whether this transform leaves every point, direction and length
+    /// unchanged: a turn by a whole number of full turns, or a scaling by 1.
+    pub(crate) fn is_noop(&self) -> bool {
+        match self.how {
+            How::Rotate(degrees) => whole_degrees(degrees) == 0.0,
+            How::Scale(factor) => factor == 1.0,
+            How::Mirror(_) => false,
+        }
+    }
+
     /// The word for what it does, as an error says it: `turn`, `scale` or
     /// `mirror`.
     fn verb(&self) -> &'static str {
@@ -137,6 +147,9 @@ impl Transform {
     /// Where a point lands. A turn and a mirror keep its Z; a scaling
     /// scales it about the point's Z too, as AutoCAD's SCALE does.
     pub(crate) fn point(&self, p: [f64; 3]) -> [f64; 3] {
+        if self.is_noop() {
+            return p;
+        }
         let x = p[0] - self.about[0];
         let y = p[1] - self.about[1];
         [
@@ -152,6 +165,9 @@ impl Transform {
     /// Where a direction `[dx, dy, dz]` points: its Z scaled with a
     /// scaling.
     fn vector(&self, v: [f64; 3]) -> [f64; 3] {
+        if self.is_noop() {
+            return v;
+        }
         [
             self.m[0][0] * v[0] + self.m[0][1] * v[1],
             self.m[1][0] * v[0] + self.m[1][1] * v[1],
@@ -386,6 +402,9 @@ impl At<'_> {
     /// keys it changed.
     fn object(&self, kind: &str, keys: &mut Vec<Entry>, path: &str) -> Result<Vec<String>, Error> {
         let t = self.t;
+        if t.is_noop() {
+            return Ok(Vec::new());
+        }
         let k = t.factor();
         let scaled = k != 1.0;
         let mut changed: Vec<String> = Vec::new();
@@ -979,7 +998,14 @@ impl At<'_> {
         let side = |dx: f64| if dx < 0.0 { -1.0 } else { 1.0 };
         let was = side(b[0] - a[0]);
         let (a2, b2) = (self.t.point(a), self.t.point(b));
-        let now = side(b2[0] - a2[0]);
+        let written_x = |old: f64, new: f64| {
+            if new == old {
+                old
+            } else {
+                number_text(new).parse::<f64>().unwrap_or(new)
+            }
+        };
+        let now = side(written_x(b[0], b2[0]) - written_x(a[0], a2[0]));
         let wanted = side(across * was);
         if now == wanted {
             return None;
@@ -2581,5 +2607,46 @@ objects:
         );
         // An arc runs the other way: its ends swap.
         assert_eq!(up.arc_angles(0.0, 90.0), (90.0, 180.0));
+    }
+
+    #[test]
+    fn noop_turns_and_scales_preserve_huge_coordinates_and_angles() {
+        let huge = [1e17, -1e17, 0.0];
+        for t in [
+            Transform::rotate(huge, 0.0),
+            Transform::rotate(huge, 360.0),
+            Transform::rotate(huge, -720.0),
+            Transform::scale(huge, 1.0),
+        ] {
+            assert!(t.is_noop());
+            assert_eq!(t.point([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+            assert_eq!(t.point([1.5, -2.5, 3.0]), [1.5, -2.5, 3.0]);
+            let original = "text: {contents: A, position: [0, 0, 0], height: 2.5, rotation: -30}";
+            assert_eq!(
+                transformed(original, t, &Resolved::default()).unwrap(),
+                original
+            );
+        }
+    }
+
+    #[test]
+    fn slanted_leader_mirror_refuses_when_rounded_landing_flips_side() {
+        // [6, 8, 0] mirrored across [0, 0, 0] -> [1, 3, 0] lands at x = -8.88e-16,
+        // which writes as "0" in YAML and therefore flips its landing side on reload.
+        let mirror = Transform::mirror([0.0, 0.0, 0.0], [1.0, 3.0, 0.0]).unwrap();
+        let mleader = "mleader: {leaders: [[[0, 0, 0], [6, 8, 0]]], content: {text: A}}";
+        let err = transformed(mleader, mirror, &Resolved::default()).unwrap_err();
+        assert!(
+            err.message.contains("landing"),
+            "expected landing refusal, got: {}",
+            err.message
+        );
+        let leader = "leader: {points: [[0, 0, 0], [6, 8, 0]], annotation: {text: A}}";
+        let err = transformed(leader, mirror, &Resolved::default()).unwrap_err();
+        assert!(
+            err.message.contains("hook"),
+            "expected leader hook refusal, got: {}",
+            err.message
+        );
     }
 }
