@@ -123,13 +123,21 @@ impl DisplayList {
         let [min, max] = viewport.corners();
         let window = Bounds { min, max };
         // The boundary in model space, where lines are cut at it.
-        let model_outline: Option<(Vec<Point2>, Vec<bool>)> =
-            outline.as_ref().map(|(o, square)| {
-                (
-                    o.iter().map(|&p| viewport.to_model(p)).collect(),
-                    square.clone(),
-                )
-            });
+        let model_outline: Option<(Vec<Point2>, Vec<bool>)> = match outline.as_ref() {
+            Some((o, square)) => Some((
+                o.iter().map(|&p| viewport.to_model(p)).collect(),
+                square.clone(),
+            )),
+            None if viewport.rotation != 0.0 => Some((
+                viewport
+                    .frame()
+                    .into_iter()
+                    .map(|p| viewport.to_model([p.x, p.y]))
+                    .collect(),
+                vec![false; 4],
+            )),
+            None => None,
+        };
         let boundary = outline.map(|(o, _)| {
             self.clip_boundaries.push(o);
             self.clip_boundaries.len() - 1
@@ -226,11 +234,26 @@ impl DisplayList {
             });
         }
         let scale = viewport.scale;
+        let (v_sin, v_cos) = if viewport.rotation == 0.0 {
+            (0.0, 1.0)
+        } else {
+            crate::description::sin_cos_degrees(viewport.rotation)
+        };
+        let rot_vec = |v: [f64; 2]| -> [f64; 2] {
+            if viewport.rotation == 0.0 {
+                [v[0] * scale, v[1] * scale]
+            } else {
+                [
+                    (v[0] * v_cos - v[1] * v_sin) * scale,
+                    (v[0] * v_sin + v[1] * v_cos) * scale,
+                ]
+            }
+        };
         for run in model.text {
             let run = TextRun {
                 origin: on(run.origin),
-                across: [run.across[0] * scale, run.across[1] * scale],
-                up: [run.up[0] * scale, run.up[1] * scale],
+                across: rot_vec(run.across),
+                up: rot_vec(run.up),
                 viewport: Some(index),
                 ..run
             };
@@ -250,9 +273,16 @@ impl DisplayList {
         let within = |b: Bounds| -> Option<Bounds> {
             let lo = [b.min[0].max(model_min[0]), b.min[1].max(model_min[1])];
             let hi = [b.max[0].min(model_max[0]), b.max[1].min(model_max[1])];
-            (lo[0] <= hi[0] && lo[1] <= hi[1]).then(|| Bounds {
-                min: on(lo),
-                max: on(hi),
+            (lo[0] <= hi[0] && lo[1] <= hi[1]).then(|| {
+                if viewport.rotation == 0.0 {
+                    Bounds {
+                        min: on(lo),
+                        max: on(hi),
+                    }
+                } else {
+                    Bounds::of([on(lo), on([hi[0], lo[1]]), on(hi), on([lo[0], hi[1]])].into_iter())
+                        .expect("four corners")
+                }
             })
         };
         if let Some(reach) = model.reach.and_then(within) {

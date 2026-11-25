@@ -222,6 +222,10 @@ pub(super) fn dwg_table(
         table.columns.len(),
     );
     written.table_style_handle = Some(style_handle);
+    if table.rotation != 0.0 {
+        let (sin, cos) = crate::description::sin_cos_degrees(table.rotation);
+        written.horizontal_direction = Vector3::new(cos, sin, 0.0);
+    }
     for (column, width) in written.columns.iter_mut().zip(&table.columns) {
         column.width = *width;
     }
@@ -298,10 +302,14 @@ pub(super) fn fill_block(
         .find(|r| r.handle == record)
         .map(|r| r.entity_handles.clone())
         .ok_or_else(failed)?;
-    // The block is in the table's own coordinates: its top left corner at
-    // the origin.
+    // The block is in the table's own unrotated coordinates: its top left
+    // corner at the origin.
     let origin = table.position;
-    let laid = table.laid_out(style);
+    let local_table = Table {
+        rotation: 0.0,
+        ..table.clone()
+    };
+    let laid = local_table.laid_out(style);
     // How far a text's point may be from where the layout puts it, both in
     // the table's own coordinates: a billionth of the table's size, room
     // for sums made from another corner, and the rounding of taking a far
@@ -554,8 +562,22 @@ pub(super) fn read_table(
     styles: &[TableStyle],
     layer: String,
 ) -> Option<Table> {
+    let h = written.horizontal_direction;
+    let rotation =
+        if h.z != 0.0 || !h.x.is_finite() || !h.y.is_finite() || (h.x == 0.0 && h.y == 0.0) {
+            return None;
+        } else if h.y == 0.0 && h.x > 0.0 {
+            0.0
+        } else if h.x == 0.0 && h.y > 0.0 {
+            90.0
+        } else if h.y == 0.0 && h.x < 0.0 {
+            180.0
+        } else if h.x == 0.0 && h.y < 0.0 {
+            270.0
+        } else {
+            crate::description::normalize_degrees(libm::atan2(h.y, h.x).to_degrees())
+        };
     if written.normal != Vector3::UNIT_Z
-        || written.horizontal_direction != Vector3::new(1.0, 0.0, 0.0)
         || written.rows.is_empty()
         || written.columns.is_empty()
         || !written.break_data.is_empty()
@@ -603,6 +625,7 @@ pub(super) fn read_table(
     }
     let mut table = Table {
         position: point(written.insertion_point),
+        rotation,
         columns: written.columns.iter().map(|c| c.width).collect(),
         rows: written.rows.iter().map(|r| r.height).collect(),
         cells,

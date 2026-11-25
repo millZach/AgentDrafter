@@ -1816,6 +1816,7 @@ mod tests {
 
         let table = Object::Table(Table {
             position: Point3::new(0.0, 40.0, 0.0),
+            rotation: 0.0,
             columns: vec![30.0, 30.0],
             rows: vec![10.0, 10.0],
             cells: vec![

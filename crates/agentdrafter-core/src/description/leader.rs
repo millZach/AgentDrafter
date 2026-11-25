@@ -9,7 +9,7 @@ use super::blocks::{attributes, block_named, scale_and_rotation, tag_in_capitals
 use super::layers::{name_error, named_entries, object_color, object_lineweight};
 use super::strict_yaml::{index_path, key_path, Kind, Node};
 use super::text::{contents_problem, text_style_at};
-use super::{at, bad_value, choice, length, points, scalar, Fields};
+use super::{at, bad_value, boolean, choice, length, points, scalar, Fields};
 use crate::error::{Error, ErrorCode};
 use crate::model::{
     Arrowhead, Attribute, BlockConnection, BlockLibrary, Leader, LeaderAnnotation,
@@ -60,11 +60,18 @@ pub(crate) const MLEADER_KEYS: [&str; 16] = [
 pub(crate) const TEXT_CONTENT_KEYS: [&str; 4] = ["text", "style", "height", "attachment"];
 
 /// The keys a multileader's block content takes.
-pub(crate) const BLOCK_CONTENT_KEYS: [&str; 5] =
-    ["block", "attributes", "scale", "rotation", "connection"];
+pub(crate) const BLOCK_CONTENT_KEYS: [&str; 7] = [
+    "block",
+    "attributes",
+    "scale",
+    "rotation",
+    "mirrored",
+    "readable_attributes",
+    "connection",
+];
 
 /// The keys a multileader's content takes: text's or a block's.
-pub(crate) const CONTENT_KEYS: [&str; 9] = [
+pub(crate) const CONTENT_KEYS: [&str; 11] = [
     "text",
     "style",
     "height",
@@ -73,6 +80,8 @@ pub(crate) const CONTENT_KEYS: [&str; 9] = [
     "attributes",
     "scale",
     "rotation",
+    "mirrored",
+    "readable_attributes",
     "connection",
 ];
 
@@ -388,11 +397,21 @@ fn block_content(
     let attributes = attributes(fields, block, library, noticed)?;
     refuse_control_codes(fields, &block.name, &attributes)?;
     let (scale, rotation) = scale_and_rotation(fields)?;
+    let mirrored = match fields.get("mirrored") {
+        Some(node) => boolean(node, &fields.path_of("mirrored"))?,
+        None => false,
+    };
+    let readable_attributes = match fields.get("readable_attributes") {
+        Some(node) => boolean(node, &fields.path_of("readable_attributes"))?,
+        None => false,
+    };
     Ok(MLeaderBlock {
         block: block.name.clone(),
         attributes,
         scale,
         rotation,
+        mirrored,
+        readable_attributes,
         connection: connection(fields)?.unwrap_or_default(),
     })
 }

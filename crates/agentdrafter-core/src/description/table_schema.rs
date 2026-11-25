@@ -176,6 +176,10 @@ pub(super) fn table_defs(defs: &mut Map<String, Value>) {
                     "$ref": "#/$defs/point",
                     "description": "The table's top left corner.",
                 },
+                "rotation": {
+                    "$ref": "#/$defs/angle",
+                    "description": "Degrees anticlockwise from the X axis. Without it, 0.",
+                },
                 "columns": {
                     "description": "The width of each column, left to right: at least one \
                                     length more than 0.",

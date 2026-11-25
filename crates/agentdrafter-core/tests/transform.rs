@@ -38,6 +38,7 @@ const ROWS: &str = "rows:
       - insert: {id: lug, block: TERM, position: [10, 60, 0], rotation: 30, attributes: {NUMBER: '7'}}
       - table: {id: list, position: [10, 150, 0], columns: [10], rows: [5], cells: [[X]]}
       - mleader: {id: callout, leaders: [[[130, 100, 0], [140, 105, 0]]], content: {text: TB-1}}
+      - dimension: {id: ord, kind: ordinate, feature: [10, 20, 0], location: [10, 40, 0], axis: x}
       - circle: {id: pin, center: [5, 5, 0], radius: 1, layer: fixed}
   - sheet: ROT-002
     template: templates/strip.yaml
@@ -535,22 +536,22 @@ fn what_cannot_be_held_or_is_wrong_is_refused_and_changes_nothing() {
         assert!(!reply.ok && reply.result.is_none(), "{reply:#?}");
         reply.error.unwrap()
     };
-    // A table has no rotation of its own.
+    // An ordinate dimension is turned only by a multiple of 90 degrees.
     let e = failed(
-        json!({"op": "rotate", "targets": [{"id": "ROT-001/spoke"}, {"id": "ROT-001/list"}], "base_point": [0, 0, 0], "angle": 30}),
+        json!({"op": "rotate", "targets": [{"id": "ROT-001/spoke"}, {"id": "ROT-001/ord"}], "base_point": [0, 0, 0], "angle": 30}),
     );
     assert_eq!(
         (e.code, e.field.as_deref()),
         (ErrorCode::BadValue, Some("operations[0].targets[1]"))
     );
     assert!(
-        e.message.contains("no rotation of its own"),
+        e.message.contains("multiple of 90 degrees"),
         "{}",
         e.message
     );
-    // A table is mirrored only upright.
+    // An ordinate dimension is mirrored only across 0/45/90/135 degrees.
     let e = failed(
-        json!({"op": "mirror", "target": {"id": "ROT-001/list"}, "first_point": [0, 0, 0], "second_point": [1, 2, 0]}),
+        json!({"op": "mirror", "target": {"id": "ROT-001/ord"}, "first_point": [0, 0, 0], "second_point": [1, 2, 0]}),
     );
     assert_eq!(e.code, ErrorCode::BadValue);
     // An object on a locked layer is not turned.
@@ -844,13 +845,9 @@ fn rotate_and_scale_reference_and_copy_validation_errors() {
         refused(json!({"op": "rotate", "target": {"id": "ROT-001/spoke"}, "base_point": [5, 5, 0], "reference_angle": 0, "new_point": [5, 5, 2]})).code,
         ErrorCode::BadValue
     );
-    // Table is still refused with copy: true.
+    // An ordinate dimension turned off 90 degrees is still refused with copy: true.
     assert_eq!(
-        failed(json!({"op": "rotate", "target": {"id": "ROT-001/list"}, "base_point": [0, 0, 0], "angle": 90, "copy": true})).code,
-        ErrorCode::BadValue
-    );
-    assert_eq!(
-        failed(json!({"op": "scale", "target": {"id": "ROT-001/list"}, "base_point": [0, 0, 0], "factor": 2, "copy": true})).code,
+        failed(json!({"op": "rotate", "target": {"id": "ROT-001/ord"}, "base_point": [0, 0, 0], "angle": 30, "copy": true})).code,
         ErrorCode::BadValue
     );
     // Snapped points resolving to coincidence fail cleanly.
@@ -906,4 +903,379 @@ fn rotate_and_scale_reference_and_copy_work_on_original_dwg() {
     assert_eq!(report.operations[1].copies.len(), 1);
     assert_eq!(report.operations[1].copies[0].scaled, Some(2.5));
     assert_eq!(report.operations[1].copies[0].turned, None);
+}
+
+#[test]
+fn table_turns_scales_and_mirrors_across_slanting_line_and_round_trips_dwg() {
+    let set = strip_set("table-253");
+    // 1. Scale table by 2 about [10, 150, 0] (its top-left corner).
+    lands(
+        &set,
+        json!([{
+            "op": "scale",
+            "target": {"id": "ROT-001/list"},
+            "base_point": [10, 150, 0],
+            "factor": 2
+        }]),
+    );
+    let objects = recorded(&set);
+    let Object::Table(scaled) = &objects["ROT-001/list"] else {
+        panic!("expected table");
+    };
+    assert_eq!(xyz(scaled.position), [10.0, 150.0, 0.0]);
+    assert_eq!(scaled.columns, vec![20.0]);
+    assert_eq!(scaled.rows, vec![10.0]);
+    // Standard metric data row text height is 4.5 mm, doubled to 9.0 mm.
+    assert_eq!(scaled.cells[0][0].height, Some(9.0));
+
+    // 2. Rotate table by 90° about [10, 150, 0], plus make a 45° copy.
+    let rep = lands(
+        &set,
+        json!([
+            {
+                "op": "rotate",
+                "target": {"id": "ROT-001/list"},
+                "base_point": [10, 150, 0],
+                "angle": 90
+            },
+            {
+                "op": "rotate",
+                "target": {"id": "ROT-001/list"},
+                "base_point": [10, 150, 0],
+                "angle": 45,
+                "copy": true
+            }
+        ]),
+    );
+    let copy_id = rep.operations[1].copies[0].id.clone();
+    let objects = recorded(&set);
+    let Object::Table(turned) = &objects["ROT-001/list"] else {
+        panic!("expected table");
+    };
+    assert_eq!(turned.rotation, 90.0);
+    let Object::Table(turned_copy) = &objects[&copy_id] else {
+        panic!("expected table copy");
+    };
+    assert_eq!(turned_copy.rotation, 135.0);
+
+    // 3. Mirror the 90°-rotated table across a slanting line (y = 2x).
+    let mirror_rep = lands(
+        &set,
+        json!([{
+            "op": "mirror",
+            "target": {"id": "ROT-001/list"},
+            "first_point": [0, 0, 0],
+            "second_point": [1, 2, 0]
+        }]),
+    );
+    let mirror_id = mirror_rep.operations[0].copies[0].id.clone();
+    let objects = recorded(&set);
+    let Object::Table(mirrored) = &objects[&mirror_id] else {
+        panic!("expected mirrored table");
+    };
+    assert!(
+        mirrored.rotation > 0.0 && mirrored.rotation < 90.0,
+        "expected forward-reading slanted rotation, got {}",
+        mirrored.rotation
+    );
+
+    // 4. Verify DWG round-trip reads back rotated/scaled/mirrored tables.
+    let read = read_dwg(&set.join("dwg").join("ROT-001.dwg")).unwrap();
+    let tables: Vec<&agentdrafter_core::Table> = read
+        .objects
+        .iter()
+        .filter_map(|o| match o {
+            Object::Table(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tables.len(), 3);
+    assert!(tables.iter().any(|t| (t.rotation - 90.0).abs() < 1e-6));
+    assert!(tables.iter().any(|t| (t.rotation - 135.0).abs() < 1e-6));
+    assert!(tables
+        .iter()
+        .any(|t| (t.rotation - mirrored.rotation).abs() < 1e-6));
+
+    // 5. Display list renders without error.
+    let mut dl_req = DisplayListRequest::new(&set);
+    dl_req.sheet = Some("ROT-001".to_owned());
+    let _ = display_list_with(&dl_req, &Settings::default()).unwrap();
+}
+
+#[test]
+fn mleader_with_block_content_mirrors_and_round_trips_dwg() {
+    let set = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("core-transform")
+        .join("mleader-block-253");
+    let _ = fs::remove_dir_all(&set);
+    fs::create_dir_all(set.join("templates")).unwrap();
+    let write = |name: &str, text: &str| fs::write(set.join(name), text).unwrap();
+    write("set.yaml", "units: mm\noutput: dwg\nrows: rows.yaml\n");
+    write(
+        "blocks.yaml",
+        "units: mm
+blocks:
+  FLAG:
+    objects:
+      - polyline: {points: [[0, -4, 0], [10, -4, 0], [10, 4, 0], [0, 4, 0]], closed: true}
+      - attdef: {tag: TAG, position: [5, 0, 0], height: 2}
+",
+    );
+    write(
+        "templates/base.yaml",
+        "units: mm\nblock_library: ../blocks.yaml\nobjects: []\n",
+    );
+    write(
+        "rows.yaml",
+        "rows:
+  - sheet: ML-001
+    template: templates/base.yaml
+    objects:
+      - mleader:
+          id: call
+          leaders: [[[10, 20, 0], [30, 30, 0]]]
+          content: {block: FLAG, attributes: {TAG: 'V-1'}}
+",
+    );
+    let built = build_set_with(
+        &SetBuildRequest {
+            set: set.clone(),
+            overwrite: false,
+            clean: None,
+        },
+        &Settings::default(),
+    );
+    assert!(built.ok, "{:#?}", built.error);
+
+    // Mirror across vertical line x = 50 (keep source).
+    let rep = lands(
+        &set,
+        json!([{
+            "op": "mirror",
+            "target": {"id": "ML-001/call"},
+            "first_point": [50, 0, 0],
+            "second_point": [50, 100, 0]
+        }]),
+    );
+    let copy_id = rep.operations[0].copies[0].id.clone();
+    let objects = recorded(&set);
+    let Object::MLeader(mirrored) = &objects[&copy_id] else {
+        panic!("expected mleader copy");
+    };
+    let agentdrafter_core::MLeaderContent::Block(b) = &mirrored.content else {
+        panic!("expected block content");
+    };
+    assert!(b.mirrored);
+    assert!(!b.readable_attributes);
+    assert_eq!(b.rotation, 0.0);
+
+    // Verify DWG read-back preserves negative X scale -> mirrored == true.
+    let read = read_dwg(&set.join("dwg").join("ML-001.dwg")).unwrap();
+    let mirrored_in_dwg = read.objects.iter().any(|o| {
+        matches!(
+            o,
+            Object::MLeader(m)
+                if matches!(&m.content, agentdrafter_core::MLeaderContent::Block(b) if b.mirrored)
+        )
+    });
+    assert!(
+        mirrored_in_dwg,
+        "mirrored mleader block did not round-trip DWG"
+    );
+
+    // Mirroring the mirrored copy back clears `mirrored` and sets `readable_attributes: true`.
+    let rep2 = lands(
+        &set,
+        json!([{
+            "op": "mirror",
+            "target": {"id": copy_id},
+            "first_point": [50, 0, 0],
+            "second_point": [50, 100, 0],
+            "erase_source": true
+        }]),
+    );
+    assert_eq!(rep2.operations[0].transformed, [copy_id.as_str()]);
+    let objects = recorded(&set);
+    let Object::MLeader(unmirrored) = &objects[&copy_id] else {
+        panic!("expected mleader");
+    };
+    let agentdrafter_core::MLeaderContent::Block(b2) = &unmirrored.content else {
+        panic!("expected block content");
+    };
+    assert!(!b2.mirrored);
+    assert!(b2.readable_attributes);
+}
+
+#[test]
+fn viewport_turns_scales_refuses_mirror_and_round_trips_dwg() {
+    let set = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("core-transform")
+        .join("viewport-253");
+    let _ = fs::remove_dir_all(&set);
+    fs::create_dir_all(set.join("templates")).unwrap();
+    let write = |name: &str, text: &str| fs::write(set.join(name), text).unwrap();
+    write("set.yaml", "units: mm\noutput: dwg\nrows: rows.yaml\n");
+    write(
+        "templates/layout.yaml",
+        "units: mm
+paper: ISO A3 landscape
+layout: {name: Sheet1}
+objects:
+  - line: {id: part, from: [0, 0, 0], to: [100, 0, 0]}
+",
+    );
+    write(
+        "rows.yaml",
+        "rows:
+  - sheet: VP-001
+    template: templates/layout.yaml
+    objects:
+      - viewport: {id: main, space: paper, center: [100, 100, 0], width: 80, height: 40, view_center: [50, 0, 0], scale: '1:4'}
+      - viewport: {id: locked, space: paper, center: [260, 100, 0], width: 60, height: 40, view_center: [50, 0, 0], scale: '1:4', locked: true}
+      - viewport: {id: round, space: paper, clip: {center: [350, 200, 0], radius: 30}, view_center: [50, 0, 0], scale: '1:2'}
+",
+    );
+    let built = build_set_with(
+        &SetBuildRequest {
+            set: set.clone(),
+            overwrite: false,
+            clean: None,
+        },
+        &Settings::default(),
+    );
+    assert!(built.ok, "{:#?}", built.error);
+
+    // 1. Rotate rectangular unlocked viewport by 90°, make a 30° copy, and scale by 2.
+    let rep = lands(
+        &set,
+        json!([
+            {
+                "op": "rotate",
+                "target": {"id": "VP-001/main"},
+                "base_point": [100, 100, 0],
+                "angle": 90
+            },
+            {
+                "op": "rotate",
+                "target": {"id": "VP-001/main"},
+                "base_point": [100, 100, 0],
+                "angle": 30,
+                "copy": true
+            },
+            {
+                "op": "scale",
+                "target": {"id": "VP-001/main"},
+                "base_point": [100, 100, 0],
+                "factor": 2
+            }
+        ]),
+    );
+    let clipped_copy_id = rep.operations[1].copies[0].id.clone();
+    let objects = recorded(&set);
+    let Object::Viewport(main) = &objects["VP-001/main"] else {
+        panic!("expected viewport");
+    };
+    // Originally 80x40 -> quarter-turned to 40x80 -> doubled to 80x160; scale 0.25 -> 0.5; rotation 90°.
+    assert_eq!(main.width, 80.0);
+    assert_eq!(main.height, 160.0);
+    assert_eq!(main.scale, 0.5);
+    assert_eq!(main.rotation, 90.0);
+    assert!(main.clip.is_none());
+
+    let Object::Viewport(clipped_copy) = &objects[&clipped_copy_id] else {
+        panic!("expected clipped viewport copy");
+    };
+    assert!(clipped_copy.clip.is_some());
+    assert_eq!(clipped_copy.rotation, 120.0);
+
+    // 2. Rotate & scale locked viewport: frame turns/scales, view scale & twist stay locked.
+    lands(
+        &set,
+        json!([
+            {
+                "op": "rotate",
+                "target": {"id": "VP-001/locked"},
+                "base_point": [260, 100, 0],
+                "angle": 90
+            },
+            {
+                "op": "scale",
+                "target": {"id": "VP-001/locked"},
+                "base_point": [260, 100, 0],
+                "factor": 1.5
+            }
+        ]),
+    );
+    let objects = recorded(&set);
+    let Object::Viewport(locked) = &objects["VP-001/locked"] else {
+        panic!("expected locked viewport");
+    };
+    assert_eq!(locked.width, 60.0);
+    assert_eq!(locked.height, 90.0);
+    assert_eq!(locked.scale, 0.25);
+    assert_eq!(locked.rotation, 0.0);
+
+    // 3. Rotate & scale circular clipped viewport.
+    lands(
+        &set,
+        json!([
+            {
+                "op": "rotate",
+                "target": {"id": "VP-001/round"},
+                "base_point": [350, 200, 0],
+                "angle": 45
+            },
+            {
+                "op": "scale",
+                "target": {"id": "VP-001/round"},
+                "base_point": [350, 200, 0],
+                "factor": 0.5
+            }
+        ]),
+    );
+    let objects = recorded(&set);
+    let Object::Viewport(round) = &objects["VP-001/round"] else {
+        panic!("expected round viewport");
+    };
+    assert_eq!(round.rotation, 45.0);
+    assert_eq!(round.scale, 0.25);
+    assert!(matches!(
+        round.clip,
+        Some(agentdrafter_core::Clip::Circle { radius, .. }) if (radius - 15.0).abs() < 1e-9
+    ));
+
+    // 4. Mirroring any viewport is refused.
+    let reply = send(
+        &set,
+        json!([{
+            "op": "mirror",
+            "target": {"id": "VP-001/main"},
+            "first_point": [0, 0, 0],
+            "second_point": [0, 100, 0]
+        }]),
+        false,
+    );
+    let err = reply.result.unwrap().operations[0].error.clone().unwrap();
+    assert_eq!(err.code, ErrorCode::BadValue);
+    assert!(err.message.contains("viewport"), "{}", err.message);
+
+    // 5. DWG round-trip preserves viewport twist angles (`rotation`).
+    let read = read_dwg(&set.join("dwg").join("VP-001.dwg")).unwrap();
+    let vps: Vec<&agentdrafter_core::Viewport> = read
+        .objects
+        .iter()
+        .filter_map(|o| match o {
+            Object::Viewport(v) => Some(v),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(vps.len(), 4);
+    assert!(vps.iter().any(|v| (v.rotation - 90.0).abs() < 1e-6));
+    assert!(vps.iter().any(|v| (v.rotation - 120.0).abs() < 1e-6));
+    assert!(vps.iter().any(|v| (v.rotation - 45.0).abs() < 1e-6));
+
+    // 6. Display list renders rotated/clipped viewports cleanly.
+    let mut dl_req = DisplayListRequest::new(&set);
+    dl_req.sheet = Some("VP-001".to_owned());
+    let _ = display_list_with(&dl_req, &Settings::default()).unwrap();
 }
