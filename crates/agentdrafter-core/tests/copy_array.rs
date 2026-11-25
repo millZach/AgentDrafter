@@ -462,7 +462,11 @@ fn a_row_objects_copy_lands_in_the_row_and_a_templates_in_the_template() {
 
 #[test]
 fn a_copy_or_an_array_that_cannot_land_says_why_and_changes_nothing() {
-    let set = strip_set("errors");
+    let rows = ROWS.replace(
+        "      - circle: {id: pin,",
+        "      - dimension: {id: ord, kind: ordinate, feature: [10, 20, 0], location: [10, 40, 0], axis: x}\n      - circle: {id: pin,",
+    );
+    let set = strip_set_with("errors", TEMPLATE, &rows);
     let before = snapshot::snapshot(&set);
     let failed = |operation: Value| {
         let reply = send(&set, json!([operation]), false);
@@ -520,7 +524,7 @@ fn a_copy_or_an_array_that_cannot_land_says_why_and_changes_nothing() {
         (ErrorCode::BadValue, Some("operations[0].spacing"))
     );
     let e = failed(
-        json!({"op": "arraypolar", "target": {"id": "ARR-001/list"}, "center": [0, 0, 0], "count": 3}),
+        json!({"op": "arraypolar", "target": {"id": "ARR-001/ord"}, "center": [0, 0, 0], "count": 3}),
     );
     assert_eq!(
         (e.code, e.field.as_deref()),

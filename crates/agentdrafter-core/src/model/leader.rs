@@ -329,6 +329,15 @@ pub struct MLeaderBlock {
     /// Degrees anticlockwise from the X axis, in `[0, 360)`.
     #[serde(default)]
     pub rotation: f64,
+    /// Whether the block is mirrored, its X axis reversed before it is
+    /// turned, as AutoCAD's MIRROR leaves block content, which a DWG keeps
+    /// as a negative X scale.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub mirrored: bool,
+    /// Whether the block's attributes read forwards however it is turned,
+    /// as a mirror leaves them.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub readable_attributes: bool,
     /// How the block meets the landing.
     #[serde(default)]
     pub connection: BlockConnection,
@@ -534,8 +543,8 @@ impl MLeader {
                     position,
                     scale: content.scale,
                     rotation: normalize_degrees(content.rotation),
-                    mirrored: false,
-                    readable_attributes: false,
+                    mirrored: content.mirrored,
+                    readable_attributes: content.readable_attributes,
                     attributes: content.attributes.clone(),
                     state: std::collections::BTreeMap::new(),
                     evaluated_block: None,
@@ -554,6 +563,7 @@ impl MLeader {
                             content.connection,
                             content.scale,
                             content.rotation,
+                            content.mirrored,
                             end,
                             side,
                         );

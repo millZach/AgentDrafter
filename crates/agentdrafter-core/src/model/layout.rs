@@ -252,6 +252,10 @@ pub struct Viewport {
     /// How long a length of model space draws on the paper, per unit:
     /// 0.25 for 1:4. More than 0.
     pub scale: f64,
+    /// View twist angle in degrees anticlockwise (AutoCAD viewport twist
+    /// angle), in `[0, 360)`. 0 when unrotated.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation: f64,
     /// Optional 3D orthographic view direction vector (AutoCAD `VIEWDIR`, e.g.
     /// `[1, -1, 1]` for SE isometric, `[0, -1, 0]` for front). When `None`,
     /// looks straight down along `[0, 0, 1]` (plan/top view).
@@ -318,32 +322,56 @@ impl Viewport {
     }
 
     /// The part of model space the window shows: its lower left and upper
-    /// right corners in the viewport's view plane.
+    /// right corners in the viewport's view plane (axis-aligned bounding box
+    /// when twisted).
     pub fn view(&self) -> [[f64; 2]; 2] {
-        let vc = self.projected_view_center();
-        let (w, h) = (
-            self.width / 2.0 / self.scale,
-            self.height / 2.0 / self.scale,
-        );
-        [[vc[0] - w, vc[1] - h], [vc[0] + w, vc[1] + h]]
+        if self.rotation == 0.0 {
+            let vc = self.projected_view_center();
+            let (w, h) = (
+                self.width / 2.0 / self.scale,
+                self.height / 2.0 / self.scale,
+            );
+            return [[vc[0] - w, vc[1] - h], [vc[0] + w, vc[1] + h]];
+        }
+        let corners = self.frame().map(|p| self.to_model([p.x, p.y]));
+        let min_x = corners.iter().map(|c| c[0]).fold(f64::INFINITY, f64::min);
+        let min_y = corners.iter().map(|c| c[1]).fold(f64::INFINITY, f64::min);
+        let max_x = corners
+            .iter()
+            .map(|c| c[0])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let max_y = corners
+            .iter()
+            .map(|c| c[1])
+            .fold(f64::NEG_INFINITY, f64::max);
+        [[min_x, min_y], [max_x, max_y]]
     }
 
     /// Where the model-plane point `p` shows on the paper.
     pub fn to_paper(&self, p: [f64; 2]) -> [f64; 2] {
         let vc = self.projected_view_center();
+        let dx = (p[0] - vc[0]) * self.scale;
+        let dy = (p[1] - vc[1]) * self.scale;
+        if self.rotation == 0.0 {
+            return [self.center.x + dx, self.center.y + dy];
+        }
+        let (sin, cos) = crate::description::sin_cos_degrees(self.rotation);
         [
-            self.center.x + (p[0] - vc[0]) * self.scale,
-            self.center.y + (p[1] - vc[1]) * self.scale,
+            self.center.x + dx * cos - dy * sin,
+            self.center.y + dx * sin + dy * cos,
         ]
     }
 
     /// The model-plane point that shows at the paper point `p`.
     pub fn to_model(&self, p: [f64; 2]) -> [f64; 2] {
         let vc = self.projected_view_center();
-        [
-            vc[0] + (p[0] - self.center.x) / self.scale,
-            vc[1] + (p[1] - self.center.y) / self.scale,
-        ]
+        let dx = (p[0] - self.center.x) / self.scale;
+        let dy = (p[1] - self.center.y) / self.scale;
+        if self.rotation == 0.0 {
+            return [vc[0] + dx, vc[1] + dy];
+        }
+        let (sin, cos) = crate::description::sin_cos_degrees(self.rotation);
+        [vc[0] + dx * cos + dy * sin, vc[1] - dx * sin + dy * cos]
     }
 
     /// The scale as a ratio, paper to model, such as `1:4` or `2:1`: the
@@ -448,6 +476,10 @@ impl Viewport {
     }
 }
 
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
 /// The largest model side `q` of a ratio `p:q` that a viewport's scale is
 /// read back as: 1:10000 at the most.
 pub const SIMPLEST_RATIO: u32 = 10_000;
@@ -483,6 +515,7 @@ mod tests {
             height: 140.0,
             view_center: Point3::new(400.0, 300.0, 0.0),
             scale: 0.25,
+            rotation: 0.0,
             view_direction: None,
             locked: false,
             clip: None,
@@ -495,6 +528,14 @@ mod tests {
         assert_eq!(viewport.to_paper([0.0, 20.0]), [20.0, 20.0]);
         assert_eq!(viewport.to_model([20.0, 20.0]), [0.0, 20.0]);
         assert_eq!(viewport.view(), [[0.0, 20.0], [800.0, 580.0]]);
+
+        let twisted = Viewport {
+            rotation: 90.0,
+            ..viewport
+        };
+        assert_eq!(twisted.to_paper([400.0, 300.0]), [120.0, 90.0]);
+        assert_eq!(twisted.to_paper([440.0, 300.0]), [120.0, 100.0]);
+        assert_eq!(twisted.to_model([120.0, 100.0]), [440.0, 300.0]);
     }
 
     #[test]
@@ -507,6 +548,7 @@ mod tests {
             height: 200.0,
             view_center: Point3::new(400.0, 300.0, 0.0),
             scale: 0.25,
+            rotation: 0.0,
             view_direction: None,
             locked: false,
             clip: None,

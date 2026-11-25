@@ -6931,7 +6931,7 @@ fn resolved_for(
     }
     let needs = |o: &Object| match o {
         Object::MLeader(_) | Object::Leader(_) => scaled,
-        Object::Table(_) => t.mirrors(),
+        Object::Table(_) => t.mirrors() || scaled,
         _ => false,
     };
     let rows = at.rows_now()?;
@@ -6975,6 +6975,7 @@ fn resolved_for(
                 Resolved {
                     lengths,
                     size: None,
+                    row_heights: Vec::new(),
                 }
             }
             Object::Leader(l) => {
@@ -6985,12 +6986,23 @@ fn resolved_for(
                 Resolved {
                     lengths,
                     size: None,
+                    row_heights: Vec::new(),
                 }
             }
-            Object::Table(table) => Resolved {
-                lengths: Vec::new(),
-                size: Some([table.columns.iter().sum(), table.rows.iter().sum()]),
-            },
+            Object::Table(table) => {
+                let style = record
+                    .sheet
+                    .table_style(&table.table_style)
+                    .unwrap_or_else(|| crate::model::TableStyle::standard(record.sheet.units));
+                let row_heights = (0..table.rows.len())
+                    .map(|r| style.row(table.row_kind(r)).text_height)
+                    .collect();
+                Resolved {
+                    lengths: Vec::new(),
+                    size: Some([table.columns.iter().sum(), table.rows.iter().sum()]),
+                    row_heights,
+                }
+            }
             _ => Resolved::default(),
         };
     }

@@ -11,7 +11,7 @@ use super::text::{style_name, text_style_at};
 
 /// The key a table style and its rows name their text style under.
 const TEXT_STYLE_KEY: &str = "text_style";
-use super::{at, bad_value, boolean, choice, length, point, sequence, Fields};
+use super::{angle, at, bad_value, boolean, choice, length, point, sequence, Fields};
 use crate::error::{Error, ErrorCode};
 use crate::model::{Point3, RowKind, Table, TableCell, TableStyle, STANDARD_TABLE_STYLE};
 use crate::text::{Attachment, TextStyle};
@@ -34,8 +34,9 @@ pub(crate) const TABLE_STYLE_KEYS: [&str; 9] = [
 pub(crate) const ROW_STYLE_KEYS: [&str; 3] = [TEXT_STYLE_KEY, "text_height", "justify"];
 
 /// The keys a table takes.
-pub(crate) const TABLE_KEYS: [&str; 14] = [
+pub(crate) const TABLE_KEYS: [&str; 15] = [
     "position",
+    "rotation",
     "columns",
     "rows",
     "cells",
@@ -189,6 +190,10 @@ pub(super) fn table(
         &fields.path_of("position"),
         units,
     )?;
+    let rotation = match fields.get("rotation") {
+        Some(node) => angle(node, &fields.path_of("rotation"))?,
+        None => 0.0,
+    };
     let columns = sizes(fields, "columns", units, "a column's width")?;
     let rows = sizes(fields, "rows", units, "a row's height")?;
     let title = match fields.get("title") {
@@ -250,6 +255,7 @@ pub(super) fn table(
             z: position.z + 0.0,
             ..position
         },
+        rotation,
         columns,
         rows,
         cells,

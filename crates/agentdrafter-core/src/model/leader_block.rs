@@ -644,15 +644,18 @@ pub struct Placed {
     pub base: Point3,
 }
 
-/// Places `block`, with `outline`, scaled by `scale` and turned by
-/// `degrees`, connected by `connection` at `landing_end`, the landing
-/// running to `side`: 1 for the right, -1 for the left.
+/// Places `block`, with `outline`, scaled by `scale`, mirrored across its
+/// Y axis when `mirrored`, and turned by `degrees`, connected by
+/// `connection` at `landing_end`, the landing running to `side`: 1 for the
+/// right, -1 for the left.
+#[allow(clippy::too_many_arguments)]
 pub fn place(
     block: &Block,
     outline: &Outline,
     connection: BlockConnection,
     scale: f64,
     degrees: f64,
+    mirrored: bool,
     landing_end: Point3,
     side: f64,
 ) -> Placed {
@@ -663,9 +666,9 @@ pub fn place(
         }
         _ => base,
     };
-    let (sin, cos) = degrees.to_radians().sin_cos();
+    let (sin, cos) = crate::description::sin_cos_degrees(degrees);
     // The landing's line, in the block's own coordinates.
-    let along = [cos, -sin];
+    let along = [if mirrored { -cos } else { cos }, -sin];
     let crossings = outline.crossings(attach, along);
     let first = crossings.iter().copied().fold(f64::INFINITY, f64::min);
     let last = crossings.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -676,7 +679,8 @@ pub fn place(
     };
     let near = if side > 0.0 { first } else { last };
     let attach_at = [landing_end.x - scale * near, landing_end.y];
-    let v = [(attach[0] - base[0]) * scale, (attach[1] - base[1]) * scale];
+    let sx = if mirrored { -scale } else { scale };
+    let v = [(attach[0] - base[0]) * sx, (attach[1] - base[1]) * scale];
     let position = Point3 {
         x: attach_at[0] - (v[0] * cos - v[1] * sin),
         y: attach_at[1] - (v[0] * sin + v[1] * cos),
@@ -911,10 +915,60 @@ mod tests {
         ];
         for (b, connection, scale, degrees, end, side, at, base) in cases {
             let outline = Outline::of(b, &blocks).unwrap();
-            let placed = place(b, &outline, connection, scale, degrees, end, side);
+            let placed = place(b, &outline, connection, scale, degrees, false, end, side);
             close(placed.position, at[0], at[1]);
             close(placed.base, base, end.y);
         }
+    }
+
+    #[test]
+    fn a_mirrored_block_touches_the_landing_by_its_mirrored_outline() {
+        // Asymmetric box from x=0 to x=10, y=-5 to y=5, base at (0, 0).
+        // Mirrored with rotation=0, on paper it spans [-10, 0] relative to
+        // its insert position, so on the right of (100, 20) its insert sits
+        // at (110, 20) and on the left at (100, 20).
+        let lines = [
+            (p(0.0, -5.0), p(10.0, -5.0)),
+            (p(10.0, -5.0), p(10.0, 5.0)),
+            (p(10.0, 5.0), p(0.0, 5.0)),
+            (p(0.0, 5.0), p(0.0, -5.0)),
+        ]
+        .into_iter()
+        .map(|(from, to)| {
+            Object::Line(Line {
+                from,
+                to,
+                layer: "0".into(),
+                properties: Properties::default(),
+            })
+        })
+        .collect();
+        let b = block("ASYM", lines);
+        let outline = Outline::of(&b, &[]).unwrap();
+        let right = place(
+            &b,
+            &outline,
+            BlockConnection::Extents,
+            1.0,
+            0.0,
+            true,
+            p(100.0, 20.0),
+            1.0,
+        );
+        close(right.position, 110.0, 20.0);
+        close(right.base, 100.0, 20.0);
+        let left = place(
+            &b,
+            &outline,
+            BlockConnection::Extents,
+            1.0,
+            0.0,
+            true,
+            p(100.0, 20.0),
+            -1.0,
+        );
+        close(left.position, 100.0, 20.0);
+        close(left.base, 90.0, 20.0);
     }
 
     /// AutoCAD counted a constant attribute in a block's extents and not
@@ -936,6 +990,7 @@ mod tests {
             BlockConnection::Extents,
             1.0,
             0.0,
+            false,
             p(450.36, 10.0),
             1.0,
         );
@@ -987,6 +1042,7 @@ mod tests {
             BlockConnection::Extents,
             1.0,
             0.0,
+            false,
             p(250.36, 10.0),
             1.0,
         );

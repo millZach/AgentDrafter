@@ -214,7 +214,8 @@ fn whole_degrees(degrees: f64) -> f64 {
 
 /// What an object draws with that its record does not write, worked out
 /// from the sheet, for a scaling to write as the object's own, and a
-/// table's size, for a mirror to place it by.
+/// table's size and row text heights, for a mirror or scaling to place and
+/// size it by.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Resolved {
     /// Lengths in the declared unit, each by its key's place in the object,
@@ -223,11 +224,13 @@ pub(crate) struct Resolved {
     pub lengths: Vec<(&'static str, f64)>,
     /// A table's width and height.
     pub size: Option<[f64; 2]>,
+    /// A table's default text height for each row (from its table style),
+    /// for scaling cells that do not write their own `height`.
+    pub row_heights: Vec<f64>,
 }
 
-/// The object types a transform takes: every type a sheet holds but a
-/// viewport, which is a window on the paper.
-const TRANSFORMED_TYPES: [&str; 29] = [
+/// The object types a transform takes: every type a sheet holds.
+const TRANSFORMED_TYPES: [&str; 30] = [
     "line",
     "polyline",
     "arc",
@@ -257,13 +260,15 @@ const TRANSFORMED_TYPES: [&str; 29] = [
     "mleader",
     "leader",
     "dimension",
+    "viewport",
 ];
 
 impl RecordFile {
     /// Why the object of `list` at `index` cannot be transformed by `t`,
-    /// when the sheet description cannot hold the result: a viewport, a
-    /// table turned, scaled or mirrored across a slanting line, and a
-    /// multileader's block content mirrored.
+    /// when the sheet description cannot hold the result: a viewport
+    /// mirrored, an image or PDF underlay mirrored, an ordinate dimension
+    /// turned off a multiple of 90° or mirrored off 0°/45°/90°/135°, or a
+    /// leader whose landing would flip side.
     pub(crate) fn refuses_transform(
         &self,
         list: ObjectList,
@@ -274,7 +279,6 @@ impl RecordFile {
         let item = self.items(list)?.get(index)?;
         let (kind, keys) = object_parts(item);
         let kind = kind?;
-        let what = t.done();
         if let (true, "mleader" | "leader", Some(keys)) = (t.mirrors(), kind, keys) {
             let at = At {
                 t,
@@ -286,10 +290,9 @@ impl RecordFile {
             }
         }
         match (kind, t.how) {
-            ("viewport", _) => Some(format!(
-                "a viewport is a window on the paper and is not {what}; move it, or change its \
-                 view with change_viewport"
-            )),
+            ("viewport", How::Mirror(_)) => {
+                Some("a viewport shows model space right-reading and is not mirrored".to_owned())
+            }
             ("image" | "pdf_underlay", How::Mirror(_)) => Some(format!(
                 "a {} stays right-reading and is not mirrored",
                 if kind == "image" {
@@ -298,33 +301,6 @@ impl RecordFile {
                     "PDF underlay"
                 }
             )),
-            ("table", How::Rotate(degrees)) if whole_degrees(degrees) != 0.0 => Some(
-                "a table hangs from its top left corner, its rows running down and its columns \
-                 across, and has no rotation of its own, so it is not turned"
-                    .to_owned(),
-            ),
-            ("table", How::Scale(factor)) if factor != 1.0 => Some(
-                "a table's text is as high as its table style or its cells say, so it is not \
-                 scaled; change its columns and rows instead"
-                    .to_owned(),
-            ),
-            ("table", How::Mirror(axis)) if axis != 0.0 && axis != 90.0 => Some(
-                "a table stays upright, so it is mirrored only across a line that runs across \
-                 or up the sheet, which leaves it upright"
-                    .to_owned(),
-            ),
-            ("mleader", How::Mirror(_))
-                if keys
-                    .and_then(|keys| keys.iter().find(|e| e.key == "content"))
-                    .and_then(|content| mapping_entry(&content.value, "block"))
-                    .is_some() =>
-            {
-                Some(
-                    "a multileader's block content is held upright, so a multileader with \
-                     block content is not mirrored"
-                        .to_owned(),
-                )
-            }
             ("dimension", How::Rotate(degrees))
                 if is_ordinate(keys) && whole_degrees(degrees) % 90.0 != 0.0 =>
             {
@@ -406,6 +382,12 @@ impl At<'_> {
         let mut changed: Vec<String> = Vec::new();
         if kind == "solid3d" {
             return self.transform_solid3d(keys, path);
+        }
+        if kind == "table" {
+            return self.transform_table(keys, path);
+        }
+        if kind == "viewport" {
+            return self.transform_viewport(keys, path);
         }
         let solid = hatch_is_solid(keys);
         if kind == "dimension" && self.clear_angular_location(keys, path) {
@@ -567,7 +549,6 @@ impl At<'_> {
                 }
                 ("hatch", "boundary") => self.boundary(&mut entry.value, &field)?,
                 ("hatch", "origin") if !solid => self.point(&mut entry.value, &field)?,
-                ("table", "position") => self.table_position(&mut entry.value, &field)?,
                 ("mleader", "content") => self.mleader_content(&mut entry.value, &field)?,
                 ("leader", "annotation") if scaled => {
                     self.own_length(&mut entry.value, "height", "annotation.height", &field)?
@@ -1307,51 +1288,419 @@ impl At<'_> {
         Ok(any)
     }
 
-    /// Places a table, mirrored across a line that runs across or up the
-    /// sheet, by the top left corner of its mirrored box, so it hangs
-    /// where its mirror image does and reads forwards; turned by a whole
-    /// turn or scaled by 1, it stays.
-    fn table_position(&self, node: &mut Node, field: &str) -> Result<bool, Error> {
-        let How::Mirror(_) = self.t.how else {
-            return Ok(false);
-        };
-        let Kind::Sequence(coordinates) = &mut node.kind else {
-            return Err(self.not_a_point(field));
-        };
-        if coordinates.len() != 3 {
-            return Err(self.not_a_point(field));
-        }
-        let x = self.coordinate(coordinates, 0, field)?;
-        let y = self.coordinate(coordinates, 1, field)?;
-        let z = self.coordinate(coordinates, 2, field)?;
-        let [width, height] = self.resolved.size.unwrap_or([0.0, 0.0]);
-        let corners = [
-            [x, y],
-            [x + width, y],
-            [x, y - height],
-            [x + width, y - height],
-        ]
-        .map(|[cx, cy]| self.t.point([cx, cy, z]));
-        let left = corners.iter().map(|c| c[0]).fold(f64::INFINITY, f64::min);
-        let top = corners
-            .iter()
-            .map(|c| c[1])
-            .fold(f64::NEG_INFINITY, f64::max);
-        let mut moved = false;
-        for (axis, value) in [(0, left), (1, top)] {
-            let was = if axis == 0 { x } else { y };
-            if value != was {
-                self.write(&mut coordinates[axis], value, &index_path(field, axis))?;
-                moved = true;
+    /// Transforms a table: turning moves its position and turns its
+    /// `rotation`; scaling moves its position and scales its columns, rows
+    /// and every non-empty cell's text height; mirroring across any line
+    /// places it by the top left corner of its mirrored box in its new
+    /// forward-reading orientation (`readable(t.angle(old_rotation))`).
+    fn transform_table(&self, keys: &mut Vec<Entry>, path: &str) -> Result<Vec<String>, Error> {
+        let mut changed: Vec<String> = Vec::new();
+        let t = self.t;
+        match t.how {
+            How::Rotate(_) => {
+                let mut had_rotation = false;
+                for entry in keys.iter_mut() {
+                    let field = key_path(path, &entry.key);
+                    let did = match entry.key.as_str() {
+                        "position" => self.point(&mut entry.value, &field)?,
+                        "rotation" => {
+                            had_rotation = true;
+                            self.angle(&mut entry.value, &field, &|a| t.angle(a))?
+                        }
+                        _ => false,
+                    };
+                    if did && !changed.contains(&entry.key) {
+                        changed.push(entry.key.clone());
+                    }
+                }
+                if !had_rotation {
+                    let r = t.angle(0.0);
+                    if r != 0.0 {
+                        keys.push(new_entry("rotation", Node::scalar(number_text(r))));
+                        changed.push("rotation".to_owned());
+                    }
+                }
+            }
+            How::Scale(factor) => {
+                if factor == 1.0 {
+                    return Ok(changed);
+                }
+                for entry in keys.iter_mut() {
+                    let field = key_path(path, &entry.key);
+                    let did = match entry.key.as_str() {
+                        "position" => self.point(&mut entry.value, &field)?,
+                        "columns" | "rows" => {
+                            let Kind::Sequence(items) = &mut entry.value.kind else {
+                                return Err(Error::new(
+                                    ErrorCode::WrongType,
+                                    format!(
+                                        "the record's `{}` here is not a list of lengths to {}",
+                                        entry.key,
+                                        t.verb()
+                                    ),
+                                )
+                                .at_field(field));
+                            };
+                            let mut any = false;
+                            for (i, item) in items.iter_mut().enumerate() {
+                                any |= self.length(item, &index_path(&field, i))?;
+                            }
+                            any
+                        }
+                        "cells" => self.scale_table_cells(&mut entry.value, &field, factor)?,
+                        _ => false,
+                    };
+                    if did && !changed.contains(&entry.key) {
+                        changed.push(entry.key.clone());
+                    }
+                }
+            }
+            How::Mirror(_) => {
+                let old_rot = match keys.iter().find(|e| e.key == "rotation") {
+                    Some(entry) => {
+                        whole_degrees(self.plain(&entry.value, &key_path(path, "rotation"))?)
+                    }
+                    None => 0.0,
+                };
+                let new_rot = whole_degrees(readable(t.angle(old_rot)));
+                if let Some(pos_entry) = keys.iter_mut().find(|e| e.key == "position") {
+                    let field = key_path(path, "position");
+                    let Kind::Sequence(coordinates) = &mut pos_entry.value.kind else {
+                        return Err(self.not_a_point(&field));
+                    };
+                    if coordinates.len() != 3 {
+                        return Err(self.not_a_point(&field));
+                    }
+                    let x = self.coordinate(coordinates, 0, &field)?;
+                    let y = self.coordinate(coordinates, 1, &field)?;
+                    let z = self.coordinate(coordinates, 2, &field)?;
+                    let [width, height] = self.resolved.size.unwrap_or([0.0, 0.0]);
+                    let (sin0, cos0) = super::super::sin_cos_degrees(old_rot);
+                    let corners = [
+                        [x, y],
+                        [x + width * cos0, y + width * sin0],
+                        [x + height * sin0, y - height * cos0],
+                        [
+                            x + width * cos0 + height * sin0,
+                            y + width * sin0 - height * cos0,
+                        ],
+                    ]
+                    .map(|[cx, cy]| t.point([cx, cy, z]));
+                    let (new_x, new_y) = if new_rot == 0.0 {
+                        let left = corners.iter().map(|c| c[0]).fold(f64::INFINITY, f64::min);
+                        let top = corners
+                            .iter()
+                            .map(|c| c[1])
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        (left, top)
+                    } else {
+                        let (sin1, cos1) = super::super::sin_cos_degrees(new_rot);
+                        let u_min = corners
+                            .iter()
+                            .map(|c| c[0] * cos1 + c[1] * sin1)
+                            .fold(f64::INFINITY, f64::min);
+                        let v_max = corners
+                            .iter()
+                            .map(|c| -c[0] * sin1 + c[1] * cos1)
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        (u_min * cos1 - v_max * sin1, u_min * sin1 + v_max * cos1)
+                    };
+                    let mut moved = false;
+                    for (axis, value) in [(0, new_x), (1, new_y)] {
+                        let was = if axis == 0 { x } else { y };
+                        if value != was {
+                            self.write(&mut coordinates[axis], value, &index_path(&field, axis))?;
+                            moved = true;
+                        }
+                    }
+                    if moved {
+                        changed.push("position".to_owned());
+                    }
+                }
+                if let Some(rot_entry) = keys.iter_mut().find(|e| e.key == "rotation") {
+                    if new_rot != old_rot {
+                        self.write(&mut rot_entry.value, new_rot, &key_path(path, "rotation"))?;
+                        changed.push("rotation".to_owned());
+                    }
+                } else if new_rot != 0.0 {
+                    keys.push(new_entry("rotation", Node::scalar(number_text(new_rot))));
+                    changed.push("rotation".to_owned());
+                }
             }
         }
-        Ok(moved)
+        Ok(changed)
+    }
+
+    /// Scales the text height of every non-empty cell in a table, writing a
+    /// cell's own `height` from its row's default when it did not have one.
+    fn scale_table_cells(&self, node: &mut Node, field: &str, factor: f64) -> Result<bool, Error> {
+        let Kind::Sequence(rows) = &mut node.kind else {
+            return Ok(false);
+        };
+        let mut any = false;
+        for (r, row_node) in rows.iter_mut().enumerate() {
+            let row_path = index_path(field, r);
+            let Kind::Sequence(cells) = &mut row_node.kind else {
+                continue;
+            };
+            let default_height = self.resolved.row_heights.get(r).copied();
+            for (c, cell_node) in cells.iter_mut().enumerate() {
+                let cell_path = index_path(&row_path, c);
+                match &mut cell_node.kind {
+                    Kind::Mapping(entries) => {
+                        // A bare template row-value cell `{row: NAME}` wraps
+                        // into `{text: {row: NAME}, height: ...}`.
+                        if entries.len() == 1 && entries[0].key == "row" {
+                            if let Some(h) = default_height {
+                                let scaled = h * factor;
+                                if !scaled.is_finite() {
+                                    return Err(Error::new(
+                                        ErrorCode::BadNumber,
+                                        format!(
+                                            "the value would be too large once {}",
+                                            self.t.done()
+                                        ),
+                                    )
+                                    .at_field(key_path(&cell_path, "height")));
+                                }
+                                let text_node = std::mem::replace(cell_node, Node::bare_null());
+                                *cell_node = Node::new(Kind::Mapping(vec![
+                                    new_entry("text", text_node),
+                                    new_entry("height", Node::scalar(number_text(scaled))),
+                                ]));
+                                any = true;
+                            }
+                            continue;
+                        }
+                        if let Some(h_entry) = entries.iter_mut().find(|e| e.key == "height") {
+                            any |=
+                                self.length(&mut h_entry.value, &key_path(&cell_path, "height"))?;
+                        } else {
+                            let has_text = entries.iter().any(|e| {
+                                e.key == "text"
+                                    && match &e.value.kind {
+                                        Kind::Scalar(s) => !s.is_empty(),
+                                        Kind::Mapping(_) | Kind::Sequence(_) => true,
+                                    }
+                            });
+                            if has_text {
+                                if let Some(h) = default_height {
+                                    let scaled = h * factor;
+                                    if !scaled.is_finite() {
+                                        return Err(Error::new(
+                                            ErrorCode::BadNumber,
+                                            format!(
+                                                "the value would be too large once {}",
+                                                self.t.done()
+                                            ),
+                                        )
+                                        .at_field(key_path(&cell_path, "height")));
+                                    }
+                                    entries.push(new_entry(
+                                        "height",
+                                        Node::scalar(number_text(scaled)),
+                                    ));
+                                    any = true;
+                                }
+                            }
+                        }
+                    }
+                    Kind::Scalar(text) if !text.is_empty() => {
+                        if let Some(h) = default_height {
+                            let scaled = h * factor;
+                            if !scaled.is_finite() {
+                                return Err(Error::new(
+                                    ErrorCode::BadNumber,
+                                    format!("the value would be too large once {}", self.t.done()),
+                                )
+                                .at_field(key_path(&cell_path, "height")));
+                            }
+                            let text_node = std::mem::replace(cell_node, Node::bare_null());
+                            *cell_node = Node::new(Kind::Mapping(vec![
+                                new_entry("text", text_node),
+                                new_entry("height", Node::scalar(number_text(scaled))),
+                            ]));
+                            any = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(any)
+    }
+
+    /// Transforms a viewport: turning turns its frame (swapping width and
+    /// height at quarter turns, converting a rectangular viewport to a
+    /// polygonal `clip` at arbitrary angles, or turning its existing `clip`)
+    /// and turns its view twist `rotation` unless `locked`; scaling scales
+    /// its paper window or `clip` and scales its `scale` unless `locked`.
+    fn transform_viewport(&self, keys: &mut Vec<Entry>, path: &str) -> Result<Vec<String>, Error> {
+        let mut changed: Vec<String> = Vec::new();
+        let t = self.t;
+        let locked = scalar_of(keys, "locked") == Some("true");
+        let clipped = keys.iter().any(|e| e.key == "clip");
+        match t.how {
+            How::Scale(factor) => {
+                if factor == 1.0 {
+                    return Ok(changed);
+                }
+                for entry in keys.iter_mut() {
+                    let field = key_path(path, &entry.key);
+                    let did = match entry.key.as_str() {
+                        "center" if !clipped => self.point(&mut entry.value, &field)?,
+                        "width" | "height" if !clipped => self.length(&mut entry.value, &field)?,
+                        "clip" => self.transform_viewport_clip(&mut entry.value, &field)?,
+                        "scale" if !locked => {
+                            let current = super::super::layout::scale(&entry.value, &field)?;
+                            self.write(&mut entry.value, current * factor, &field)?;
+                            true
+                        }
+                        _ => false,
+                    };
+                    if did && !changed.contains(&entry.key) {
+                        changed.push(entry.key.clone());
+                    }
+                }
+            }
+            How::Rotate(degrees) => {
+                let d = whole_degrees(degrees);
+                if d == 0.0 {
+                    return Ok(changed);
+                }
+                if clipped {
+                    if let Some(entry) = keys.iter_mut().find(|e| e.key == "clip") {
+                        let field = key_path(path, "clip");
+                        if self.transform_viewport_clip(&mut entry.value, &field)? {
+                            changed.push("clip".to_owned());
+                        }
+                    }
+                } else if d == 90.0 || d == 180.0 || d == 270.0 {
+                    if let Some(entry) = keys.iter_mut().find(|e| e.key == "center") {
+                        let field = key_path(path, "center");
+                        if self.point(&mut entry.value, &field)? {
+                            changed.push("center".to_owned());
+                        }
+                    }
+                    if d == 90.0 || d == 270.0 {
+                        let wi = keys.iter().position(|e| e.key == "width");
+                        let hi = keys.iter().position(|e| e.key == "height");
+                        if let (Some(wi), Some(hi)) = (wi, hi) {
+                            let w_val = keys[wi].value.clone();
+                            let h_val = keys[hi].value.clone();
+                            if w_val != h_val {
+                                keys[wi].value = h_val;
+                                keys[hi].value = w_val;
+                                changed.push("width".to_owned());
+                                changed.push("height".to_owned());
+                            }
+                        }
+                    }
+                } else {
+                    // Arbitrary angle: turn the 4 corners of the rectangular
+                    // viewport into a closed polygonal `clip`.
+                    let read_len = |key: &str| -> Result<f64, Error> {
+                        let field = key_path(path, key);
+                        let node = &keys
+                            .iter()
+                            .find(|e| e.key == key)
+                            .ok_or_else(|| self.not_a_point(&field))?
+                            .value;
+                        let Kind::Scalar(text) = &node.kind else {
+                            return Err(self.not_a_point(&field));
+                        };
+                        match parse_length(text) {
+                            Ok((v, None)) => Ok(v),
+                            Ok((v, Some(own))) => Ok(own.convert(v, self.units)),
+                            Err(_) => Err(Error::new(
+                                ErrorCode::BadNumber,
+                                format!(
+                                    "the record's length `{text}` is not a length to {}",
+                                    t.verb()
+                                ),
+                            )
+                            .at_field(field)),
+                        }
+                    };
+                    let center_field = key_path(path, "center");
+                    let center_node = &keys
+                        .iter()
+                        .find(|e| e.key == "center")
+                        .ok_or_else(|| self.not_a_point(&center_field))?
+                        .value;
+                    let c = self.read_point(center_node, &center_field)?;
+                    let hw = read_len("width")? / 2.0;
+                    let hh = read_len("height")? / 2.0;
+                    let corners = [
+                        [c[0] - hw, c[1] - hh, 0.0],
+                        [c[0] + hw, c[1] - hh, 0.0],
+                        [c[0] + hw, c[1] + hh, 0.0],
+                        [c[0] - hw, c[1] + hh, 0.0],
+                    ]
+                    .map(|pt| {
+                        let moved = t.point(pt);
+                        Node::new(Kind::Sequence(vec![
+                            Node::scalar(number_text(moved[0])),
+                            Node::scalar(number_text(moved[1])),
+                            Node::scalar("0".to_owned()),
+                        ]))
+                    });
+                    keys.retain(|e| !matches!(e.key.as_str(), "center" | "width" | "height"));
+                    keys.push(new_entry(
+                        "clip",
+                        Node::new(Kind::Mapping(vec![new_entry(
+                            "points",
+                            Node::new(Kind::Sequence(corners.to_vec())),
+                        )])),
+                    ));
+                    for k in ["center", "width", "height", "clip"] {
+                        changed.push(k.to_owned());
+                    }
+                }
+                if !locked {
+                    if let Some(entry) = keys.iter_mut().find(|e| e.key == "rotation") {
+                        let field = key_path(path, "rotation");
+                        if self.angle(&mut entry.value, &field, &|a| t.angle(a))? {
+                            changed.push("rotation".to_owned());
+                        }
+                    } else {
+                        let r = t.angle(0.0);
+                        if r != 0.0 {
+                            keys.push(new_entry("rotation", Node::scalar(number_text(r))));
+                            changed.push("rotation".to_owned());
+                        }
+                    }
+                }
+            }
+            How::Mirror(_) => {}
+        }
+        Ok(changed)
+    }
+
+    /// Transforms a viewport's `clip` mapping (`points` polyline or circle
+    /// `center`/`radius`).
+    fn transform_viewport_clip(&self, node: &mut Node, field: &str) -> Result<bool, Error> {
+        let Kind::Mapping(keys) = &mut node.kind else {
+            return Ok(false);
+        };
+        let scaled = self.t.factor() != 1.0;
+        let mut any = false;
+        for entry in keys.iter_mut() {
+            let at = key_path(field, &entry.key);
+            any |= match entry.key.as_str() {
+                "points" => self.vertices(&mut entry.value, &at)?,
+                "center" => self.point(&mut entry.value, &at)?,
+                "radius" if scaled => self.length(&mut entry.value, &at)?,
+                _ => false,
+            };
+        }
+        Ok(any)
     }
 
     /// A multileader's content: its text's height, scaled, written as its
-    /// own when its style gives it; or its block's rotation, turned, and
-    /// scale, scaled. Its text is laid out level again where its landing
-    /// puts it, as every multileader's is.
+    /// own when its style gives it; or its block's rotation, scale and
+    /// mirrored state, transformed like an insert's. Its text is laid out
+    /// level again where its landing puts it, as every multileader's is.
     fn mleader_content(&self, node: &mut Node, field: &str) -> Result<bool, Error> {
         let Kind::Mapping(keys) = &mut node.kind else {
             return Ok(false);
@@ -1366,16 +1715,21 @@ impl At<'_> {
             };
         }
         let mut any = false;
+        let rot_fn: &dyn Fn(f64) -> f64 = if t.mirrors() {
+            &|a| t.angle(a) + 180.0
+        } else {
+            &|a| t.angle(a)
+        };
         for key in keys.iter_mut() {
             let path = key_path(field, &key.key);
             any |= match key.key.as_str() {
-                "rotation" => self.angle(&mut key.value, &path, &|a| t.angle(a))?,
+                "rotation" => self.angle(&mut key.value, &path, rot_fn)?,
                 "scale" if t.factor() != 1.0 => self.number(&mut key.value, &path)?,
                 _ => false,
             };
         }
         if !keys.iter().any(|e| e.key == "rotation") {
-            let r = t.angle(0.0);
+            let r = whole_degrees(rot_fn(0.0));
             if r != 0.0 {
                 keys.push(new_entry("rotation", Node::scalar(number_text(r))));
                 any = true;
@@ -1383,6 +1737,45 @@ impl At<'_> {
         }
         if t.factor() != 1.0 && !keys.iter().any(|e| e.key == "scale") {
             keys.push(new_entry("scale", Node::scalar(number_text(t.factor()))));
+            any = true;
+        }
+        if t.mirrors() {
+            let was = keys.iter().position(|e| e.key == "mirrored").map(|i| {
+                (
+                    i,
+                    matches!(&keys[i].value.kind, Kind::Scalar(s) if s == "true"),
+                )
+            });
+            match was {
+                Some((i, true)) => {
+                    keys.remove(i);
+                }
+                Some((i, false)) => {
+                    keys[i].value = Node::scalar("true".to_owned());
+                }
+                None => {
+                    keys.push(new_entry("mirrored", Node::scalar("true".to_owned())));
+                }
+            }
+            let now_mirrored = !matches!(was, Some((_, true)));
+            let readable_idx = keys.iter().position(|e| e.key == "readable_attributes");
+            match (now_mirrored, readable_idx) {
+                (true, Some(i)) => {
+                    keys.remove(i);
+                }
+                (false, Some(i)) => {
+                    if !matches!(&keys[i].value.kind, Kind::Scalar(s) if s == "true") {
+                        keys[i].value = Node::scalar("true".to_owned());
+                    }
+                }
+                (false, None) => {
+                    keys.push(new_entry(
+                        "readable_attributes",
+                        Node::scalar("true".to_owned()),
+                    ));
+                }
+                (true, None) => {}
+            }
             any = true;
         }
         Ok(any)
@@ -1633,6 +2026,7 @@ mod tests {
                 ("annotation.height", 2.5),
             ],
             size: None,
+            row_heights: Vec::new(),
         };
         assert_eq!(
             transformed(
@@ -1957,51 +2351,89 @@ objects:
     }
 
     #[test]
-    fn a_table_mirrors_upright_by_its_box_and_is_not_turned_or_scaled() {
+    fn a_table_turns_scales_and_mirrors_across_any_line() {
         let table =
-            "table: {position: [0, 10, 0], columns: [4, 6], rows: [2, 3], cells: [[a, b], [c, d]]}";
+            "table: {position: [0, 10, 0], columns: [4, 6], rows: [2, 3], cells: [[a, b], [c, '']]}";
         let sized = Resolved {
             lengths: Vec::new(),
             size: Some([10.0, 5.0]),
+            row_heights: vec![2.5, 2.0],
         };
         assert_eq!(
             transformed(table, mirrored(), &sized).unwrap(),
-            "table: {position: [10, 10, 0], columns: [4, 6], rows: [2, 3], cells: [[a, b], [c, d]]}"
+            "table: {position: [10, 10, 0], columns: [4, 6], rows: [2, 3], cells: [[a, b], [c, '']]}"
         );
         let across = Transform::mirror([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap();
         assert_eq!(
             transformed(table, across, &sized).unwrap(),
-            "table: {position: [0, -5, 0], columns: [4, 6], rows: [2, 3], cells: [[a, b], [c, d]]}"
+            "table: {position: [0, -5, 0], columns: [4, 6], rows: [2, 3], cells: [[a, b], [c, '']]}"
         );
-        for (t, words) in [
-            (turn(), "no rotation of its own"),
-            (doubled(), "is not scaled"),
-            (
-                Transform::mirror([0.0; 3], [1.0, 2.0, 0.0]).unwrap(),
-                "only across a line that runs across",
-            ),
-        ] {
-            let e = transformed(table, t, &sized).unwrap_err();
-            assert_eq!(e.code, ErrorCode::BadValue);
-            assert!(e.message.contains(words), "{}", e.message);
-        }
+        // Mirror across the 45-degree diagonal y = x: top-left moves to [5, 0], rotation 90.
+        let diag = Transform::mirror([0.0; 3], [1.0, 1.0, 0.0]).unwrap();
+        assert_eq!(
+            transformed(table, diag, &sized).unwrap(),
+            "table: {position: [5, 0, 0], columns: [4, 6], rows: [2, 3], cells: [[a, b], [c, '']], rotation: 90}"
+        );
+        // Quarter turn about the origin: [0, 10, 0] -> [-10, 0, 0], rotation 90.
+        assert_eq!(
+            transformed(table, turn(), &sized).unwrap(),
+            "table: {position: [-10, 0, 0], columns: [4, 6], rows: [2, 3], cells: [[a, b], [c, '']], rotation: 90}"
+        );
+        // Scale by 2 about the origin: position, columns, rows and non-empty cells' heights double.
+        assert_eq!(
+            transformed(table, doubled(), &sized).unwrap(),
+            "table: {position: [0, 20, 0], columns: [8, 12], rows: [4, 6], cells: [[{text: a, height: 5}, {text: b, height: 5}], [{text: c, height: 4}, '']]}"
+        );
     }
 
     #[test]
-    fn what_the_description_cannot_hold_is_refused() {
-        let e = transformed(
-            "mleader: {leaders: [[[1, 0, 0], [5, 5, 0]]], content: {block: B}}",
-            mirrored(),
+    fn mleader_block_content_mirrors_and_viewports_turn_and_scale() {
+        // Multileader with block content mirrors like an insert.
+        let ml = "mleader: {leaders: [[[1, 0, 0], [5, 5, 0]]], content: {block: B}}";
+        let mirrored_ml = transformed(ml, mirrored(), &Resolved::default()).unwrap();
+        assert_eq!(
+            mirrored_ml,
+            "mleader: {leaders: [[[19, 0, 0], [15, 5, 0]]], content: {block: B, mirrored: true}}"
+        );
+        // Mirroring back clears `mirrored` and sets `readable_attributes: true`.
+        assert_eq!(
+            transformed(&mirrored_ml, mirrored(), &Resolved::default()).unwrap(),
+            "mleader: {leaders: [[[1, 0, 0], [5, 5, 0]]], content: {block: B, readable_attributes: true}}"
+        );
+        // Viewport turned by 90° swaps width and height and sets rotation: 90.
+        let vp = "viewport: {center: [5, 5, 0], width: 4, height: 3, view_center: [0, 0, 0], scale: 1:4}";
+        assert_eq!(
+            transformed(vp, turn(), &Resolved::default()).unwrap(),
+            "viewport: {center: [-5, 5, 0], width: 3, height: 4, view_center: [0, 0, 0], scale: '1:4', rotation: 90}"
+        );
+        // Viewport scaled by 2 doubles center, width, height and scale (0.25 -> 0.5).
+        assert_eq!(
+            transformed(vp, doubled(), &Resolved::default()).unwrap(),
+            "viewport: {center: [10, 10, 0], width: 8, height: 6, view_center: [0, 0, 0], scale: 0.5}"
+        );
+        // Locked viewport keeps its scale and view rotation unchanged.
+        let locked_vp = "viewport: {center: [5, 5, 0], width: 4, height: 3, view_center: [0, 0, 0], scale: 1:4, locked: true}";
+        assert_eq!(
+            transformed(locked_vp, turn(), &Resolved::default()).unwrap(),
+            "viewport: {center: [-5, 5, 0], width: 3, height: 4, view_center: [0, 0, 0], scale: '1:4', locked: true}"
+        );
+        assert_eq!(
+            transformed(locked_vp, doubled(), &Resolved::default()).unwrap(),
+            "viewport: {center: [10, 10, 0], width: 8, height: 6, view_center: [0, 0, 0], scale: '1:4', locked: true}"
+        );
+        // Arbitrary rotation converts rectangular viewport to polygonal clip.
+        let turned_45 = transformed(
+            vp,
+            Transform::rotate([5.0, 5.0, 0.0], 45.0),
             &Resolved::default(),
         )
-        .unwrap_err();
-        assert!(e.message.contains("block content"), "{}", e.message);
-        let e = transformed(
-            "viewport: {center: [5, 5, 0], width: 4, height: 3, view_center: [0, 0, 0], scale: 1}",
-            turn(),
-            &Resolved::default(),
-        )
-        .unwrap_err();
+        .unwrap();
+        assert!(turned_45.contains("clip: {points:"), "{turned_45}");
+        assert!(turned_45.contains("rotation: 45"), "{turned_45}");
+        assert!(!turned_45.contains("width:"), "{turned_45}");
+        // Mirroring a viewport is still refused.
+        let e = transformed(vp, mirrored(), &Resolved::default()).unwrap_err();
+        assert_eq!(e.code, ErrorCode::BadValue);
         assert!(e.message.contains("viewport"), "{}", e.message);
     }
 

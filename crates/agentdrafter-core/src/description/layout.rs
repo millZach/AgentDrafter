@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use super::schema::{POSITIVE_NUMBER, TEXT_TYPES};
 use super::strict_yaml::Node;
-use super::{at, bad_value, boolean, length, point, scalar, Fields};
+use super::{angle, at, bad_value, boolean, length, point, scalar, Fields};
 use crate::error::{Error, ErrorCode};
 use crate::model::{Clip, Layer, Paper, Point3, Viewport};
 use crate::units::{parse_length, LengthError, Unit};
@@ -41,12 +41,13 @@ pub(crate) const MODEL: &str = "model";
 pub(crate) const PAPER: &str = "paper";
 
 /// The keys a viewport takes.
-pub(crate) const VIEWPORT_KEYS: [&str; 17] = [
+pub(crate) const VIEWPORT_KEYS: [&str; 18] = [
     "center",
     "width",
     "height",
     "view_center",
     "scale",
+    "rotation",
     "view_direction",
     super::annotation_scale::ANNOTATION_SCALE_KEY,
     "locked",
@@ -438,6 +439,10 @@ pub(super) fn viewport(
     let scale_node = fields.require("scale")?;
     let scale_path = fields.path_of("scale");
     let scale = scale(scale_node, &scale_path)?;
+    let rotation = match fields.get("rotation") {
+        Some(node) => angle(node, &fields.path_of("rotation"))?,
+        None => 0.0,
+    };
     let annotation_scale = match fields.text(super::annotation_scale::ANNOTATION_SCALE_KEY) {
         Some(node) => Some(super::annotation_scale::resolve_scale_name(
             node,
@@ -460,6 +465,7 @@ pub(super) fn viewport(
         height,
         view_center,
         scale,
+        rotation,
         view_direction,
         annotation_scale,
         locked,
@@ -886,6 +892,11 @@ pub(crate) fn viewport_def() -> Value {
                     { "type": "number", "exclusiveMinimum": 0 },
                     { "type": "string", "pattern": ratio },
                 ],
+            },
+            "rotation": {
+                "$ref": "#/$defs/angle",
+                "description": "View twist angle in degrees anticlockwise (AutoCAD viewport \
+                                twist angle). Without it, 0.",
             },
             "view_direction": {
                 "description": "Optional 3D orthographic view direction (AutoCAD `VIEWDIR`), \

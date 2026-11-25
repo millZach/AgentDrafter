@@ -656,8 +656,13 @@ pub(super) fn dwg_mleader(
             written.block_content_handle = Some(record.handle);
             written.block_content_color = Color::ByBlock;
             written.block_connection_type = block_connection_type(connection);
+            let sx = if insert.mirrored {
+                -insert.scale
+            } else {
+                insert.scale
+            };
             written.block_rotation = insert.rotation.to_radians();
-            written.block_scale = Vector3::new(insert.scale, insert.scale, insert.scale);
+            written.block_scale = Vector3::new(sx, insert.scale, insert.scale);
             let context = &mut written.context;
             context.text_height = style.text_height;
             context.text_left_attachment = attachment;
@@ -674,7 +679,7 @@ pub(super) fn dwg_mleader(
             context.block_content_handle = Some(record.handle);
             context.block_content_normal = Vector3::UNIT_Z;
             context.block_content_location = vector(insert.position);
-            context.block_content_scale = Vector3::new(insert.scale, insert.scale, insert.scale);
+            context.block_content_scale = Vector3::new(sx, insert.scale, insert.scale);
             context.block_rotation = insert.rotation.to_radians();
             context.block_content_color = Color::ByLayer;
             context.block_connection_type = block_connection_type(connection);
@@ -721,15 +726,16 @@ fn block_connection_type(connection: BlockConnection) -> BlockContentConnectionT
 /// where the insert puts it.
 #[rustfmt::skip]
 fn block_transform(insert: &Insert, base: Point3) -> [f64; 16] {
-    let (sin, cos) = insert.rotation.to_radians().sin_cos();
+    let (sin, cos) = crate::description::sin_cos_degrees(insert.rotation);
     let s = insert.scale;
+    let sx = if insert.mirrored { -s } else { s };
     let p = insert.position;
-    let tx = p.x - s * (base.x * cos - base.y * sin);
-    let ty = p.y - s * (base.x * sin + base.y * cos);
+    let tx = p.x - (base.x * sx * cos - base.y * s * sin);
+    let ty = p.y - (base.x * sx * sin + base.y * s * cos);
     let tz = p.z - s * base.z;
     [
-        s * cos, -s * sin, 0.0, tx,
-        s * sin, s * cos, 0.0, ty,
+        sx * cos, -s * sin, 0.0, tx,
+        sx * sin, s * cos, 0.0, ty,
         0.0, 0.0, s, tz,
         0.0, 0.0, 0.0, 1.0,
     ]
@@ -1110,8 +1116,8 @@ fn read_block_content(
         && written.block_content_handle == Some(handle)
         && written.block_content_color == Color::ByBlock
         && context.block_content_normal == Vector3::UNIT_Z
-        && scale.x > 0.0
-        && scale.x == scale.y
+        && scale.y > 0.0
+        && scale.x.abs() == scale.y
         && scale.y == scale.z
         && within(context.block_content_scale.x, scale.x)
         && within(context.block_content_scale.y, scale.y)
@@ -1169,8 +1175,10 @@ fn read_block_content(
     Some(MLeaderBlock {
         block: block.name.clone(),
         attributes,
-        scale: scale.x,
+        scale: scale.y,
         rotation: degrees,
+        mirrored: scale.x < 0.0,
+        readable_attributes: false,
         connection,
     })
 }

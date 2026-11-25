@@ -33,6 +33,10 @@ pub const STANDARD_TABLE_STYLE: &str = STANDARD;
 pub struct Table {
     /// The table's top left corner, where AutoCAD inserts it.
     pub position: Point3,
+    /// Degrees anticlockwise from the X axis, in `[0, 360)`. 0 when
+    /// horizontal.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation: f64,
     /// The width of each column, left to right, each more than 0.
     pub columns: Vec<f64>,
     /// The height of each row, top to bottom, each more than 0.
@@ -59,6 +63,10 @@ pub struct Table {
 
 fn standard_table_style() -> String {
     STANDARD_TABLE_STYLE.to_owned()
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// One cell of a table: its text, and what it draws its text with where
@@ -228,6 +236,21 @@ pub struct LaidCell {
 }
 
 impl Table {
+    /// Turns a point in the table's unrotated frame (its top left corner at
+    /// `self.position`) into the sheet's coordinates by `self.rotation`.
+    pub fn to_sheet(&self, p: [f64; 2]) -> [f64; 2] {
+        if self.rotation == 0.0 {
+            return p;
+        }
+        let (sin, cos) = crate::description::sin_cos_degrees(self.rotation);
+        let dx = p[0] - self.position.x;
+        let dy = p[1] - self.position.y;
+        [
+            self.position.x + dx * cos - dy * sin,
+            self.position.y + dx * sin + dy * cos,
+        ]
+    }
+
     /// The kind of row `row`.
     pub fn row_kind(&self, row: usize) -> RowKind {
         let title = usize::from(self.title);
@@ -348,15 +371,16 @@ impl Table {
             .unwrap_or(0);
         let across = [x[0] + h, (x[0] + x[1]) / 2.0, x[1] - h][at % 3];
         let up = [y[1] - v, (y[0] + y[1]) / 2.0, y[0] + v][at / 3];
+        let pos = self.to_sheet([across, up]);
         Some(MText {
             contents: cell.text.clone(),
             runs: Vec::new(),
-            position: Point3::new(across, up, self.position.z),
+            position: Point3::new(pos[0], pos[1], self.position.z),
             height: cell.height.unwrap_or(row.text_height),
             width: (x[1] - x[0] - 2.0 * h).max(0.0),
             style: cell.style.clone().unwrap_or_else(|| row.text_style.clone()),
             width_factor: None,
-            rotation: 0.0,
+            rotation: self.rotation,
             justify,
             underline: false,
             overline: false,
@@ -390,7 +414,10 @@ impl Table {
                 while c < columns && open(c) {
                     c += 1;
                 }
-                lines.push([[xs[start], ys[k]], [xs[c], ys[k]]]);
+                lines.push([
+                    self.to_sheet([xs[start], ys[k]]),
+                    self.to_sheet([xs[c], ys[k]]),
+                ]);
             }
         }
         for k in 0..=columns {
@@ -405,7 +432,10 @@ impl Table {
                 while r < rows && open(r) {
                     r += 1;
                 }
-                lines.push([[xs[k], ys[start]], [xs[k], ys[r]]]);
+                lines.push([
+                    self.to_sheet([xs[k], ys[start]]),
+                    self.to_sheet([xs[k], ys[r]]),
+                ]);
             }
         }
         lines
@@ -443,6 +473,7 @@ mod tests {
         cells[0][0].merge = Some([1, 3]);
         Table {
             position: Point3::new(10.0, 100.0, 0.0),
+            rotation: 0.0,
             columns: vec![40.0, 25.0, 30.0],
             rows: vec![8.0, 6.0, 6.0],
             cells,
@@ -511,5 +542,22 @@ mod tests {
         assert_eq!(data.justify, Attachment::TopCenter);
         // An empty cell draws no text.
         assert!(laid[6].text.is_none());
+    }
+
+    #[test]
+    fn a_rotated_table_turns_its_borders_and_cell_text() {
+        let mut t = table();
+        t.rotation = 90.0;
+        let borders = t.borders();
+        // Top border originally ran [10, 100] -> [105, 100]; turned +90°
+        // about [10, 100] it runs [10, 100] -> [10, 195].
+        assert_eq!(borders[0], [[10.0, 100.0], [10.0, 195.0]]);
+        let style = TableStyle::with("S", "Standard", [3.5, 2.5, 2.5], 1.0);
+        let laid = t.laid_out(&style);
+        let title = laid[0].text.as_ref().unwrap();
+        // Originally at (10 + 47.5, 100 - 4); turned +90° about (10, 100)
+        // lands at (10 + 4, 100 + 47.5) = (14, 147.5).
+        assert_eq!(title.position, Point3::new(14.0, 147.5, 0.0));
+        assert_eq!(title.rotation, 90.0);
     }
 }

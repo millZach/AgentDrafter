@@ -447,6 +447,23 @@ impl Sheet<'_> {
             self.units
         };
         let u = finding_units.map_or("drawing units", Unit::symbol);
+        let (sin, cos) = if table.rotation == 0.0 {
+            (0.0, 1.0)
+        } else {
+            crate::description::sin_cos_degrees(-table.rotation)
+        };
+        let unrotate = |p: [f64; 2]| -> [f64; 2] {
+            if table.rotation == 0.0 {
+                p
+            } else {
+                let dx = p[0] - table.position.x;
+                let dy = p[1] - table.position.y;
+                [
+                    table.position.x + dx * cos - dy * sin,
+                    table.position.y + dx * sin + dy * cos,
+                ]
+            }
+        };
         for cell in table.laid_out(&style) {
             let Some(text) = &cell.text else {
                 continue;
@@ -456,7 +473,8 @@ impl Sheet<'_> {
                 list.items
                     .iter()
                     .filter(|item| item.object == i && mine(item.cell))
-                    .flat_map(Item::points),
+                    .flat_map(Item::points)
+                    .map(unrotate),
             );
             let Some(drawn) = drawn else {
                 continue;

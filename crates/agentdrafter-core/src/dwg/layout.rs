@@ -354,6 +354,7 @@ pub(super) fn dwg_viewport(
     }
     dwg.view_height = viewport.view_height();
     dwg.custom_scale = viewport.scale;
+    dwg.twist_angle = viewport.rotation.to_radians();
     let mut status = ViewportStatusFlags::from_bits(if boundary.is_some() {
         CLIPPED_STATUS
     } else {
@@ -927,7 +928,7 @@ pub(super) fn read_viewport(
         && dwg.clip_boundary_handle.is_null() == clip.is_none()
         && valid_dir
         && (at_origin || !top)
-        && dwg.twist_angle == 0.0
+        && dwg.twist_angle.is_finite()
         && dwg.render_mode == ViewportRenderMode::Wireframe2D
         && dwg.width > 0.0
         && dwg.height > 0.0
@@ -949,12 +950,24 @@ pub(super) fn read_viewport(
         }
         None => Point3::new(dwg.view_center.x, dwg.view_center.y, 0.0),
     };
+    let rotation = if dwg.twist_angle == 0.0 {
+        0.0
+    } else {
+        let deg = crate::description::normalize_degrees(dwg.twist_angle.to_degrees());
+        let snapped = deg.round();
+        if (deg - snapped).abs() < 1e-9 && snapped % 90.0 == 0.0 {
+            crate::description::normalize_degrees(snapped)
+        } else {
+            deg
+        }
+    };
     let viewport = Viewport {
         center: Point3::new(dwg.center.x, dwg.center.y, 0.0),
         width: dwg.width,
         height: dwg.height,
         view_center,
         scale,
+        rotation,
         view_direction,
         annotation_scale: super::ids::read_viewport_annoscale(&dwg.common),
         locked: status.locked,

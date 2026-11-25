@@ -1010,14 +1010,15 @@ fn does(spec: &Spec) -> String {
                          copy: true keeps the sources and makes rotated copies listed under \
                          copies, as ROTATE's Copy option does. Every point each is drawn through \
                          turns about it, and so does every direction it is drawn in: a text's, an \
-                         mtext's and an insert's rotation, an arc's angles, an ellipse's major \
-                         axis, a patterned hatch's angle and origin and a linear dimension's \
-                         angle. A multileader's and a leader's text stays level, laid out again \
-                         where its landing puts it, and a dimension's text reads as its rules \
-                         lay it out. A turn by a multiple of 90 degrees lands exactly. A table, \
-                         which has no rotation, and a viewport are not turned, nor an ordinate \
-                         dimension but by a multiple of 90 degrees, which swaps its axis at a \
-                         quarter turn. AutoCAD's ROTATE."
+                         mtext's, an insert's and a table's rotation, an arc's angles, an \
+                         ellipse's major axis, a patterned hatch's angle and origin and a linear \
+                         dimension's angle. A viewport turns its frame (converting a rectangular \
+                         viewport to a polygonal clip at arbitrary angles) and its view twist \
+                         rotation when unlocked. A multileader's and a leader's text stays level, \
+                         laid out again where its landing puts it, and a dimension's text reads \
+                         as its rules lay it out. A turn by a multiple of 90 degrees lands \
+                         exactly. An ordinate dimension is turned only by a multiple of 90 \
+                         degrees, which swaps its axis at a quarter turn. AutoCAD's ROTATE."
             .to_owned(),
         Kind::Scale => "Scales objects, target or targets as rotate takes them, about base_point, \
                         a point or a snapped point, by factor, a number more than 0, or by \
@@ -1029,12 +1030,13 @@ fn does(spec: &Spec) -> String {
                         Every point each is drawn through moves away from it or towards it, \
                         along Z too, and every length it is drawn with is scaled: a radius, a \
                         text's and an mtext's height and width, a polyline's widths, a donut's \
-                        diameters, an insert's scale and a patterned hatch's pattern scale, and a \
-                        multileader's and a leader's arrow size, gap, landing and text height, \
-                        written as its own when its style or the sheet's default gives them. A \
-                        dimension's text and arrows stay as its style draws them, and it measures \
-                        its new length. A table, whose text its style sizes, and a viewport are \
-                        not scaled. AutoCAD's SCALE."
+                        diameters, an insert's scale, a table's columns, rows and non-empty \
+                        cells' text heights, a viewport's window or clip (and its scale when \
+                        unlocked), a patterned hatch's pattern scale, and a multileader's and a \
+                        leader's arrow size, gap, landing and text height, written as its own \
+                        when its style or the sheet's default gives them. A dimension's text and \
+                        arrows stay as its style draws them, and it measures its new length. \
+                        AutoCAD's SCALE."
             .to_owned(),
         Kind::Mirror => "Mirrors objects, target or targets as rotate takes them, across the \
                          line through first_point and second_point, each a point or a snapped \
@@ -1046,17 +1048,16 @@ fn does(spec: &Spec) -> String {
                          forwards, as AutoCAD's MIRRTEXT 0 keeps it: its position mirrors, and \
                          it reads along its mirrored direction, or that turned a half turn, \
                          whichever reads left to right or upwards, with its own justification; \
-                         an insert's attributes read forwards too, while the insert itself is \
-                         mirrored, mirrored: true, which a DWG keeps as a negative X scale, and \
-                         one mirrored back keeps them so with readable_attributes: true. A \
-                         hatch's pattern keeps its direction, as AutoCAD's MIRRHATCH 0 keeps it. \
-                         A line across or up the sheet, or at 45 degrees, mirrors exactly. A \
-                         table is mirrored only across a line across or up the sheet, an \
-                         ordinate dimension only across one across or up the sheet or at 45 \
-                         degrees, a leader only when its landing goes to its mirror image's \
-                         side, and a multileader with block content and a viewport are not \
-                         mirrored. \
-                         AutoCAD's MIRROR."
+                         an insert's and a multileader's block content's attributes read \
+                         forwards too, while the block itself is mirrored, mirrored: true, which \
+                         a DWG keeps as a negative X scale, and one mirrored back keeps them so \
+                         with readable_attributes: true. A table mirrors across any line by its \
+                         box in its forward-reading rotation. A hatch's pattern keeps its \
+                         direction, as AutoCAD's MIRRHATCH 0 keeps it. A line across or up the \
+                         sheet, or at 45 degrees, mirrors exactly. An ordinate dimension is \
+                         mirrored only across a line across or up the sheet or at 45 degrees, a \
+                         leader only when its landing goes to its mirror image's side, and a \
+                         viewport, raster image or PDF underlay is not mirrored. AutoCAD's MIRROR."
             .to_owned(),
         Kind::DrawOrder => "Changes the draw order of target, one object, or targets, several of \
                             one sheet or template, putting them at order: front (drawn last, on \
