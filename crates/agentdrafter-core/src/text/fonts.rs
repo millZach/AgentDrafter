@@ -210,8 +210,18 @@ impl Font {
             }
             pen = next;
         }
+        let textbox = match self {
+            Font::TrueType(_) => ink.map(truetype_textbox),
+            Font::Shx(_) | Font::Hershey => ink,
+        };
         if let (Font::TrueType(_), Some(all)) = (self, extent.as_mut()) {
-            // AutoCAD justifies TrueType text by its advance as well as its outlines.
+            // AutoCAD justifies TrueType text by its advance as well as its
+            // outlines, and its vertical box (`textbox`) drops any gap between
+            // the baseline and the bottom of what the text draws (#59).
+            if let Some(tb) = textbox {
+                all.bottom = tb.bottom;
+                all.top = tb.top;
+            }
             *all = all
                 .union(Rect::point(0.0, all.bottom))
                 .union(Rect::point(pen.0, all.bottom));
@@ -219,8 +229,22 @@ impl Font {
         Line {
             advance: pen.0,
             ink,
+            textbox,
             extent,
         }
+    }
+}
+
+/// AutoCAD's `textbox` for TrueType text drops any vertical gap between the
+/// baseline and the bottom of what the text draws: when the drawn box sits
+/// wholly above the baseline (`bottom > 0`), it starts at the baseline with
+/// the same thickness (`bottom = 0`, `top = rect.top - rect.bottom`). Text
+/// that reaches or crosses the baseline keeps its drawn vertical bounds (#59).
+pub(crate) fn truetype_textbox(rect: Rect) -> Rect {
+    if rect.bottom > 0.0 {
+        rect.moved(0.0, -rect.bottom)
+    } else {
+        rect
     }
 }
 
@@ -230,12 +254,15 @@ impl Font {
 pub(crate) struct Line {
     /// How far the pen moves along the baseline.
     pub advance: f64,
-    /// The box around what the line draws, as AutoCAD's `textbox`
-    /// measures it; none when it draws nothing.
+    /// The box around what the line draws; none when it draws nothing.
     pub ink: Option<Rect>,
+    /// AutoCAD's `textbox` for the line: what it draws, shifted down to the
+    /// baseline for a TrueType font when it draws wholly above it (#59);
+    /// none when it draws nothing.
+    pub textbox: Option<Rect>,
     /// The box AutoCAD justifies the line by: what it draws, the place of
     /// each character that draws nothing, and for a TrueType font the
-    /// whole advance.
+    /// whole advance and `textbox`'s vertical bounds.
     pub extent: Option<Rect>,
 }
 
