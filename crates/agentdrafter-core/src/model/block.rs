@@ -329,12 +329,13 @@ pub struct BlockLibrary {
 /// As in AutoCAD, an attribute defined on layer `0` sits on the insert's
 /// layer, and one defined on any other layer on that layer.
 ///
-/// On a mirrored insert the attribute sits where the mirror puts it but
-/// still reads forwards, as AutoCAD's MIRRTEXT 0 leaves it: its direction is
-/// the mirrored one, or that turned a half turn, whichever reads left to
-/// right or upwards ([`readable`]), and its justification is its own. On an
-/// insert mirrored back, with [`Insert::readable_attributes`], it reads
-/// along its turned direction, or that turned a half turn, by the same rule,
+/// On a mirrored insert the attribute sits where the mirror puts it and
+/// matches AutoCAD 2026's MIRRTEXT 0 box placement: its direction follows
+/// [`mirrored_text_direction`], and its justification flips left<->right
+/// when the baseline reverses or top<->baseline when the up-vector reverses,
+/// so an attribute inside a block cell stays inside its mirrored cell. On
+/// an insert mirrored back, with [`Insert::readable_attributes`], it reads
+/// along its turned direction, or that turned a half turn, by [`readable`],
 /// but for a constant one, which is part of the block and turns with it.
 pub fn attribute_text(
     insert: &Insert,
@@ -347,20 +348,36 @@ pub fn attribute_text(
     } else {
         definition.layer.clone()
     };
+    let (rotation, justify) = if insert.mirrored {
+        let (rot, flip_horizontal) = mirrored_text_direction(
+            definition.rotation,
+            insert.rotation + 180.0 - definition.rotation,
+        );
+        let just = if flip_horizontal {
+            definition.justify.flip_horizontal()
+        } else {
+            definition.justify.flip_vertical()
+        };
+        (rot, just)
+    } else if insert.readable_attributes && !definition.constant {
+        (
+            readable(definition.rotation + insert.rotation),
+            definition.justify,
+        )
+    } else {
+        (
+            normalize_degrees(definition.rotation + insert.rotation),
+            definition.justify,
+        )
+    };
     Text {
         contents: value.to_owned(),
         position: place(insert, block.base_point, definition.position),
         height: definition.height * insert.scale,
         style: definition.style.clone(),
         width_factor: definition.width_factor,
-        rotation: if insert.mirrored {
-            readable(insert.rotation + 180.0 - definition.rotation)
-        } else if insert.readable_attributes && !definition.constant {
-            readable(definition.rotation + insert.rotation)
-        } else {
-            normalize_degrees(definition.rotation + insert.rotation)
-        },
-        justify: definition.justify,
+        rotation,
+        justify,
         underline: false,
         overline: false,
         layer,
@@ -385,6 +402,29 @@ pub fn attribute_mtext(
     } else {
         definition.layer.clone()
     };
+    let (rotation, justify) = if insert.mirrored {
+        let (rot, flip_horizontal) = mirrored_text_direction(
+            definition.rotation,
+            insert.rotation + 180.0 - definition.rotation,
+        );
+        let att = definition.attachment();
+        let just = if flip_horizontal {
+            att.flip_horizontal()
+        } else {
+            att.flip_vertical()
+        };
+        (rot, just)
+    } else if insert.readable_attributes && !definition.constant {
+        (
+            readable(definition.rotation + insert.rotation),
+            definition.attachment(),
+        )
+    } else {
+        (
+            normalize_degrees(definition.rotation + insert.rotation),
+            definition.attachment(),
+        )
+    };
     MText {
         contents: value.to_owned(),
         runs: Vec::new(),
@@ -393,14 +433,8 @@ pub fn attribute_mtext(
         width: definition.width * insert.scale,
         style: definition.style.clone(),
         width_factor: Some(definition.width_factor),
-        rotation: if insert.mirrored {
-            readable(insert.rotation + 180.0 - definition.rotation)
-        } else if insert.readable_attributes && !definition.constant {
-            readable(definition.rotation + insert.rotation)
-        } else {
-            normalize_degrees(definition.rotation + insert.rotation)
-        },
-        justify: definition.attachment(),
+        rotation,
+        justify,
         underline: false,
         overline: false,
         layer,
@@ -409,6 +443,35 @@ pub fn attribute_mtext(
         annotative: false,
         annotation_scales: Vec::new(),
     }
+}
+
+/// Whether `degrees` reads left-to-right or upwards: in `[0, 90]` or
+/// `(270, 360)` (within [`CUTOFF_NOISE`] of the 90°/270° boundary).
+pub(crate) fn is_upright(degrees: f64) -> bool {
+    let direction = normalize_degrees(degrees);
+    direction <= 90.0 + CUTOFF_NOISE || direction > 270.0 + CUTOFF_NOISE
+}
+
+/// AutoCAD 2026's exact `MIRRTEXT 0` direction rule for mirrored text,
+/// mtext, and attributes: given the `original` angle and its geometrically
+/// `reflected` angle (`2 * axis - original`), returns `(new_rotation,
+/// flip_horizontal)`.
+///
+/// AutoCAD preserves whether the text reads in the upright half-plane
+/// (`[0, 90] ∪ (270, 360)`) or the inverted half-plane (`(90, 270]`):
+/// - When `is_upright(original) != is_upright(reflected)`, the baseline
+///   reverses by `+180°` (`flip_horizontal = true`, flipping Left <-> Right).
+/// - When both lie in the same half-plane, the baseline keeps `reflected`
+///   (`flip_horizontal = false`, flipping Top <-> Bottom).
+pub(crate) fn mirrored_text_direction(original: f64, reflected: f64) -> (f64, bool) {
+    let raw = normalize_degrees(reflected);
+    let flip_horizontal = is_upright(original) != is_upright(raw);
+    let angle = if flip_horizontal {
+        normalize_degrees(raw + 180.0)
+    } else {
+        raw
+    };
+    (angle, flip_horizontal)
 }
 
 /// Of a direction of text that a mirror leaves reading backwards, `degrees`,
@@ -423,7 +486,7 @@ pub fn attribute_mtext(
 /// side of the degrees it was written in, and must give the same text.
 pub(crate) fn readable(degrees: f64) -> f64 {
     let direction = normalize_degrees(degrees);
-    if direction <= 90.0 + CUTOFF_NOISE || direction > 270.0 + CUTOFF_NOISE {
+    if is_upright(direction) {
         direction
     } else {
         normalize_degrees(direction + 180.0)
@@ -670,6 +733,15 @@ mod tests {
         definition.rotation = 30.0;
         let text = attribute_text(&mirrored, &block(base), &definition, "A-1");
         assert_eq!(text.rotation, 330.0);
+        // A left-justified attribute flips to right when mirrored across Y
+        // (staying inside its mirrored cell) and to top_left when mirrored
+        // across X (staying inside its mirrored row).
+        definition.rotation = 0.0;
+        definition.justify = Justify::Left;
+        let text = attribute_text(&mirrored, &block(base), &definition, "A-1");
+        assert_eq!(text.justify, Justify::Right);
+        let text = attribute_text(&flipped, &block(base), &definition, "A-1");
+        assert_eq!(text.justify, Justify::TopLeft);
     }
 
     #[test]

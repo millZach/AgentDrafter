@@ -18,7 +18,8 @@
 //! keeps it, its X scale negative ([`crate::model::Insert::mirrored`]).
 
 use super::*;
-use crate::model::block::readable;
+use crate::model::block::{mirrored_text_direction, readable};
+use crate::text::{Attachment, Justify};
 
 /// A rotation, an even scaling or a mirror, about a point, of the points,
 /// directions and lengths an object is drawn with.
@@ -170,14 +171,22 @@ impl Transform {
     }
 
     /// The direction a text, an mtext or an attribute at `degrees` reads
-    /// in: turned with the object, or, mirrored, the mirrored direction or
-    /// that turned a half turn, whichever reads forwards, as AutoCAD's
-    /// MIRRTEXT 0 keeps text reading.
-    pub(crate) fn text_angle(&self, degrees: f64) -> f64 {
+    /// in, and whether a mirror reversed its baseline (`flip_horizontal`):
+    /// matches AutoCAD 2026's `MIRRTEXT 0` rule.
+    pub(crate) fn text_mirror(&self, degrees: f64) -> (f64, bool) {
         match self.how {
-            How::Mirror(_) => whole_degrees(readable(self.angle(degrees))),
-            _ => self.angle(degrees),
+            How::Mirror(_) => {
+                let (angle, flip_horizontal) =
+                    mirrored_text_direction(degrees, self.angle(degrees));
+                (whole_degrees(angle), flip_horizontal)
+            }
+            _ => (self.angle(degrees), false),
         }
+    }
+
+    /// The direction a text, an mtext or a tolerance at `degrees` reads in.
+    pub(crate) fn text_angle(&self, degrees: f64) -> f64 {
+        self.text_mirror(degrees).0
     }
 
     /// Whether an ordinate dimension measuring along X measures along Y
@@ -390,6 +399,20 @@ impl At<'_> {
             return self.transform_viewport(keys, path);
         }
         let solid = hatch_is_solid(keys);
+        // Capture the original rotation of `text` / `mtext` before `rotation`
+        // is mutated so a mirror can flip `justify` along the exact axis
+        // AutoCAD 2026 flips (`flip_horizontal` vs vertical).
+        let text_flip_horizontal = if t.mirrors() && matches!(kind, "text" | "mtext") {
+            let old_rot = match keys.iter().find(|e| e.key == "rotation") {
+                Some(entry) => {
+                    whole_degrees(self.plain(&entry.value, &key_path(path, "rotation"))?)
+                }
+                None => 0.0,
+            };
+            Some(t.text_mirror(old_rot).1)
+        } else {
+            None
+        };
         if kind == "dimension" && self.clear_angular_location(keys, path) {
             changed.push("location".to_owned());
         }
@@ -565,11 +588,56 @@ impl At<'_> {
         // leader's lengths from its style.
         let written = |keys: &[Entry], key: &str| keys.iter().any(|e| e.key == key);
         match kind {
-            "text" | "mtext" if !written(keys, "rotation") => {
-                let r = t.text_angle(0.0);
-                if r != 0.0 {
-                    keys.push(new_entry("rotation", Node::scalar(number_text(r))));
-                    changed.push("rotation".to_owned());
+            "text" | "mtext" => {
+                if !written(keys, "rotation") {
+                    let r = t.text_angle(0.0);
+                    if r != 0.0 {
+                        keys.push(new_entry("rotation", Node::scalar(number_text(r))));
+                        changed.push("rotation".to_owned());
+                    }
+                }
+                if let Some(flip_horizontal) = text_flip_horizontal {
+                    if kind == "text" {
+                        let old = scalar_of(keys, "justify")
+                            .and_then(Justify::from_name)
+                            .unwrap_or(Justify::Left);
+                        let new = if flip_horizontal {
+                            old.flip_horizontal()
+                        } else {
+                            old.flip_vertical()
+                        };
+                        if new != old {
+                            if let Some(entry) = keys.iter_mut().find(|e| e.key == "justify") {
+                                entry.value = Node::scalar(new.name().to_owned());
+                            } else {
+                                keys.push(new_entry(
+                                    "justify",
+                                    Node::scalar(new.name().to_owned()),
+                                ));
+                            }
+                            changed.push("justify".to_owned());
+                        }
+                    } else {
+                        let old = scalar_of(keys, "justify")
+                            .and_then(Attachment::from_name)
+                            .unwrap_or(Attachment::TopLeft);
+                        let new = if flip_horizontal {
+                            old.flip_horizontal()
+                        } else {
+                            old.flip_vertical()
+                        };
+                        if new != old {
+                            if let Some(entry) = keys.iter_mut().find(|e| e.key == "justify") {
+                                entry.value = Node::scalar(new.name().to_owned());
+                            } else {
+                                keys.push(new_entry(
+                                    "justify",
+                                    Node::scalar(new.name().to_owned()),
+                                ));
+                            }
+                            changed.push("justify".to_owned());
+                        }
+                    }
                 }
             }
             "image" | "pdf_underlay" => {
@@ -2089,15 +2157,15 @@ mod tests {
             ),
             (
                 "text: {contents: A, position: [1, 2, 0], height: 2.5, rotation: 30, justify: right}",
-                "text: {contents: A, position: [19, 2, 0], height: 2.5, rotation: 330, justify: right}",
+                "text: {contents: A, position: [19, 2, 0], height: 2.5, rotation: 330, justify: left}",
             ),
             (
                 "text: {contents: A, position: [1, 2, 0], height: 2.5}",
-                "text: {contents: A, position: [19, 2, 0], height: 2.5}",
+                "text: {contents: A, position: [19, 2, 0], height: 2.5, justify: right}",
             ),
             (
                 "mtext: {contents: A, position: [1, 2, 0], height: 2.5, rotation: 90}",
-                "mtext: {contents: A, position: [19, 2, 0], height: 2.5, rotation: 90}",
+                "mtext: {contents: A, position: [19, 2, 0], height: 2.5, rotation: 90, justify: bottom_left}",
             ),
             (
                 "donut: {center: [1, 0, 0], outside_diameter: 2}",
@@ -2173,11 +2241,11 @@ objects:
             Transform::mirror([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap(),
             "insert: {block: B, position: [1, -2, 0], rotation: 180, mirrored: true}",
         );
-        // Across a line at 45 degrees, exactly, a text reading up.
+        // Across a line at 45 degrees, exactly, a text reading up, vertically flipped.
         lands(
             "text: {contents: A, position: [0.3, 0.1, 0], height: 1}",
             Transform::mirror([0.0, 0.0, 0.0], [0.7, 0.7, 0.0]).unwrap(),
-            "text: {contents: A, position: [0.1, 0.3, 0], height: 1, rotation: 90}",
+            "text: {contents: A, position: [0.1, 0.3, 0], height: 1, rotation: 90, justify: top_left}",
         );
     }
 
@@ -2474,11 +2542,43 @@ objects:
     fn mirrored_text_reads_forwards() {
         let up = Transform::mirror([0.0; 3], [0.0, 1.0, 0.0]).unwrap();
         assert_eq!(up.angle(30.0), 150.0);
-        assert_eq!(up.text_angle(30.0), 330.0);
-        assert_eq!(up.text_angle(0.0), 0.0);
+        assert_eq!(up.text_mirror(30.0), (330.0, true));
+        assert_eq!(up.text_mirror(0.0), (0.0, true));
+        assert_eq!(up.text_mirror(90.0), (90.0, false));
+        // AutoCAD 2026 preserves inverted half-plane (120 -> 240, 180 -> 180).
+        assert_eq!(up.text_mirror(120.0), (240.0, true));
+        assert_eq!(up.text_mirror(180.0), (180.0, true));
         let across = Transform::mirror([0.0; 3], [1.0, 0.0, 0.0]).unwrap();
-        assert_eq!(across.text_angle(0.0), 0.0);
-        assert_eq!(across.text_angle(30.0), 330.0);
+        assert_eq!(across.text_mirror(0.0), (0.0, false));
+        assert_eq!(across.text_mirror(30.0), (330.0, false));
+        assert_eq!(across.text_mirror(90.0), (90.0, true));
+        assert_eq!(across.text_mirror(120.0), (240.0, false));
+        // Mirroring MTEXT across vertical flips left<->right, across horizontal flips top<->bottom.
+        lands(
+            "mtext: {contents: A, position: [1, 2, 0], height: 2.5}",
+            up,
+            "mtext: {contents: A, position: [-1, 2, 0], height: 2.5, justify: top_right}",
+        );
+        lands(
+            "mtext: {contents: A, position: [1, 2, 0], height: 2.5}",
+            across,
+            "mtext: {contents: A, position: [1, -2, 0], height: 2.5, justify: bottom_left}",
+        );
+        // Mirroring twice returns the exact original text and justification.
+        let once = transformed(
+            "text: {contents: A, position: [1, 2, 0], height: 2.5, rotation: 30, justify: top_left}",
+            up,
+            &Resolved::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            once,
+            "text: {contents: A, position: [-1, 2, 0], height: 2.5, rotation: 330, justify: top_right}"
+        );
+        assert_eq!(
+            transformed(&once, up, &Resolved::default()).unwrap(),
+            "text: {contents: A, position: [1, 2, 0], height: 2.5, rotation: 30, justify: top_left}"
+        );
         // An arc runs the other way: its ends swap.
         assert_eq!(up.arc_angles(0.0, 90.0), (90.0, 180.0));
     }

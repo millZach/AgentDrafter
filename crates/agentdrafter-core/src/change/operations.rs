@@ -1044,14 +1044,17 @@ fn does(spec: &Spec) -> String {
                          keeps the objects and makes mirrored copies, each an ordinary object \
                          with an ID of its own and copy_of, as copy gives them, written where \
                          its source is, listed under copies; erase_source: true mirrors the \
-                         objects themselves instead, each keeping its ID. Text keeps reading \
-                         forwards, as AutoCAD's MIRRTEXT 0 keeps it: its position mirrors, and \
-                         it reads along its mirrored direction, or that turned a half turn, \
-                         whichever reads left to right or upwards, with its own justification; \
-                         an insert's and a multileader's block content's attributes read \
-                         forwards too, while the block itself is mirrored, mirrored: true, which \
-                         a DWG keeps as a negative X scale, and one mirrored back keeps them so \
-                         with readable_attributes: true. A table mirrors across any line by its \
+                         objects themselves instead, each keeping its ID. Text keeps its \
+                         reading half-plane, as AutoCAD 2026's MIRRTEXT 0 keeps it: its \
+                         position mirrors, its rotation flips by 180 degrees when reflecting \
+                         would cross the 90/270 degree boundary (flipping left/right \
+                         justification) or keeps the reflected angle otherwise (flipping \
+                         top/bottom or baseline/top justification), so mirrored text, mtext \
+                         and mirrored insert attributes stay inside their mirrored boxes; \
+                         an insert's and a multileader's block content's attributes follow \
+                         the same rule while the block itself is mirrored, mirrored: true, \
+                         which a DWG keeps as a negative X scale, and one mirrored back keeps \
+                         them readable with readable_attributes: true. A table mirrors across \
                          box in its forward-reading rotation. A hatch's pattern keeps its \
                          direction, as AutoCAD's MIRRHATCH 0 keeps it. A line across or up the \
                          sheet, or at 45 degrees, mirrors exactly. An ordinate dimension is \
