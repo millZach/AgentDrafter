@@ -111,7 +111,7 @@ pub(crate) const ATTDEF_KEYS: [&str; 22] = [
 
 /// The keys a single line of text takes in a block: a sheet's, and its
 /// cell.
-pub(crate) const BLOCK_TEXT_KEYS: [&str; 18] = [
+pub(crate) const BLOCK_TEXT_KEYS: [&str; 20] = [
     "contents",
     "field",
     "position",
@@ -120,6 +120,8 @@ pub(crate) const BLOCK_TEXT_KEYS: [&str; 18] = [
     "width_factor",
     "rotation",
     "justify",
+    "underline",
+    "overline",
     super::annotation_scale::ANNOTATIVE_KEY,
     super::annotation_scale::ANNOTATION_SCALES_KEY,
     "layer",

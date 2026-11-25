@@ -27,6 +27,9 @@ pub(crate) struct TrueTypeFont {
     capitals: f64,
     /// How far the descenders reach below the baseline, in font units.
     descent: f64,
+    /// Underline `(position, thickness)` in font units from the `post` table
+    /// (position negative below the baseline, thickness positive).
+    underline: (f64, f64),
 }
 
 impl TrueTypeFont {
@@ -50,10 +53,16 @@ impl TrueTypeFont {
             .os2
             .map(|os2| f64::from(os2.windows_descender()).abs())
             .unwrap_or_else(|| f64::from(face.descender()).abs());
+        let underline = face
+            .underline_metrics()
+            .filter(|m| m.thickness > 0)
+            .map(|m| (f64::from(m.position), f64::from(m.thickness)))
+            .unwrap_or((-0.15 * capitals, 0.08 * capitals));
         Ok(Self {
             bytes,
             capitals,
             descent,
+            underline,
         })
     }
 
@@ -61,6 +70,14 @@ impl TrueTypeFont {
     /// capitals stand 1 tall.
     pub(crate) fn descent(&self) -> f64 {
         self.descent / self.capitals
+    }
+
+    /// Underline `(position, thickness)` in units where the capitals stand 1 tall.
+    pub(crate) fn underline_metrics(&self) -> (f64, f64) {
+        (
+            self.underline.0 / self.capitals,
+            self.underline.1 / self.capitals,
+        )
     }
 
     /// The glyphs for `text`, in units where the capitals stand 1 tall. A

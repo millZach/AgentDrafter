@@ -1308,7 +1308,8 @@ impl RevisionSession {
         let target_host = match (self.drawing.get_entity(handle), tag) {
             (Some(EntityType::Text(_)), None) => TargetHost::Text { host: handle },
             (Some(EntityType::MText(mt)), None) => {
-                let width_factor = text::mtext_contents(&mt.value).and_then(|(_, wf)| wf);
+                let width_factor =
+                    text::mtext_styled_contents(&mt.value).and_then(|(_, wf, _, _)| wf);
                 TargetHost::MText {
                     host: handle,
                     width_factor,
@@ -1477,7 +1478,12 @@ impl RevisionSession {
                     super::field::clear_host_field(&mut self.drawing, host);
                     if let Some(val) = explicit_text {
                         if let Some(EntityType::Text(t)) = self.drawing.get_entity_mut(host) {
-                            t.value = text::text_code(val);
+                            let (_, u, o) = text::text_styled_contents(&t.value).unwrap_or((
+                                String::new(),
+                                false,
+                                false,
+                            ));
+                            t.value = text::text_styled_code(val, u, o);
                         }
                     }
                 }
@@ -1509,7 +1515,13 @@ impl RevisionSession {
                     super::field::clear_host_field(&mut self.drawing, host);
                     if let Some(val) = explicit_text {
                         if let Some(EntityType::MText(t)) = self.drawing.get_entity_mut(host) {
-                            t.value = text::mtext_code(val, width_factor);
+                            let (_, _, u, o) = text::mtext_styled_contents(&t.value).unwrap_or((
+                                String::new(),
+                                None,
+                                false,
+                                false,
+                            ));
+                            t.value = text::mtext_styled_code(val, width_factor, u, o);
                         }
                     }
                 }
@@ -4360,7 +4372,12 @@ fn apply_text_change(
                 )
                 .at_field(field));
             }
-            dwg_text.value = text::text_code(s);
+            let (_, u, o) = text::text_styled_contents(&dwg_text.value).unwrap_or((
+                String::new(),
+                false,
+                false,
+            ));
+            dwg_text.value = text::text_styled_code(s, u, o);
         }
         "position" => {
             let p = vector(parse_point_json(value, units, &field)?);
@@ -4434,6 +4451,26 @@ fn apply_text_change(
                 dwg_text.alignment_point = Some(pos);
             }
         }
+        "underline" | "overline" => {
+            let flag = if value.is_null() {
+                false
+            } else if let Some(b) = value.as_bool() {
+                b
+            } else {
+                return Err(
+                    Error::new(ErrorCode::WrongType, "expected a boolean (true or false)")
+                        .at_field(field),
+                );
+            };
+            if let Some((contents, mut u, mut o)) = text::text_styled_contents(&dwg_text.value) {
+                if key == "underline" {
+                    u = flag;
+                } else {
+                    o = flag;
+                }
+                dwg_text.value = text::text_styled_code(&contents, u, o);
+            }
+        }
         _ => return Err(unknown_change_key("text", key)),
     }
     // Recompute baseline start point for justified text when modeled.
@@ -4464,8 +4501,13 @@ fn apply_mtext_change(
                         .at_field(field),
                 );
             }
-            let existing_wf = text::mtext_contents(&dwg_mtext.value).and_then(|(_, wf)| wf);
-            dwg_mtext.value = text::mtext_code(s, existing_wf);
+            let (_, existing_wf, u, o) = text::mtext_styled_contents(&dwg_mtext.value).unwrap_or((
+                String::new(),
+                None,
+                false,
+                false,
+            ));
+            dwg_mtext.value = text::mtext_styled_code(s, existing_wf, u, o);
         }
         "position" => {
             dwg_mtext.insertion_point = vector(parse_point_json(value, units, &field)?);
@@ -4515,8 +4557,8 @@ fn apply_mtext_change(
                 }
                 Some(n)
             };
-            if let Some((contents, _)) = text::mtext_contents(&dwg_mtext.value) {
-                dwg_mtext.value = text::mtext_code(&contents, wf);
+            if let Some((contents, _, u, o)) = text::mtext_styled_contents(&dwg_mtext.value) {
+                dwg_mtext.value = text::mtext_styled_code(&contents, wf, u, o);
             }
         }
         "style" => {
@@ -4536,6 +4578,28 @@ fn apply_mtext_change(
         "justify" => {
             let att = parse_attachment_json(value, &field)?;
             dwg_mtext.attachment_point = mtext_attachment(att);
+        }
+        "underline" | "overline" => {
+            let flag = if value.is_null() {
+                false
+            } else if let Some(b) = value.as_bool() {
+                b
+            } else {
+                return Err(
+                    Error::new(ErrorCode::WrongType, "expected a boolean (true or false)")
+                        .at_field(field),
+                );
+            };
+            if let Some((contents, wf, mut u, mut o)) =
+                text::mtext_styled_contents(&dwg_mtext.value)
+            {
+                if key == "underline" {
+                    u = flag;
+                } else {
+                    o = flag;
+                }
+                dwg_mtext.value = text::mtext_styled_code(&contents, wf, u, o);
+            }
         }
         _ => return Err(unknown_change_key("mtext", key)),
     }

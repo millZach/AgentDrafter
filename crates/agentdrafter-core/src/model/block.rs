@@ -308,6 +308,8 @@ pub fn attribute_text(
             normalize_degrees(definition.rotation + insert.rotation)
         },
         justify: definition.justify,
+        underline: false,
+        overline: false,
         layer,
         field: None,
         properties: definition.properties.clone(),
@@ -440,6 +442,8 @@ pub(crate) fn definition_text(definition: &AttributeDefinition) -> Text {
         width_factor: definition.width_factor,
         rotation: definition.rotation,
         justify: definition.justify,
+        underline: false,
+        overline: false,
         layer: definition.layer.clone(),
         field: None,
         properties: definition.properties.clone(),
