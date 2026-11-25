@@ -58,6 +58,7 @@ dependencies = [
  "hayro",
  "image",
  "jsonschema",
+ "libm",
  "miniz_oxide 0.8.9",
  "pdf-writer",
  "png",

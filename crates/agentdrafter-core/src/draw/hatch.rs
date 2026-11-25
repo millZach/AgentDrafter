@@ -11,6 +11,7 @@
 
 use super::curves;
 use super::{FillRule, Point2, Shape};
+use crate::description::sin_cos_degrees;
 use crate::model::hatch::walk;
 use crate::model::{Hatch, HatchEdge, HatchLoop};
 
@@ -164,21 +165,6 @@ fn shapes(
     } else {
         (vec![Shape::Stroke { lineweight, runs }], cut_short)
     }
-}
-
-/// The sine and cosine of an angle in degrees, exact at quarter turns, so
-/// that a pattern line meant to run along an edge does.
-fn sin_cos_degrees(degrees: f64) -> (f64, f64) {
-    let turned = degrees.rem_euclid(360.0);
-    [
-        (0.0, (0.0, 1.0)),
-        (90.0, (1.0, 0.0)),
-        (180.0, (0.0, -1.0)),
-        (270.0, (-1.0, 0.0)),
-    ]
-    .into_iter()
-    .find(|&(quarter, _)| turned == quarter)
-    .map_or_else(|| turned.to_radians().sin_cos(), |(_, exact)| exact)
 }
 
 /// A loop's points, in order, curves as chords.

@@ -26,6 +26,10 @@ pdf-writer = "0.15.0"
 miniz_oxide = "0.8.9"
 # Regular expressions for replace_text (MIT or Apache-2.0).
 regex = "1"
+# Pure-Rust IEEE-754 trigonometry (MIT or Apache-2.0) so angled hatch patterns
+# and rotated geometry build to identical bytes on Windows, Linux, macOS and
+# WebAssembly (#243).
+libm = "0.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Raster image decoding (PNG, JPEG, BMP, GIF, TIFF) for raster images (MIT or Apache-2.0).

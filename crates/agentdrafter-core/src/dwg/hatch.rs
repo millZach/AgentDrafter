@@ -15,7 +15,7 @@ use acadrust::entities::{
 };
 use acadrust::types::{Vector2, Vector3};
 
-use crate::description::normalize_degrees;
+use crate::description::{normalize_degrees, sin_cos_degrees};
 use crate::model::hatch::walk;
 use crate::model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, Point3, SOLID};
 
@@ -269,21 +269,12 @@ fn flat(p: Point3) -> Vector2 {
     Vector2::new(p.x, p.y)
 }
 
-/// `[x, y]` turned anticlockwise by `degrees`. Quarter turns are exact, so
-/// a pattern line at 0°, 90°, 180° or 270° keeps its lengths bit for bit.
+/// `[x, y]` turned anticlockwise by `degrees`. Multiples of 45° are exact
+/// and all other angles use the core's portable [`sin_cos_degrees`], so a
+/// pattern line writes the same bytes on every system (#243).
 fn turn([x, y]: [f64; 2], degrees: f64) -> [f64; 2] {
-    let quarter_turns = degrees.rem_euclid(360.0) / 90.0;
-    let (sin, cos) = if quarter_turns.fract() == 0.0 {
-        match quarter_turns as u8 {
-            0 => (0.0, 1.0),
-            1 => (1.0, 0.0),
-            2 => (0.0, -1.0),
-            _ => (-1.0, 0.0),
-        }
-    } else {
-        degrees.to_radians().sin_cos()
-    };
-    [x * cos - y * sin, x * sin + y * cos]
+    let (sin, cos) = sin_cos_degrees(degrees);
+    [x * cos - y * sin + 0.0, x * sin + y * cos + 0.0]
 }
 
 #[cfg(test)]
@@ -364,6 +355,66 @@ mod tests {
         assert_eq!(turn([2.0, 3.0], -90.0), [3.0, -2.0]);
         assert_eq!(turn([2.0, 3.0], 540.0), [-2.0, -3.0]);
         assert_eq!(turn([2.0, 3.0], 0.0), [2.0, 3.0]);
+    }
+
+    #[test]
+    fn angled_pattern_lines_use_portable_exact_and_libm_trig() {
+        use std::f64::consts::FRAC_1_SQRT_2 as H;
+
+        // Multiples of 45° use exact FRAC_1_SQRT_2, avoiding platform libm drift (#243).
+        for (angle, expected) in [
+            (45.0, [-3.0 * H, 3.0 * H]),
+            (135.0, [-3.0 * H, -3.0 * H]),
+            (225.0, [3.0 * H, -3.0 * H]),
+            (315.0, [3.0 * H, 3.0 * H]),
+            (-45.0, [3.0 * H, 3.0 * H]),
+            (405.0, [-3.0 * H, 3.0 * H]),
+        ] {
+            let line = HatchPatternLine {
+                angle,
+                origin: [0.0, 0.0],
+                delta: [0.0, 3.0],
+                dashes: Vec::new(),
+            };
+            let drawn = dwg_pattern_line(&line, 1.0, 0.0, [0.0, 0.0]);
+            assert_eq!(
+                drawn.offset.x.to_bits(),
+                expected[0].to_bits(),
+                "angle {angle} x"
+            );
+            assert_eq!(
+                drawn.offset.y.to_bits(),
+                expected[1].to_bits(),
+                "angle {angle} y"
+            );
+        }
+
+        // Non-45° angles use portable libm::sincos bit-for-bit identically on every OS.
+        let line = HatchPatternLine {
+            angle: 30.0,
+            origin: [0.5, 1.0],
+            delta: [0.25, 2.0],
+            dashes: vec![1.0, -0.5],
+        };
+        let drawn = dwg_pattern_line(&line, 1.5, 17.5, [2.0, 3.0]);
+        let (s_dir, c_dir) = libm::sincos(47.5_f64.to_radians());
+        let (s_ang, c_ang) = libm::sincos(17.5_f64.to_radians());
+        assert_eq!(
+            drawn.offset.x.to_bits(),
+            ((0.25 * c_dir - 2.0 * s_dir + 0.0) * 1.5).to_bits()
+        );
+        assert_eq!(
+            drawn.offset.y.to_bits(),
+            ((0.25 * s_dir + 2.0 * c_dir + 0.0) * 1.5).to_bits()
+        );
+        assert_eq!(
+            drawn.base_point.x.to_bits(),
+            (2.0 + (0.5 * c_ang - 1.0 * s_ang + 0.0) * 1.5).to_bits()
+        );
+        assert_eq!(
+            drawn.base_point.y.to_bits(),
+            (3.0 + (0.5 * s_ang + 1.0 * c_ang + 0.0) * 1.5).to_bits()
+        );
     }
 
     /// A hatch the core cannot say is counted, not read wrongly.

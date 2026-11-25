@@ -73,27 +73,88 @@ jobs:
           agentdrafter plot examples/demo-plant
           echo
           agentdrafter check examples/demo-plant > demo-plant-check.json
+          # Also hold angled hatch patterns and their transforms (a 45°/135°
+          # crosshatch, a quarter-turned crosshatch, a mirrored crosshatch, and
+          # a 30° angled hatch rotated by 30°) to the exact same DWG and PDF
+          # bytes across Windows, Linux and macOS (#243).
           python - <<'PY'
-          import hashlib, json, pathlib, sys
+          import json, pathlib
 
-          reply = json.loads(pathlib.Path("demo-plant-check.json").read_text(encoding="utf-8"))
-          if not reply["ok"]:
-              sys.exit(f"the checker could not read the demo plant: {reply['error']}")
-          result = reply["result"]
-          print(result["message"])
-          for finding in result["findings"]:
-              print(f"{finding['sheet']} {finding['rule']}: {finding['message']}")
-          if not result["passed"]:
-              sys.exit("the demo plant fails the checker")
+          root = pathlib.Path("angled-hatch-try")
+          (root / "templates").mkdir(parents=True, exist_ok=True)
+          (root / "set.yaml").write_bytes(b"units: mm\noutput: dwg\nrows: rows.yaml\n")
+          (root / "templates" / "sheet.yaml").write_bytes(
+              b"units: mm\n"
+              b"paper: [200, 100]\n"
+              b"hatch_patterns:\n"
+              b"  CROSS:\n"
+              b"    lines:\n"
+              b"      - {angle: 45, delta: [0, 3]}\n"
+              b"      - {angle: 135, delta: [0, 3]}\n"
+              b"  SLANT:\n"
+              b"    lines:\n"
+              b"      - {angle: 30, origin: [0.5, 0.25], delta: [1, 4], dashes: [3, -1.5]}\n"
+              b"objects:\n"
+              b"  - polyline: {id: border, points: [[0, 0, 0], [200, 0, 0], [200, 100, 0], [0, 100, 0]], closed: true}\n"
+          )
+          (root / "rows.yaml").write_bytes(
+              b"rows:\n"
+              b"  - sheet: ANGLED-001\n"
+              b"    template: templates/sheet.yaml\n"
+              b"    objects:\n"
+              b"      - hatch: {id: cross, pattern: CROSS, boundary: [{polyline: {points: [[10, 20, 0], [40, 20, 0], [40, 50, 0], [10, 50, 0]]}}]}\n"
+              b"      - hatch: {id: slant, pattern: SLANT, boundary: [{polyline: {points: [[150, 20, 0], [180, 20, 0], [180, 50, 0], [150, 50, 0]]}}]}\n"
+          )
+          change_set = {
+              "operations": [
+                  {"op": "copy", "target": {"id": "ANGLED-001/cross"}, "by": [45, 0, 0]},
+                  {"op": "rotate", "target": {"id": "ANGLED-001/cross-1"}, "base_point": [70, 35, 0], "angle": 90},
+                  {"op": "mirror", "target": {"id": "ANGLED-001/cross"}, "first_point": [75, 0, 0], "second_point": [75, 100, 0]},
+                  {"op": "copy", "target": {"id": "ANGLED-001/slant"}, "by": [0, 35, 0]},
+                  {"op": "rotate", "target": {"id": "ANGLED-001/slant-1"}, "base_point": [165, 70, 0], "angle": 30},
+              ]
+          }
+          (root / "change-set.json").write_bytes((json.dumps(change_set) + "\n").encode("utf-8"))
+          PY
+          agentdrafter build angled-hatch-try
+          echo
+          agentdrafter change angled-hatch-try angled-hatch-try/change-set.json
+          echo
+          agentdrafter plot angled-hatch-try
+          echo
+          agentdrafter check angled-hatch-try > angled-hatch-check.json
+          python - <<'PY'
+          import hashlib, json, pathlib, shutil, sys
 
+          for label, check_file in (
+              ("the demo plant", "demo-plant-check.json"),
+              ("the angled-hatch check", "angled-hatch-check.json"),
+          ):
+              reply = json.loads(pathlib.Path(check_file).read_text(encoding="utf-8"))
+              if not reply["ok"]:
+                  sys.exit(f"the checker could not read {label}: {reply['error']}")
+              result = reply["result"]
+              print(f"{label}: {result['message']}")
+              for finding in result["findings"]:
+                  print(f"{finding['sheet']} {finding['rule']}: {finding['message']}")
+              if not result["passed"]:
+                  sys.exit(f"{label} fails the checker")
+
+          demo = json.loads(pathlib.Path("demo-plant-check.json").read_text(encoding="utf-8"))["result"]
           out = pathlib.Path("examples/demo-plant/dwg")
           lines = []
-          for sheet in result["sheets"]:
+          for sheet in demo["sheets"]:
               for extension in (".dwg", ".pdf"):
                   path = out / (sheet + extension)
                   lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n")
+          angled = pathlib.Path("angled-hatch-try/dwg")
+          for extension in (".dwg", ".pdf"):
+              path = angled / ("ANGLED-001" + extension)
+              lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  angled-hatch/{path.name}\n")
           pathlib.Path("demo-plant-hashes.txt").write_bytes("".join(lines).encode("ascii"))
           print("".join(lines), end="")
+          shutil.rmtree("angled-hatch-try")
+          pathlib.Path("angled-hatch-check.json").unlink(missing_ok=True)
           PY
 
       # The speed bench (tools/bench, docs/speed.md), run small on this system to check that it still
