@@ -1836,7 +1836,10 @@ impl Tools {
         // own options take.
         let own_option = matches!(
             (&running.step, upper.as_str()),
-            (Step::LineNext { .. }, "C" | "U") | (Step::CircleRadius { .. }, "D")
+            (Step::LineNext { .. }, "C" | "U")
+                | (Step::CircleRadius { .. }, "D" | "U")
+                | (Step::RectangleSecond { .. }, "U")
+                | (Step::MoveSecond { .. }, "U")
         );
         if tool_for(typed).is_some() && !own_option {
             return self.start_word(typed, &[]);
@@ -1868,6 +1871,38 @@ impl Tools {
                 });
                 return Outcome {
                     log: vec!["LINE: last point taken back".to_owned()],
+                    sends: Vec::new(),
+                };
+            }
+            (Step::CircleRadius { .. }, "U" | "UNDO") => {
+                self.running = Some(Running {
+                    kind,
+                    step: Step::CircleCenter,
+                });
+                return Outcome {
+                    log: vec!["CIRCLE: centre taken back".to_owned()],
+                    sends: Vec::new(),
+                };
+            }
+            (Step::RectangleSecond { .. }, "U" | "UNDO") => {
+                self.running = Some(Running {
+                    kind,
+                    step: Step::RectangleFirst,
+                });
+                return Outcome {
+                    log: vec!["RECTANG: first corner taken back".to_owned()],
+                    sends: Vec::new(),
+                };
+            }
+            (Step::MoveSecond { picked, .. }, "U" | "UNDO") => {
+                self.running = Some(Running {
+                    kind,
+                    step: Step::MoveBase {
+                        picked: picked.clone(),
+                    },
+                });
+                return Outcome {
+                    log: vec!["MOVE: base point taken back".to_owned()],
                     sends: Vec::new(),
                 };
             }
@@ -2590,6 +2625,7 @@ impl Tools {
                     format!("{click} a point on the circle, or type the radius")
                 },
                 vec![
+                    choice("Undo", "undo", false),
                     if *diameter {
                         choice("Radius", "radius", false)
                     } else {
@@ -2601,7 +2637,7 @@ impl Tools {
             Step::RectangleFirst => (format!("{click} the first corner{hold}"), vec![cancel]),
             Step::RectangleSecond { .. } => (
                 format!("{click} the opposite corner, or type its size as @width,height"),
-                vec![cancel],
+                vec![choice("Undo", "undo", false), cancel],
             ),
             Step::TextStart => (
                 format!("{click} where the text starts{hold}"),
@@ -2674,7 +2710,7 @@ impl Tools {
             ),
             Step::MoveSecond { .. } => (
                 format!("{click} where that point goes, or type @dx,dy or a length"),
-                vec![cancel],
+                vec![choice("Undo", "undo", false), cancel],
             ),
             Step::CopyBase { picked } => (
                 format!(

@@ -88,6 +88,7 @@ import {
   barNote,
   barWarning,
   switchingAway,
+  canToolUndo,
   isUndoKey,
   toggledWords,
   typeWords,
@@ -2044,9 +2045,10 @@ function DrawingWorkspace({
     toolState?.array && !preview ? (
       <ArrayPanel panel={toolState.array} touch={touch} onAct={arrayAct} onValue={arrayValue} boxRef={touch ? undefined : arrayBox} />
     ) : null;
-  // Copy's copies placed wait for Enter; Undo, U and Ctrl+Z take the last back.
-  const copiesPlaced = toolState?.tool === 'copy' && toolState.placed > 0;
-  const undoCopy = () => toolDid(renderer()?.tool_option('undo') ?? '');
+  // Inside a running tool that offers Undo, Undo, U and Ctrl+Z (⌘Z) take the last point or copy back (#245).
+  // Outside a tool, Ctrl+Z does nothing: Undo last stays a button, since there is no Redo.
+  const toolCanUndo = canToolUndo(toolState);
+  const undoTool = () => toolDid(renderer()?.tool_option('undo') ?? '');
   // The page leaves what the tool works on: an entry, or a proposal opened.
   // Copy's copies placed are dropped, with nothing sent; only Enter, Done,
   // a right-click or Esc lands them. Any other tool ends as Esc ends it.
@@ -2145,10 +2147,10 @@ function DrawingWorkspace({
       }
       return;
     }
-    if (isUndoKey(e) && copiesPlaced) {
-      // Ctrl+Z takes back Copy's last copy placed, as U does (#66).
+    if (isUndoKey(e) && toolCanUndo) {
+      // Ctrl+Z takes back the running tool's last point or copy, as U does (#245).
       e.preventDefault();
-      undoCopy();
+      undoTool();
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -3737,7 +3739,7 @@ function DrawingWorkspace({
               ) : null
             }
             note={barNote(toolState)}
-            onUndoKey={copiesPlaced ? undoCopy : undefined}
+            onUndoKey={toolCanUndo ? undoTool : undefined}
             panel={wide ? null : arrayPanel(true)}
           />
           {wide && arrayPanel(false)}

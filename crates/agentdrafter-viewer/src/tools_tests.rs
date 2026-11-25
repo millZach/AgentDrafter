@@ -1649,6 +1649,58 @@ fn a_clockwise_whole_turn_is_sent_clockwise() {
 }
 
 #[test]
+fn undo_option_takes_back_the_last_point_in_line_circle_rectangle_and_move() {
+    // Line: undo pops points one by one back to the first point prompt.
+    let mut t = tools();
+    t.start(ToolKind::Line, &[]);
+    assert!(!t.state(false).options.iter().any(|o| o.act == "undo"));
+    t.input("1,1", None);
+    t.input("@2,0", None);
+    assert!(t.state(false).options.iter().any(|o| o.act == "undo"));
+    assert_eq!(t.state(false).points, [[1.0, 1.0], [3.0, 1.0]]);
+    let out = t.option("undo");
+    assert_eq!(out.log, ["LINE: last point taken back"]);
+    assert_eq!(t.state(false).points, [[1.0, 1.0]]);
+    t.option("undo");
+    assert!(t.state(false).points.is_empty());
+    assert!(!t.state(false).options.iter().any(|o| o.act == "undo"));
+
+    // Circle: undo takes back the centre back to CircleCenter.
+    let mut t = tools();
+    t.start(ToolKind::Circle, &[]);
+    assert!(!t.state(false).options.iter().any(|o| o.act == "undo"));
+    t.input("2,3", None);
+    assert!(t.state(false).options.iter().any(|o| o.act == "undo"));
+    let out = t.option("undo");
+    assert_eq!(out.log, ["CIRCLE: centre taken back"]);
+    assert!(t.state(false).points.is_empty());
+    assert!(!t.state(false).options.iter().any(|o| o.act == "undo"));
+
+    // Rectangle: undo takes back the first corner back to RectangleFirst.
+    let mut t = tools();
+    t.start(ToolKind::Rectangle, &[]);
+    assert!(!t.state(false).options.iter().any(|o| o.act == "undo"));
+    t.input("0,0", None);
+    assert!(t.state(false).options.iter().any(|o| o.act == "undo"));
+    let out = t.option("undo");
+    assert_eq!(out.log, ["RECTANG: first corner taken back"]);
+    assert!(t.state(false).points.is_empty());
+    assert!(!t.state(false).options.iter().any(|o| o.act == "undo"));
+
+    // Move: undo takes back the base point back to MoveBase, keeping the picked objects.
+    let mut t = tools();
+    t.start(ToolKind::Move, &[2]);
+    assert!(!t.state(false).options.iter().any(|o| o.act == "undo"));
+    t.input("1,1", None);
+    assert!(t.state(false).options.iter().any(|o| o.act == "undo"));
+    let out = t.option("undo");
+    assert_eq!(out.log, ["MOVE: base point taken back"]);
+    assert!(t.state(false).points.is_empty());
+    assert!(!t.state(false).options.iter().any(|o| o.act == "undo"));
+    assert!(t.state(false).prompt.contains("base point"));
+}
+
+#[test]
 fn a_field_left_blank_or_not_a_number_holds_the_array_back() {
     let mut t = array_on_device("AR");
     t.array_value("columns", "2");
