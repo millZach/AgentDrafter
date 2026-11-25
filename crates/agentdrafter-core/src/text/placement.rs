@@ -17,7 +17,10 @@
 //!   a TrueType font the whole advance counts as well.
 //! - The top is the height of the capitals, the middle half that, and the
 //!   bottom the font's descent below the baseline. `middle` centres the
-//!   text on what it draws, from its lowest point to its highest.
+//!   text on its `textbox`: what it draws, from its lowest point to its
+//!   highest, except that for a TrueType font whose glyphs sit wholly above
+//!   the baseline AutoCAD's `textbox` drops the gap below them to start at
+//!   the baseline (#59).
 
 use super::fonts::{find, Font, FontSubstitution, FontUsed};
 use super::{Justify, Text, TextStyle, STANDARD};
@@ -263,5 +266,187 @@ mod tests {
         let fonts = fonts();
         // The space after I runs from 30 to 46 units, to 23 here at half width.
         close(fonts.start(&text("HI ", Justify::Right, 0.0)), 77.0, 50.0);
+    }
+
+    #[test]
+    fn middle_justified_truetype_above_baseline_matches_autocad_probe() {
+        use crate::text::shx::tests::unifont;
+        use crate::text::shx::ShxFont;
+        use crate::text::truetype::tests::made_up_font;
+        use crate::text::truetype::TrueTypeFont;
+
+        // Made-up TrueType font with glyphs reproducing the #59 AutoCAD 2026
+        // probe's vertical geometry (cap height 1466; `-` at y=440..621,
+        // `+` at y=237..1206, `x` at y=0..1062, `A`/`B` at y=0..1466, `C` at
+        // y=-25..1491).
+        let ttf = TrueTypeFont::parse(made_up_font(&[
+            ('A', 1366, [0, 0, 1369, 1466]),
+            ('B', 1366, [150, 0, 1257, 1466]),
+            ('C', 1479, [102, -25, 1398, 1491]),
+            ('x', 1024, [15, 0, 1009, 1062]),
+            ('-', 682, [65, 440, 618, 621]),
+            ('+', 1196, [114, 237, 1082, 1206]),
+            (' ', 569, [0, 0, 0, 0]),
+        ]))
+        .unwrap();
+        // Made-up SHX font (cap height 10) with elevated `-` (y=3..4),
+        // elevated `+` (y=2..8), and baseline-touching `A`, `B`, `C`, `x`.
+        let shx_dash: &[u8] = &[2, 8, 1, 3, 1, 8, 4, 0, 8, 0, 1, 2, 8, 1, 0xFC, 0];
+        let shx_plus: &[u8] = &[2, 8, 1, 2, 1, 8, 4, 0, 8, 0, 6, 2, 8, 1, 0xF8, 0];
+        let shx_base: &[u8] = &[1, 8, 6, 0, 8, 0, 10, 2, 8, 1, 0xF6, 0];
+        let shx_x: &[u8] = &[1, 8, 5, 0, 8, 0, 7, 2, 8, 1, 0xF9, 0];
+        let shx = ShxFont::parse(&unifont(
+            10,
+            &[
+                (u16::from(b'-'), shx_dash),
+                (u16::from(b'+'), shx_plus),
+                (u16::from(b'A'), shx_base),
+                (u16::from(b'B'), shx_base),
+                (u16::from(b'C'), shx_base),
+                (u16::from(b'x'), shx_x),
+            ],
+        ))
+        .unwrap();
+
+        let used = |name: &str| FontUsed {
+            requested: name.into(),
+            used: name.into(),
+            substituted: false,
+            why: None,
+            source: None,
+        };
+        let sheet_fonts = SheetFonts {
+            styles: vec![
+                (
+                    TextStyle {
+                        name: "PROBE_TTF".into(),
+                        font: "probe.ttf".into(),
+                        width_factor: 1.0,
+                        annotative: false,
+                    },
+                    Font::TrueType(ttf),
+                    used("probe.ttf"),
+                ),
+                (
+                    TextStyle {
+                        name: "PROBE_SHX".into(),
+                        font: "probe.shx".into(),
+                        width_factor: 1.0,
+                        annotative: false,
+                    },
+                    Font::Shx(shx),
+                    used("probe.shx"),
+                ),
+            ],
+        };
+
+        let make =
+            |contents: &str, style: &str, height: f64, justify: Justify, rotation: f64| Text {
+                contents: contents.to_owned(),
+                position: Point3::new(1.0, 1.5, 3.0),
+                height,
+                style: style.to_owned(),
+                width_factor: 1.0,
+                rotation,
+                justify,
+                layer: "0".to_owned(),
+                field: None,
+                properties: Default::default(),
+                annotative: false,
+                annotation_scales: Vec::new(),
+            };
+
+        // Check all 60 combinations of the #59 probe: 5 strings × 2 fonts ×
+        // 2 heights × 3 justifications (`middle`, `middle_center`, `center`).
+        for height in [0.0938, 1.0] {
+            for contents in ["-", "+", "x", "ABC", "A-B"] {
+                // TrueType `middle`: shifts up by `ink.bottom * height` when
+                // drawn wholly above the baseline (`-`, `+`), and stays at the
+                // drawn midpoint when touching or crossing it (`x`, `ABC`, `A-B`).
+                let (ttf_font, _) = sheet_fonts.style("PROBE_TTF");
+                let ttf_ink = ttf_font.line(contents).ink.unwrap();
+                let drawn_mid_y = 1.5 - (ttf_ink.bottom + ttf_ink.top) / 2.0 * height;
+                let expected_lift = ttf_ink.bottom.max(0.0) * height;
+                let got_ttf_middle =
+                    sheet_fonts.start(&make(contents, "PROBE_TTF", height, Justify::Middle, 0.0));
+                assert!(
+                    ((got_ttf_middle.y - drawn_mid_y) - expected_lift).abs() < 1e-12,
+                    "TTF middle {contents:?} h={height}: delta={} expected={expected_lift}",
+                    got_ttf_middle.y - drawn_mid_y
+                );
+
+                // TrueType `middle_center` and `center` are unaffected.
+                let got_mc = sheet_fonts.start(&make(
+                    contents,
+                    "PROBE_TTF",
+                    height,
+                    Justify::MiddleCenter,
+                    0.0,
+                ));
+                assert!((got_mc.y - (1.5 - height / 2.0)).abs() < 1e-12);
+                let got_c =
+                    sheet_fonts.start(&make(contents, "PROBE_TTF", height, Justify::Center, 0.0));
+                assert!((got_c.y - 1.5).abs() < 1e-12);
+
+                // SHX `middle` stays centred on its drawn box (no baseline shift).
+                let (shx_font, _) = sheet_fonts.style("PROBE_SHX");
+                let shx_ink = shx_font.line(contents).ink.unwrap();
+                let shx_expected_y = 1.5 - (shx_ink.bottom + shx_ink.top) / 2.0 * height;
+                let got_shx_middle =
+                    sheet_fonts.start(&make(contents, "PROBE_SHX", height, Justify::Middle, 0.0));
+                assert!(
+                    (got_shx_middle.y - shx_expected_y).abs() < 1e-12,
+                    "SHX middle {contents:?} h={height}: got={} expected={shx_expected_y}",
+                    got_shx_middle.y
+                );
+                let got_shx_mc = sheet_fonts.start(&make(
+                    contents,
+                    "PROBE_SHX",
+                    height,
+                    Justify::MiddleCenter,
+                    0.0,
+                ));
+                assert!((got_shx_mc.y - (1.5 - height / 2.0)).abs() < 1e-12);
+                let got_shx_c =
+                    sheet_fonts.start(&make(contents, "PROBE_SHX", height, Justify::Center, 0.0));
+                assert!((got_shx_c.y - 1.5).abs() < 1e-12);
+            }
+        }
+
+        // Exact AutoCAD 2026 probe deltas from #59 (to 6 decimal places):
+        let (ttf_font, _) = sheet_fonts.style("PROBE_TTF");
+        for (contents, height, expected_delta) in [
+            ("-", 0.0938, 0.028153),
+            ("+", 0.0938, 0.015164),
+            ("-", 1.0, 0.300136),
+            ("+", 1.0, 0.161664),
+        ] {
+            let ink = ttf_font.line(contents).ink.unwrap();
+            let old_y = 1.5 - (ink.bottom + ink.top) / 2.0 * height;
+            let new_y = sheet_fonts
+                .start(&make(contents, "PROBE_TTF", height, Justify::Middle, 0.0))
+                .y;
+            assert!(
+                ((new_y - old_y) - expected_delta).abs() < 1e-6,
+                "{contents:?} h={height}: delta={} expected={expected_delta}",
+                new_y - old_y
+            );
+        }
+
+        // Leading/trailing spaces in TrueType do not undo the vertical shift:
+        // `" - "` has the same `v` offset as `"-"`.
+        let dash_y = sheet_fonts
+            .start(&make("-", "PROBE_TTF", 1.0, Justify::Middle, 0.0))
+            .y;
+        let spaced_dash_y = sheet_fonts
+            .start(&make(" - ", "PROBE_TTF", 1.0, Justify::Middle, 0.0))
+            .y;
+        assert!((dash_y - spaced_dash_y).abs() < 1e-12);
+
+        // Rotation turns the adjusted `(u, v)` offset with the text.
+        let rot90 = sheet_fonts.start(&make("-", "PROBE_TTF", 1.0, Justify::Middle, 90.0));
+        let expected_v = -((621.0 - 440.0) / 1466.0) / 2.0;
+        let expected_u = -(682.0 / 1466.0) / 2.0;
+        close(rot90, 1.0 - expected_v, 1.5 + expected_u);
     }
 }
