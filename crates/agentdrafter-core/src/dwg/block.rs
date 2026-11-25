@@ -280,13 +280,14 @@ pub(super) fn dwg_insert(
         ));
     }
     for (definition, attribute) in definitions.into_iter().zip(&insert.attributes) {
-        let (_, horizontal, vertical) = alignment(definition.justify);
         if definition.multiline {
             let mtext = attribute_mtext(insert, block, definition, &attribute.value);
+            let mtext_justify = attachment_to_justify(mtext.justify);
+            let (_, horizontal, vertical) = alignment(mtext_justify);
             let coded = mtext_code(&attribute.value, None);
             let mut dwg_attribute = AttributeEntity::new(attribute.tag.clone(), coded);
             dwg_attribute.insertion_point = vector(mtext.position);
-            dwg_attribute.alignment_point = if definition.justify == Justify::Left {
+            dwg_attribute.alignment_point = if mtext_justify == Justify::Left {
                 Vector3::ZERO
             } else {
                 vector(mtext.position)
@@ -317,6 +318,7 @@ pub(super) fn dwg_insert(
             continue;
         }
         let text = attribute_text(insert, block, definition, &attribute.value);
+        let (_, horizontal, vertical) = alignment(text.justify);
         let mut dwg_attribute =
             AttributeEntity::new(attribute.tag.clone(), text_code(&attribute.value));
         dwg_attribute.insertion_point = vector(start_of(&text));
@@ -876,9 +878,10 @@ mod tests {
 
     #[test]
     fn a_mirrored_insert_whose_attribute_reads_upright_reads_back_through_its_own_dwg() {
-        // Turned 30 degrees with its attribute defined at 120, the attribute
-        // reads straight up, at 90: on the cutoff of the readable rule. Read
-        // back, 120 is 119.99999999999999, which must not flip it to 270.
+        // Turned 30 degrees with its attribute defined at 120 (inverted
+        // half-plane), the raw reflection is 90 (on the cutoff), so AutoCAD's
+        // MIRRTEXT 0 flips it to 270. Read back, 120 is 119.99999999999999,
+        // which must stay on the same side of the cutoff so it reads back.
         let mut ours = definition("TAG", Justify::MiddleCenter);
         ours.rotation = 120.0;
         let block = Block {
@@ -899,7 +902,7 @@ mod tests {
         insert.rotation = 30.0;
         insert.mirrored = true;
         let dwg = dwg_insert(&insert, &block, &|t| t.position).unwrap();
-        assert!(same_angle(dwg.attributes[0].rotation.to_degrees(), 90.0));
+        assert!(same_angle(dwg.attributes[0].rotation.to_degrees(), 270.0));
         let read = read_insert(&dwg, "symbols".into(), &[read_block]).expect("it reads back");
         assert!(read.mirrored);
         assert_eq!(read.attributes, insert.attributes);

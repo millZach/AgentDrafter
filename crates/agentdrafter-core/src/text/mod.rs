@@ -222,6 +222,53 @@ impl Justify {
             Justify::BottomRight => "bottom_right",
         }
     }
+
+    /// Parses the sheet-description name of a justification, such as `top_left`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|j| j.name() == name)
+    }
+
+    /// The horizontally mirrored justification (`left` <-> `right`), keeping
+    /// the text inside its mirrored box when a mirror reverses its baseline
+    /// direction under `MIRRTEXT 0`.
+    pub const fn flip_horizontal(self) -> Self {
+        match self {
+            Justify::Left => Justify::Right,
+            Justify::Right => Justify::Left,
+            Justify::TopLeft => Justify::TopRight,
+            Justify::TopRight => Justify::TopLeft,
+            Justify::MiddleLeft => Justify::MiddleRight,
+            Justify::MiddleRight => Justify::MiddleLeft,
+            Justify::BottomLeft => Justify::BottomRight,
+            Justify::BottomRight => Justify::BottomLeft,
+            Justify::Center
+            | Justify::Middle
+            | Justify::TopCenter
+            | Justify::MiddleCenter
+            | Justify::BottomCenter => self,
+        }
+    }
+
+    /// The vertically mirrored justification (`baseline`/`bottom` <-> `top`),
+    /// keeping the text inside its mirrored box when a mirror keeps its
+    /// baseline direction and flips its up-vector under `MIRRTEXT 0`.
+    pub const fn flip_vertical(self) -> Self {
+        match self {
+            Justify::Left => Justify::TopLeft,
+            Justify::Center => Justify::TopCenter,
+            Justify::Right => Justify::TopRight,
+            Justify::TopLeft => Justify::Left,
+            Justify::TopCenter => Justify::Center,
+            Justify::TopRight => Justify::Right,
+            Justify::BottomLeft => Justify::TopLeft,
+            Justify::BottomCenter => Justify::TopCenter,
+            Justify::BottomRight => Justify::TopRight,
+            Justify::Middle
+            | Justify::MiddleLeft
+            | Justify::MiddleCenter
+            | Justify::MiddleRight => self,
+        }
+    }
 }
 
 /// Where multiline text sits against its position: the corner, edge
@@ -268,6 +315,39 @@ impl Attachment {
             Attachment::BottomLeft => "bottom_left",
             Attachment::BottomCenter => "bottom_center",
             Attachment::BottomRight => "bottom_right",
+        }
+    }
+
+    /// Parses the sheet-description name of an attachment, such as `top_left`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.name() == name)
+    }
+
+    /// The horizontally mirrored attachment (`left` <-> `right`), matching
+    /// AutoCAD's `MIRROR` with `MIRRTEXT 0` when the baseline reverses.
+    pub const fn flip_horizontal(self) -> Self {
+        match self {
+            Attachment::TopLeft => Attachment::TopRight,
+            Attachment::TopRight => Attachment::TopLeft,
+            Attachment::MiddleLeft => Attachment::MiddleRight,
+            Attachment::MiddleRight => Attachment::MiddleLeft,
+            Attachment::BottomLeft => Attachment::BottomRight,
+            Attachment::BottomRight => Attachment::BottomLeft,
+            Attachment::TopCenter | Attachment::MiddleCenter | Attachment::BottomCenter => self,
+        }
+    }
+
+    /// The vertically mirrored attachment (`top` <-> `bottom`), matching
+    /// AutoCAD's `MIRROR` with `MIRRTEXT 0` when the up-vector reverses.
+    pub const fn flip_vertical(self) -> Self {
+        match self {
+            Attachment::TopLeft => Attachment::BottomLeft,
+            Attachment::TopCenter => Attachment::BottomCenter,
+            Attachment::TopRight => Attachment::BottomRight,
+            Attachment::BottomLeft => Attachment::TopLeft,
+            Attachment::BottomCenter => Attachment::TopCenter,
+            Attachment::BottomRight => Attachment::TopRight,
+            Attachment::MiddleLeft | Attachment::MiddleCenter | Attachment::MiddleRight => self,
         }
     }
 }

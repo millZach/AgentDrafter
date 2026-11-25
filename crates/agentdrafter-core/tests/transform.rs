@@ -1279,3 +1279,210 @@ objects:
     dl_req.sheet = Some("VP-001".to_owned());
     let _ = display_list_with(&dl_req, &Settings::default()).unwrap();
 }
+
+#[test]
+fn mirrored_text_mtext_and_attributes_stay_inside_their_mirrored_boxes() {
+    let set = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("core-transform")
+        .join("mirror-text-251");
+    let _ = fs::remove_dir_all(&set);
+    fs::create_dir_all(set.join("templates")).unwrap();
+    let write = |name: &str, text: &str| fs::write(set.join(name), text).unwrap();
+    write("set.yaml", "units: mm\noutput: dwg\nrows: rows.yaml\n");
+    // A 30x10 cell block with a left-justified attribute near its left wall (x = 2).
+    // When mirrored across x = 50, the cell moves to [70, 100] and the attribute's
+    // anchor moves to x = 98; flipping justification to `right` keeps the attribute
+    // inside [70, 98] instead of overflowing past x = 100!
+    write(
+        "blocks.yaml",
+        "units: mm
+blocks:
+  CELL:
+    objects:
+      - polyline: {points: [[0, 0, 0], [30, 0, 0], [30, 10, 0], [0, 10, 0]], closed: true}
+      - attdef: {tag: TAG, position: [2, 2, 0], height: 3, justify: left}
+",
+    );
+    write(
+        "templates/sheet.yaml",
+        "units: mm\nblock_library: ../blocks.yaml\nobjects: []\n",
+    );
+    write(
+        "rows.yaml",
+        "rows:
+  - sheet: MT-001
+    template: templates/sheet.yaml
+    objects:
+      - text: {id: t_edge, contents: EDGE-NOTE, position: [5, 20, 0], height: 4, justify: left}
+      - text: {id: t_slant, contents: SLANT, position: [10, 40, 0], height: 4, rotation: 30, justify: top_left}
+      - mtext: {id: mt_box, contents: \"LINE 1\\nLINE 2\", position: [5, 60, 0], height: 3, width: 25, justify: top_left}
+      - insert: {id: cell, block: CELL, position: [0, 0, 0], attributes: {TAG: 'FT-101'}}
+",
+    );
+    let built = build_set_with(
+        &SetBuildRequest {
+            set: set.clone(),
+            overwrite: false,
+            clean: None,
+        },
+        &Settings::default(),
+    );
+    assert!(built.ok, "{:#?}", built.error);
+
+    // 1. Mirror all four across vertical line x = 50.
+    let rep_v = lands(
+        &set,
+        json!([{
+            "op": "mirror",
+            "targets": [
+                {"id": "MT-001/t_edge"},
+                {"id": "MT-001/t_slant"},
+                {"id": "MT-001/mt_box"},
+                {"id": "MT-001/cell"}
+            ],
+            "first_point": [50, 0, 0],
+            "second_point": [50, 100, 0]
+        }]),
+    );
+    let objects = recorded(&set);
+    let Object::Text(t_edge_v) = &objects[&rep_v.operations[0].copies[0].id] else {
+        panic!("expected text");
+    };
+    assert_eq!(xyz(t_edge_v.position), [95.0, 20.0, 0.0]);
+    assert_eq!(t_edge_v.rotation, 0.0);
+    assert_eq!(t_edge_v.justify, agentdrafter_core::Justify::Right);
+
+    let Object::Text(t_slant_v) = &objects[&rep_v.operations[0].copies[1].id] else {
+        panic!("expected text");
+    };
+    assert_eq!(xyz(t_slant_v.position), [90.0, 40.0, 0.0]);
+    assert_eq!(t_slant_v.rotation, 330.0);
+    assert_eq!(t_slant_v.justify, agentdrafter_core::Justify::TopRight);
+
+    let Object::MText(mt_v) = &objects[&rep_v.operations[0].copies[2].id] else {
+        panic!("expected mtext");
+    };
+    assert_eq!(xyz(mt_v.position), [95.0, 60.0, 0.0]);
+    assert_eq!(mt_v.rotation, 0.0);
+    assert_eq!(mt_v.justify, agentdrafter_core::Attachment::TopRight);
+
+    // 2. Mirror text, mtext, and cell across horizontal line y = 50.
+    let rep_h = lands(
+        &set,
+        json!([{
+            "op": "mirror",
+            "targets": [
+                {"id": "MT-001/t_edge"},
+                {"id": "MT-001/mt_box"},
+                {"id": "MT-001/cell"}
+            ],
+            "first_point": [0, 50, 0],
+            "second_point": [100, 50, 0]
+        }]),
+    );
+    let objects = recorded(&set);
+    let Object::Text(t_edge_h) = &objects[&rep_h.operations[0].copies[0].id] else {
+        panic!("expected text");
+    };
+    assert_eq!(xyz(t_edge_h.position), [5.0, 80.0, 0.0]);
+    assert_eq!(t_edge_h.rotation, 0.0);
+    assert_eq!(t_edge_h.justify, agentdrafter_core::Justify::TopLeft);
+
+    let Object::MText(mt_h) = &objects[&rep_h.operations[0].copies[1].id] else {
+        panic!("expected mtext");
+    };
+    assert_eq!(xyz(mt_h.position), [5.0, 40.0, 0.0]);
+    assert_eq!(mt_h.rotation, 0.0);
+    assert_eq!(mt_h.justify, agentdrafter_core::Attachment::BottomLeft);
+
+    // 3. Verify DWG round-trip reads back ALL mirrored text, mtext, and mirrored inserts!
+    let read = read_dwg(&set.join("dwg").join("MT-001.dwg")).unwrap();
+    assert_eq!(read.objects_not_read, 0, "{:#?}", read.not_read);
+    let cell_block = read.blocks.iter().find(|b| b.name == "CELL").unwrap();
+    let att_def = cell_block.attribute_definitions().next().unwrap();
+    let mirrored_inserts: Vec<&agentdrafter_core::Insert> = read
+        .objects
+        .iter()
+        .filter_map(|o| match o {
+            Object::Insert(ins) if ins.mirrored => Some(ins),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(mirrored_inserts.len(), 2);
+    // Vertically mirrored insert (rotation 0) flips Left -> Right;
+    // horizontally mirrored insert (rotation 180) flips Left -> TopLeft.
+    let v_ins = mirrored_inserts
+        .iter()
+        .find(|i| (i.rotation - 0.0).abs() < 1e-6)
+        .unwrap();
+    let v_att = agentdrafter_core::attribute_text(v_ins, cell_block, att_def, "FT-101");
+    assert_eq!(v_att.justify, agentdrafter_core::Justify::Right);
+    assert_eq!(xyz(v_att.position), [98.0, 2.0, 0.0]);
+
+    let h_ins = mirrored_inserts
+        .iter()
+        .find(|i| (i.rotation - 180.0).abs() < 1e-6)
+        .unwrap();
+    let h_att = agentdrafter_core::attribute_text(h_ins, cell_block, att_def, "FT-101");
+    assert_eq!(h_att.justify, agentdrafter_core::Justify::TopLeft);
+    assert_eq!(xyz(h_att.position), [2.0, 98.0, 0.0]);
+
+    // 4. Verify rendered extents of the mirrored text box and mirrored insert
+    // attribute stay inside their exact mirrored boxes!
+    let mut dl_req = DisplayListRequest::new(&set);
+    dl_req.sheet = Some("MT-001".to_owned());
+    let dl = display_list_with(&dl_req, &Settings::default()).unwrap();
+    let run_text = |r: &agentdrafter_core::TextRun| -> String {
+        r.characters.iter().map(|(c, _)| c).collect()
+    };
+    let run_x_span = |r: &agentdrafter_core::TextRun| -> (f64, f64) {
+        let [lo, hi] = r.drawn.expect("drawn box");
+        let x0 = r.origin[0] + lo[0] * r.across[0];
+        let x1 = r.origin[0] + hi[0] * r.across[0];
+        (x0.min(x1), x0.max(x1))
+    };
+    let orig_run = dl
+        .display_list
+        .text
+        .iter()
+        .find(|r| {
+            run_text(r) == "EDGE-NOTE"
+                && (r.origin[0] - 5.0).abs() < 1e-3
+                && (r.origin[1] - 20.0).abs() < 1e-3
+        })
+        .expect("original EDGE-NOTE run");
+    let mirr_v_run = dl
+        .display_list
+        .text
+        .iter()
+        .find(|r| {
+            run_text(r) == "EDGE-NOTE" && (r.origin[1] - 20.0).abs() < 1e-3 && r.origin[0] > 50.0
+        })
+        .expect("vertically mirrored EDGE-NOTE run");
+    // Original ink box spans [orig_l, orig_r] starting at pen x = 5;
+    // vertically mirrored across x = 50 (Right-justified at x = 95) has the
+    // exact same glyph width and ends at x = 95 (within 1 left-side bearing
+    // of 100 - orig_r, never overflowing past x = 95).
+    let (orig_l, orig_r) = run_x_span(orig_run);
+    let (mirr_l, mirr_r) = run_x_span(mirr_v_run);
+    let left_bearing = orig_l - 5.0;
+    assert!(
+        (mirr_r - 95.0).abs() < 1e-6
+            && ((mirr_r - mirr_l) - (orig_r - orig_l)).abs() < 1e-6
+            && (mirr_l - (100.0 - orig_r + left_bearing)).abs() < 1e-6,
+        "mirrored text ink [{mirr_l}, {mirr_r}] did not match mirrored [{orig_l}, {orig_r}] across x=50"
+    );
+    // And the vertically mirrored CELL insert's attribute `FT-101` must sit
+    // strictly inside the mirrored cell [70, 100] (not overflowing past 100!).
+    let mirr_att_run = dl
+        .display_list
+        .text
+        .iter()
+        .find(|r| run_text(r) == "FT-101" && r.origin[0] > 50.0 && r.origin[1] < 50.0)
+        .expect("vertically mirrored FT-101 attribute run");
+    let (att_l, att_r) = run_x_span(mirr_att_run);
+    assert!(
+        att_l >= 70.0 && att_r <= 98.01,
+        "mirrored attribute ink [{att_l}, {att_r}] overflowed mirrored cell [70, 100]"
+    );
+}

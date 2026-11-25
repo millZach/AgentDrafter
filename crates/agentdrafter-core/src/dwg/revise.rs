@@ -5632,7 +5632,7 @@ fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> 
     } else if dx == -dy {
         135.0
     } else {
-        dy.atan2(dx).to_degrees().rem_euclid(180.0)
+        libm::atan2(dy, dx).to_degrees().rem_euclid(180.0)
     };
     let axis = if axis >= 180.0 { 0.0 } else { axis };
     let mp = |p: Vector3| {
@@ -5716,18 +5716,50 @@ fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> 
             e.fourth_corner = mp(e.fourth_corner);
         }
         EntityType::Text(e) => {
-            // MIRRTEXT 0: text position mirrors and its direction stays reading
-            // forwards (left-to-right or upwards).
-            e.insertion_point = mp(e.insertion_point);
-            if let Some(a) = &mut e.alignment_point {
-                *a = mp(*a);
-            }
-            e.rotation = readable(mdeg(e.rotation.to_degrees())).to_radians();
+            use acadrust::entities::{TextHorizontalAlignment as TH, TextVerticalAlignment as TV};
+            // MIRRTEXT 0: follow AutoCAD 2026's exact direction and
+            // justification-flipping rule so the mirrored text stays inside
+            // its mirrored box.
+            let old_deg = normalize_degrees(e.rotation.to_degrees());
+            let (new_deg, flip_h) =
+                crate::model::block::mirrored_text_direction(old_deg, mdeg(old_deg));
+            e.rotation = new_deg.to_radians();
             e.generation_flags = 0;
+            let was_left =
+                e.horizontal_alignment == TH::Left && e.vertical_alignment == TV::Baseline;
+            let anchor = if was_left {
+                e.insertion_point
+            } else {
+                e.alignment_point.unwrap_or(e.insertion_point)
+            };
+            let new_anchor = mp(anchor);
+            let (new_h, new_v) = flip_dwg_text_entity_alignment(
+                e.horizontal_alignment,
+                e.vertical_alignment,
+                flip_h,
+            );
+            e.horizontal_alignment = new_h;
+            e.vertical_alignment = new_v;
+            let now_left = new_h == TH::Left && new_v == TV::Baseline;
+            if now_left {
+                e.insertion_point = new_anchor;
+                e.alignment_point = None;
+            } else {
+                e.insertion_point = if was_left {
+                    new_anchor
+                } else {
+                    mp(e.insertion_point)
+                };
+                e.alignment_point = Some(new_anchor);
+            }
         }
         EntityType::MText(e) => {
+            let old_deg = normalize_degrees(e.rotation.to_degrees());
+            let (new_deg, flip_h) =
+                crate::model::block::mirrored_text_direction(old_deg, mdeg(old_deg));
             e.insertion_point = mp(e.insertion_point);
-            e.rotation = readable(mdeg(e.rotation.to_degrees())).to_radians();
+            e.rotation = new_deg.to_radians();
+            e.attachment_point = flip_dwg_attachment(e.attachment_point, flip_h);
             e.dwg_x_direction = None;
         }
         EntityType::Insert(e) => {
@@ -5744,17 +5776,46 @@ fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> 
                 e.column_spacing = -e.column_spacing;
             }
             for att in &mut e.attributes {
-                att.insertion_point = mp(att.insertion_point);
-                if att.horizontal_alignment != HorizontalAlignment::Left
-                    || att.vertical_alignment != VerticalAlignment::Baseline
-                {
-                    att.alignment_point = mp(att.alignment_point);
-                }
-                att.rotation = readable(mdeg(att.rotation.to_degrees())).to_radians();
+                let old_deg = normalize_degrees(att.rotation.to_degrees());
+                let (new_deg, flip_h) =
+                    crate::model::block::mirrored_text_direction(old_deg, mdeg(old_deg));
+                att.rotation = new_deg.to_radians();
                 att.text_generation_flags = 0;
+                let was_left = att.horizontal_alignment == HorizontalAlignment::Left
+                    && att.vertical_alignment == VerticalAlignment::Baseline;
+                let anchor = if was_left {
+                    att.insertion_point
+                } else {
+                    att.alignment_point
+                };
+                let new_anchor = mp(anchor);
+                let (new_h, new_v) = flip_dwg_text_alignment(
+                    att.horizontal_alignment,
+                    att.vertical_alignment,
+                    flip_h,
+                );
+                att.horizontal_alignment = new_h;
+                att.vertical_alignment = new_v;
+                let now_left =
+                    new_h == HorizontalAlignment::Left && new_v == VerticalAlignment::Baseline;
+                if now_left {
+                    att.insertion_point = new_anchor;
+                    att.alignment_point = Vector3::ZERO;
+                } else {
+                    att.insertion_point = if was_left {
+                        new_anchor
+                    } else {
+                        mp(att.insertion_point)
+                    };
+                    att.alignment_point = new_anchor;
+                }
                 if let Some(m) = att.embedded_mtext.as_mut() {
+                    let m_old = normalize_degrees(m.rotation.to_degrees());
+                    let (m_new, m_flip_h) =
+                        crate::model::block::mirrored_text_direction(m_old, mdeg(m_old));
                     m.insertion_point = mp(m.insertion_point);
-                    m.rotation = readable(mdeg(m.rotation.to_degrees())).to_radians();
+                    m.rotation = m_new.to_radians();
+                    m.attachment_point = flip_dwg_attachment(m.attachment_point, m_flip_h);
                     m.dwg_x_direction = None;
                 }
             }
@@ -5869,6 +5930,90 @@ fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> 
         }
     }
     Ok(())
+}
+
+fn flip_dwg_text_entity_alignment(
+    h: acadrust::entities::TextHorizontalAlignment,
+    v: acadrust::entities::TextVerticalAlignment,
+    flip_horizontal: bool,
+) -> (
+    acadrust::entities::TextHorizontalAlignment,
+    acadrust::entities::TextVerticalAlignment,
+) {
+    use acadrust::entities::{TextHorizontalAlignment as TH, TextVerticalAlignment as TV};
+    if flip_horizontal {
+        let new_h = match h {
+            TH::Left => TH::Right,
+            TH::Right => TH::Left,
+            other => other,
+        };
+        (new_h, v)
+    } else {
+        let new_v = match v {
+            TV::Baseline | TV::Bottom => TV::Top,
+            TV::Top => TV::Baseline,
+            TV::Middle => TV::Middle,
+        };
+        if h == TH::Middle {
+            (h, v)
+        } else {
+            (h, new_v)
+        }
+    }
+}
+
+fn flip_dwg_text_alignment(
+    h: HorizontalAlignment,
+    v: VerticalAlignment,
+    flip_horizontal: bool,
+) -> (HorizontalAlignment, VerticalAlignment) {
+    if flip_horizontal {
+        let new_h = match h {
+            HorizontalAlignment::Left => HorizontalAlignment::Right,
+            HorizontalAlignment::Right => HorizontalAlignment::Left,
+            other => other,
+        };
+        (new_h, v)
+    } else {
+        let new_v = match v {
+            VerticalAlignment::Baseline | VerticalAlignment::Bottom => VerticalAlignment::Top,
+            VerticalAlignment::Top => VerticalAlignment::Baseline,
+            VerticalAlignment::Middle => VerticalAlignment::Middle,
+        };
+        if h == HorizontalAlignment::Middle {
+            (h, v)
+        } else {
+            (h, new_v)
+        }
+    }
+}
+
+fn flip_dwg_attachment(
+    att: acadrust::entities::AttachmentPoint,
+    flip_horizontal: bool,
+) -> acadrust::entities::AttachmentPoint {
+    use acadrust::entities::AttachmentPoint as A;
+    if flip_horizontal {
+        match att {
+            A::TopLeft => A::TopRight,
+            A::TopRight => A::TopLeft,
+            A::MiddleLeft => A::MiddleRight,
+            A::MiddleRight => A::MiddleLeft,
+            A::BottomLeft => A::BottomRight,
+            A::BottomRight => A::BottomLeft,
+            other => other,
+        }
+    } else {
+        match att {
+            A::TopLeft => A::BottomLeft,
+            A::TopCenter => A::BottomCenter,
+            A::TopRight => A::BottomRight,
+            A::BottomLeft => A::TopLeft,
+            A::BottomCenter => A::TopCenter,
+            A::BottomRight => A::TopRight,
+            other => other,
+        }
+    }
 }
 
 // ── DWG version header check & structural snapshot for diff self-check ────
