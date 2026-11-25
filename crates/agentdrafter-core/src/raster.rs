@@ -173,8 +173,8 @@ pub(crate) fn rasterize(
             continue;
         }
         let [r, g, b] = style.map_or_else(
-            || item.color.on_paper(),
-            |s| s.color_for(item.color, item.plot_style.as_deref()),
+            || item.true_color.unwrap_or_else(|| item.color.on_paper()),
+            |s| s.color_for(item.color, item.true_color, item.plot_style.as_deref()),
         );
         let alpha = if plot_transparency && item.transparency > 0 {
             ((100.0 - f64::from(item.transparency)) * 2.55)
@@ -194,7 +194,12 @@ pub(crate) fn rasterize(
                 // pixel as a lighter line, so thin pens differ as they do in
                 // the PDF; lineweight 0 still draws one pixel.
                 let lineweight = style.map_or(*lineweight, |s| {
-                    s.lineweight_for(item.color, item.plot_style.as_deref(), *lineweight)
+                    s.lineweight_for(
+                        item.color,
+                        item.true_color,
+                        item.plot_style.as_deref(),
+                        *lineweight,
+                    )
                 });
                 let exact = lineweight * view.pixels_per_millimetre;
                 let width = if style.is_some() && exact > 0.0 {

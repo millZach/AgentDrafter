@@ -1876,6 +1876,9 @@ fn put_properties(keys: &mut Map<String, Value>, properties: &Properties, names:
         ObjectColor::Index(index) => {
             keys.insert("color".into(), json!(index));
         }
+        ObjectColor::Rgb(rgb) => {
+            keys.insert("color".into(), json!(rgb));
+        }
     }
     match &properties.linetype {
         ObjectLinetype::ByLayer => {}

@@ -1699,6 +1699,7 @@ impl RevisionSession {
                         ObjectColor::ByLayer => Color::ByLayer,
                         ObjectColor::ByBlock => Color::ByBlock,
                         ObjectColor::Index(index) => Color::Index(index),
+                        ObjectColor::Rgb([r, g, b]) => Color::Rgb { r, g, b },
                     };
                     common.color_name = None;
                     common.color_book_handle = None;

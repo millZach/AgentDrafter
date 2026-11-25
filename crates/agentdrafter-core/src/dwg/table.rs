@@ -82,6 +82,7 @@ fn dwg_color(color: ObjectColor) -> Color {
         ObjectColor::ByLayer => Color::ByLayer,
         ObjectColor::ByBlock => Color::ByBlock,
         ObjectColor::Index(index) => Color::Index(index),
+        ObjectColor::Rgb([r, g, b]) => Color::Rgb { r, g, b },
     }
 }
 
@@ -410,6 +411,7 @@ fn read_table_style(drawing: &CadDocument, written: &DwgTableStyle) -> Option<Ta
         Color::ByLayer => ObjectColor::ByLayer,
         Color::ByBlock => ObjectColor::ByBlock,
         Color::Index(index) if index >= 1 => ObjectColor::Index(index),
+        Color::Rgb { r, g, b } => ObjectColor::Rgb([r, g, b]),
         _ => return None,
     };
     let border_lineweight = match first.line_weight {

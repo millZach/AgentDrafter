@@ -689,6 +689,8 @@ pub enum ObjectColor {
     ByLayer,
     ByBlock,
     Index(u8),
+    /// A 24-bit RGB true colour (`[r, g, b]`, #106).
+    Rgb([u8; 3]),
 }
 
 impl ObjectColor {
@@ -702,6 +704,7 @@ impl ObjectColor {
 #[serde(untagged)]
 enum ColorJson {
     Index(u8),
+    Rgb([u8; 3]),
     Word(String),
 }
 
@@ -712,11 +715,12 @@ impl TryFrom<ColorJson> for ObjectColor {
         match json {
             ColorJson::Index(0) => Err("a colour index is 1 to 255".to_owned()),
             ColorJson::Index(index) => Ok(Self::Index(index)),
+            ColorJson::Rgb(rgb) => Ok(Self::Rgb(rgb)),
             ColorJson::Word(word) => match word.as_str() {
                 BY_LAYER => Ok(Self::ByLayer),
                 BY_BLOCK => Ok(Self::ByBlock),
                 _ => Err(format!(
-                    "`{word}` is not a colour; ByLayer, ByBlock or an index from 1 to 255"
+                    "`{word}` is not a colour; ByLayer, ByBlock, [r, g, b], or an index from 1 to 255"
                 )),
             },
         }
@@ -729,6 +733,7 @@ impl From<ObjectColor> for ColorJson {
             ObjectColor::ByLayer => Self::Word(BY_LAYER.to_owned()),
             ObjectColor::ByBlock => Self::Word(BY_BLOCK.to_owned()),
             ObjectColor::Index(index) => Self::Index(index),
+            ObjectColor::Rgb(rgb) => Self::Rgb(rgb),
         }
     }
 }

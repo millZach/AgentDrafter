@@ -32,6 +32,7 @@ fn dwg_color(color: ObjectColor) -> DwgColor {
         ObjectColor::ByLayer => DwgColor::ByLayer,
         ObjectColor::ByBlock => DwgColor::ByBlock,
         ObjectColor::Index(i) => DwgColor::Index(i),
+        ObjectColor::Rgb([r, g, b]) => DwgColor::Rgb { r, g, b },
     }
 }
 
@@ -40,6 +41,7 @@ fn read_dwg_color(color: DwgColor) -> Option<ObjectColor> {
         DwgColor::ByLayer => Some(ObjectColor::ByLayer),
         DwgColor::ByBlock => Some(ObjectColor::ByBlock),
         DwgColor::Index(i) if i > 0 => Some(ObjectColor::Index(i)),
+        DwgColor::Rgb { r, g, b } => Some(ObjectColor::Rgb([r, g, b])),
         _ => None,
     }
 }

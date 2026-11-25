@@ -647,8 +647,9 @@ fn defs() -> Map<String, Value> {
         json!({
             "description": format!(
                 "The object's own colour: `{BY_LAYER}`, its layer's; `{BY_BLOCK}`, the colour of \
-                 the insert that places its block; or an AutoCAD colour index from 1 to 255, or \
-                 one of {} (1 to 7). Without it, `{BY_LAYER}`.",
+                 the insert that places its block; an AutoCAD colour index from 1 to 255, or \
+                 one of {} (1 to 7); or a 24-bit true colour `[r, g, b]` of three integers from \
+                 0 to 255. Without it, `{BY_LAYER}`.",
                 colour_names()
             ),
             "anyOf": [
@@ -659,6 +660,20 @@ fn defs() -> Map<String, Value> {
                     "pattern": "^0*([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$",
                 },
                 { "enum": colours },
+                {
+                    "type": "array",
+                    "items": {
+                        "anyOf": [
+                            { "type": "integer", "minimum": 0, "maximum": 255 },
+                            {
+                                "type": "string",
+                                "pattern": "^0*([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$",
+                            },
+                        ],
+                    },
+                    "minItems": 3,
+                    "maxItems": 3,
+                },
             ],
         }),
     );

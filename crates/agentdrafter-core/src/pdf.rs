@@ -467,12 +467,16 @@ fn drawing(
                 gs_transparency = Some(target_t);
             }
         }
-        let rgb = style.color_for(item.color, item.plot_style.as_deref());
+        let rgb = style.color_for(item.color, item.true_color, item.plot_style.as_deref());
         match &item.shape {
             Shape::Stroke { lineweight, runs } => {
                 let width = snap(
-                    style.lineweight_for(item.color, item.plot_style.as_deref(), *lineweight)
-                        * POINTS_PER_MILLIMETRE,
+                    style.lineweight_for(
+                        item.color,
+                        item.true_color,
+                        item.plot_style.as_deref(),
+                        *lineweight,
+                    ) * POINTS_PER_MILLIMETRE,
                 );
                 let mut drawn = false;
                 for run in runs {

@@ -313,6 +313,10 @@ pub struct Item {
     pub clip_boundary: Option<usize>,
     /// The AutoCAD colour index it draws in.
     pub color: Color,
+    /// The 24-bit true colour `[r, g, b]` when the object has a true colour
+    /// rather than an AutoCAD colour index (#106).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub true_color: Option<[u8; 3]>,
     /// The resolved named plot style (for STB drawings), when set on the
     /// object or its layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -507,6 +511,8 @@ enum Shown {
 #[derive(Clone, Copy)]
 struct Pen<'a> {
     color: Color,
+    /// Optional 24-bit RGB true colour (#106), overriding `color` when set.
+    true_color: Option<[u8; 3]>,
     /// The linetype's pattern, as defined; none for a continuous line.
     pattern: Option<&'a [f64]>,
     /// What the pattern's lengths are enlarged by.
@@ -525,6 +531,7 @@ impl Pen<'_> {
     /// draws it.
     const OUTSIDE_A_BLOCK: Pen<'static> = Pen {
         color: Color(WHITE),
+        true_color: None,
         pattern: None,
         scale: 1.0,
         lineweight: DEFAULT_LINEWEIGHT,
@@ -539,12 +546,26 @@ impl Pen<'_> {
     }
 }
 
+/// Resolves an [`ObjectColor`] against its layer and enclosing block pens.
+fn resolve_color(
+    color: ObjectColor,
+    by_layer: Pen<'_>,
+    by_block: Pen<'_>,
+) -> (Color, Option<[u8; 3]>) {
+    match color {
+        ObjectColor::ByLayer => (by_layer.color, by_layer.true_color),
+        ObjectColor::ByBlock => (by_block.color, by_block.true_color),
+        ObjectColor::Index(index) => (Color(index), None),
+        ObjectColor::Rgb(rgb) => (Color(WHITE), Some(rgb)),
+    }
+}
+
 /// What one object draws, in its own coordinates.
 #[derive(Default)]
 struct Drawn {
     shapes: Vec<Shape>,
-    /// Shapes with an inline colour override (such as MTEXT `\C<n>;` runs, #61).
-    colored: Vec<(Color, Shape)>,
+    /// Shapes with an inline colour override (such as MTEXT `\C<n>;` / `\c<bgr>;` runs, #61, #106).
+    colored: Vec<(Color, Option<[u8; 3]>, Shape)>,
     /// The lines of text it draws, as they read.
     runs: Vec<TextRun>,
     /// The points that count towards the extents without drawing: a
@@ -893,11 +914,7 @@ impl<'a> Drawer<'a> {
     ) -> Pen<'b> {
         let by_layer = self.layer_pen(layer);
         let by_block = by_block.unwrap_or(Pen::OUTSIDE_A_BLOCK);
-        let color = match properties.color {
-            ObjectColor::ByLayer => by_layer.color,
-            ObjectColor::ByBlock => by_block.color,
-            ObjectColor::Index(index) => Color(index),
-        };
+        let (color, true_color) = resolve_color(properties.color, by_layer, by_block);
         let pattern = match &properties.linetype {
             ObjectLinetype::ByLayer => by_layer.pattern,
             ObjectLinetype::ByBlock => by_block.pattern,
@@ -921,6 +938,7 @@ impl<'a> Drawer<'a> {
         };
         Pen {
             color,
+            true_color,
             pattern,
             scale: self.sheet.ltscale * properties.linetype_scale * self.linetype_factor,
             lineweight,
@@ -984,6 +1002,7 @@ impl<'a> Drawer<'a> {
         let layer = self.layer(name);
         Pen {
             color: Color(layer.color),
+            true_color: None,
             pattern: self.pattern(&layer.linetype),
             scale: 1.0,
             lineweight: layer
@@ -1336,7 +1355,7 @@ impl<'a> Drawer<'a> {
                 Some(placed) => lettering
                     .colored
                     .into_iter()
-                    .map(|(c, s)| (c, placed.shape(s)))
+                    .map(|(c, tc, s)| (c, tc, placed.shape(s)))
                     .collect(),
                 None => lettering.colored,
             },
@@ -1676,12 +1695,10 @@ impl<'a> Drawer<'a> {
             &self.sheet.blocks,
         );
         let by_layer = self.layer_pen(&mleader.layer);
+        let (leader_color, leader_true_color) = resolve_color(style.leader_color, by_layer, pen);
         let line_pen = Pen {
-            color: match style.leader_color {
-                ObjectColor::ByBlock => pen.color,
-                ObjectColor::ByLayer => by_layer.color,
-                ObjectColor::Index(i) => Color(i),
-            },
+            color: leader_color,
+            true_color: leader_true_color,
             lineweight: match style.leader_lineweight {
                 ObjectLineweight::ByBlock => pen.lineweight,
                 ObjectLineweight::ByLayer => by_layer.lineweight,
@@ -1708,6 +1725,7 @@ impl<'a> Drawer<'a> {
                 let lettering = text::draw_mtext(text, self.fonts, pen.lineweight, tolerance);
                 let drawn = Drawn {
                     shapes: lettering.shapes,
+                    colored: lettering.colored,
                     runs: lettering.runs,
                     ..Drawn::default()
                 };
@@ -1737,6 +1755,7 @@ impl<'a> Drawer<'a> {
             let lettering = text::draw_mtext(&annotation, self.fonts, pen.lineweight, tolerance);
             let drawn = Drawn {
                 shapes: lettering.shapes,
+                colored: lettering.colored,
                 runs: lettering.runs,
                 ..Drawn::default()
             };
@@ -1832,6 +1851,7 @@ impl<'a> Drawer<'a> {
             let lettering =
                 text::draw_mtext(&laid.text, self.fonts, text_pen.lineweight, tolerance);
             drawn.shapes = lettering.shapes;
+            drawn.colored = lettering.colored;
             drawn.runs = lettering.runs;
         } else {
             // A stacked fraction draws as AutoCAD draws its MTEXT exploded:
@@ -1890,12 +1910,10 @@ impl<'a> Drawer<'a> {
             .table_style(&table.table_style)
             .unwrap_or_else(|| TableStyle::standard(self.sheet.units));
         let by_layer = self.layer_pen(&table.layer);
+        let (border_color, border_true_color) = resolve_color(style.border_color, by_layer, pen);
         let border = Pen {
-            color: match style.border_color {
-                ObjectColor::ByBlock => pen.color,
-                ObjectColor::ByLayer => by_layer.color,
-                ObjectColor::Index(i) => Color(i),
-            },
+            color: border_color,
+            true_color: border_true_color,
             lineweight: match style.border_lineweight {
                 ObjectLineweight::ByBlock => pen.lineweight,
                 ObjectLineweight::ByLayer => by_layer.lineweight,
@@ -1934,6 +1952,7 @@ impl<'a> Drawer<'a> {
             let lettering = text::draw_mtext(text, self.fonts, by_layer.lineweight, tolerance);
             let drawn = Drawn {
                 shapes: lettering.shapes,
+                colored: lettering.colored,
                 runs: lettering.runs,
                 ..Drawn::default()
             };
@@ -1990,8 +2009,18 @@ impl DisplayList {
                 self.wide_arcs
                     .extend(drawn.arcs.into_iter().map(|c| (index, c)));
                 self.add(index, path, pen, drawn.shapes, drawn.reach);
-                for (color, shape) in drawn.colored {
-                    self.add(index, path, Pen { color, ..pen }, vec![shape], Vec::new());
+                for (color, true_color, shape) in drawn.colored {
+                    self.add(
+                        index,
+                        path,
+                        Pen {
+                            color,
+                            true_color,
+                            ..pen
+                        },
+                        vec![shape],
+                        Vec::new(),
+                    );
                 }
                 self.add_text(index, path, drawn.runs);
             }
@@ -1999,7 +2028,7 @@ impl DisplayList {
                 let points: Vec<Point2> = drawn
                     .shapes
                     .iter()
-                    .chain(drawn.colored.iter().map(|(_, s)| s))
+                    .chain(drawn.colored.iter().map(|(_, _, s)| s))
                     .flat_map(Shape::points)
                     .collect();
                 self.take_in(points);
@@ -2036,6 +2065,7 @@ impl DisplayList {
             clip: None,
             clip_boundary: None,
             color: pen.color,
+            true_color: pen.true_color,
             plot_style: plot_style.clone(),
             transparency: pen.transparency,
             shape,
@@ -2078,24 +2108,31 @@ impl DisplayList {
                         clip: None,
                         clip_boundary: None,
                         color: pen.color,
+                        true_color: pen.true_color,
                         plot_style: plot_style.clone(),
                         transparency: pen.transparency,
                         shape,
                     }));
                 self.items
-                    .extend(drawn.colored.into_iter().map(|(color, shape)| Item {
-                        object: index,
-                        part: None,
-                        nested: Vec::new(),
-                        cell: Some(cell),
-                        viewport: None,
-                        clip: None,
-                        clip_boundary: None,
-                        color,
-                        plot_style: plot_style.clone(),
-                        transparency: pen.transparency,
-                        shape,
-                    }));
+                    .extend(
+                        drawn
+                            .colored
+                            .into_iter()
+                            .map(|(color, true_color, shape)| Item {
+                                object: index,
+                                part: None,
+                                nested: Vec::new(),
+                                cell: Some(cell),
+                                viewport: None,
+                                clip: None,
+                                clip_boundary: None,
+                                color,
+                                true_color,
+                                plot_style: plot_style.clone(),
+                                transparency: pen.transparency,
+                                shape,
+                            }),
+                    );
                 self.text.extend(drawn.runs.into_iter().map(|run| TextRun {
                     object: index,
                     cell: Some(cell),

@@ -249,13 +249,57 @@ pub(super) fn properties(fields: &Fields, linetypes: &[Linetype]) -> Result<Prop
     Ok(properties)
 }
 
-/// An object's own colour: `ByLayer`, `ByBlock` or a colour index.
+/// An object's own colour: `ByLayer`, `ByBlock`, a colour index, or a 24-bit
+/// true colour `[r, g, b]` (#106).
 pub(super) fn object_color(node: &Node, path: &str) -> Result<ObjectColor, Error> {
     Ok(match &node.kind {
         Kind::Scalar(text) if text == BY_LAYER => ObjectColor::ByLayer,
         Kind::Scalar(text) if text == BY_BLOCK => ObjectColor::ByBlock,
-        _ => ObjectColor::Index(colour(node, path, "`ByLayer`, `ByBlock`, ")?),
+        Kind::Sequence(items) => ObjectColor::Rgb(rgb_color(node, items, path)?),
+        _ => ObjectColor::Index(colour(node, path, "`ByLayer`, `ByBlock`, `[r, g, b]`, ")?),
     })
+}
+
+/// A 24-bit true colour `[r, g, b]`, each channel an integer from 0 to 255.
+fn rgb_color(node: &Node, items: &[Node], path: &str) -> Result<[u8; 3], Error> {
+    let expected = "a true colour `[r, g, b]` of three integers from 0 to 255";
+    if items.len() != 3 {
+        return Err(bad_value(
+            node,
+            path,
+            format!("expected {expected}; found {} items", items.len()),
+        ));
+    }
+    let mut rgb = [0u8; 3];
+    for (i, item) in items.iter().enumerate() {
+        let item_path = format!("{path}[{i}]");
+        let text = match &item.kind {
+            Kind::Scalar(s) => s.as_str(),
+            _ => {
+                return Err(at(
+                    Error::new(
+                        ErrorCode::WrongType,
+                        format!("expected an integer from 0 to 255 in {expected}"),
+                    ),
+                    &item_path,
+                    item.at,
+                ));
+            }
+        };
+        match text.parse::<u8>() {
+            Ok(v) if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) => {
+                rgb[i] = v;
+            }
+            _ => {
+                return Err(bad_value(
+                    item,
+                    &item_path,
+                    format!("`{text}` is not a colour channel; expected an integer from 0 to 255"),
+                ));
+            }
+        }
+    }
+    Ok(rgb)
 }
 
 /// An object's own lineweight: `ByLayer`, `ByBlock`, `Default` or a
