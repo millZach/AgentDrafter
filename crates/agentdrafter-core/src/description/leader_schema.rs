@@ -3,7 +3,7 @@
 
 use serde_json::{json, Map, Value};
 
-use super::schema::{object_def, optional_text, shows_pattern, NUMBER, TEXT_TYPES};
+use super::schema::{object_def, optional_text, shows_pattern, POSITIVE_NUMBER, TEXT_TYPES};
 use crate::model::{Arrowhead, BlockConnection, LeaderAttachment, STANDARD_MLEADER_STYLE};
 use crate::text::STANDARD;
 
@@ -120,7 +120,7 @@ fn block_content() -> Value {
                                 number more than 0, with no unit. Without it, 1.",
                 "anyOf": [
                     { "type": "number", "exclusiveMinimum": 0 },
-                    { "type": "string", "pattern": format!("^{NUMBER}$") },
+                    { "type": "string", "pattern": format!("^{POSITIVE_NUMBER}$") },
                 ],
             },
             "rotation": {

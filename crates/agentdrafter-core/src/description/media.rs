@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::block_schema::relative_path_property;
 use super::blocks::{relative_path, RelativePath};
-use super::schema::{object_def, NUMBER};
+use super::schema::{object_def, POSITIVE_NUMBER};
 use super::strict_yaml::{index_path, Node};
 use super::wipeout::WIPEOUT_FRAME_NAMES;
 use super::{
@@ -386,11 +386,11 @@ pub(super) fn image_def() -> Value {
                 "description": "The image's lower-left corner in drawing units.",
             },
             "width": {
-                "$ref": "#/$defs/length",
+                "$ref": "#/$defs/length_more_than_0",
                 "description": "The displayed width in drawing units, more than 0.",
             },
             "height": {
-                "$ref": "#/$defs/length",
+                "$ref": "#/$defs/length_more_than_0",
                 "description": "Optional displayed height in drawing units, more than 0. Omitting \
                                 it preserves the image's natural pixel aspect ratio.",
             },
@@ -462,7 +462,7 @@ pub(super) fn pdf_underlay_def() -> Value {
                                 more than 0. Without it, 1.",
                 "anyOf": [
                     { "type": "number", "exclusiveMinimum": 0 },
-                    { "type": "string", "pattern": format!("^{NUMBER}$") },
+                    { "type": "string", "pattern": format!("^{POSITIVE_NUMBER}$") },
                 ],
             },
             "rotation": {

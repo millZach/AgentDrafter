@@ -2,9 +2,9 @@
 //! hatches, built from the same tables `hatch.rs` checks keys against.
 //!
 //! What JSON Schema cannot see is left to the reader, as everywhere in the
-//! schema: a scale above 0 when it is written as a string, a `delta` whose
-//! distance across is 0, dashes that hold a dash and a gap, a boundary that
-//! lies flat and joins up, and whether the pattern a hatch names is defined.
+//! schema: a `delta` whose distance across is 0, dashes that hold a dash and
+//! a gap, a boundary that lies flat and joins up, and whether the pattern a
+//! hatch names is defined.
 
 use serde_json::{json, Map, Value};
 
@@ -13,7 +13,7 @@ use super::hatch::{
     LONGEST_PATTERN_NAME, LOOP_TYPES, PATTERN_LINE_KEYS, RESERVED_PATTERN_NAMES,
 };
 use super::layers::FORBIDDEN_IN_NAMES;
-use super::schema::{object_def, NUMBER};
+use super::schema::{object_def, POSITIVE_NUMBER};
 use crate::model::SOLID;
 
 /// The schema of the top-level `hatch_patterns` key of a sheet or a block
@@ -150,7 +150,7 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                 ),
                 "anyOf": [
                     { "type": "number", "exclusiveMinimum": 0 },
-                    { "type": "string", "pattern": format!("^{NUMBER}$") },
+                    { "type": "string", "pattern": format!("^{POSITIVE_NUMBER}$") },
                 ],
             },
             "angle": {
@@ -240,7 +240,7 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                 .map(|key| {
                     let value = match *key {
                         "from" | "to" | "center" => json!({ "$ref": "#/$defs/point" }),
-                        "radius" => json!({ "$ref": "#/$defs/length", "description": "A length more than 0." }),
+                        "radius" => json!({ "$ref": "#/$defs/length_more_than_0", "description": "A length more than 0." }),
                         _ => json!({ "$ref": "#/$defs/angle" }),
                     };
                     ((*key).to_owned(), value)

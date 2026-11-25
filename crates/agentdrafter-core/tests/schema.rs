@@ -168,6 +168,62 @@ const RADIUS: Place = Place {
     json: r#"{"units": "mm", "objects": [{"circle": {"center": [0, 0, 0], "radius": V}}]}"#,
 };
 
+const ARC_RADIUS: Place = Place {
+    name: "an arc's radius",
+    yaml: "units: mm\nobjects:\n  - arc: {center: [0, 0, 0], radius: V, start_angle: 0, end_angle: 90}\n",
+    json: r#"{"units": "mm", "objects": [{"arc": {"center": [0, 0, 0], "radius": V, "start_angle": 0, "end_angle": 90}}]}"#,
+};
+
+const ELLIPSE_RATIO: Place = Place {
+    name: "an ellipse's ratio",
+    yaml:
+        "units: mm\nobjects:\n  - ellipse: {center: [0, 0, 0], major_axis: [2, 0, 0], ratio: V}\n",
+    json: r#"{"units": "mm", "objects": [{"ellipse": {"center": [0, 0, 0], "major_axis": [2, 0, 0], "ratio": V}}]}"#,
+};
+
+const TEXT_HEIGHT: Place = Place {
+    name: "a text's height",
+    yaml: "units: mm\nobjects:\n  - text: {contents: A, position: [0, 0, 0], height: V}\n",
+    json: r#"{"units": "mm", "objects": [{"text": {"contents": "A", "position": [0, 0, 0], "height": V}}]}"#,
+};
+
+const IMAGE_WIDTH: Place = Place {
+    name: "an image's width",
+    yaml: "units: mm\nobjects:\n  - image: {path: logo.png, position: [0, 0, 0], width: V}\n",
+    json: r#"{"units": "mm", "objects": [{"image": {"path": "logo.png", "position": [0, 0, 0], "width": V}}]}"#,
+};
+
+const IMAGE_HEIGHT: Place = Place {
+    name: "an image's height",
+    yaml: "units: mm\nobjects:\n  - image: {path: logo.png, position: [0, 0, 0], width: 10, height: V}\n",
+    json: r#"{"units": "mm", "objects": [{"image": {"path": "logo.png", "position": [0, 0, 0], "width": 10, "height": V}}]}"#,
+};
+
+const PDF_UNDERLAY_SCALE: Place = Place {
+    name: "a PDF underlay's scale",
+    yaml:
+        "units: mm\nobjects:\n  - pdf_underlay: {path: sheet.pdf, position: [0, 0, 0], scale: V}\n",
+    json: r#"{"units": "mm", "objects": [{"pdf_underlay": {"path": "sheet.pdf", "position": [0, 0, 0], "scale": V}}]}"#,
+};
+
+const VIEWPORT_WIDTH: Place = Place {
+    name: "a viewport's width",
+    yaml: "units: mm\npaper: ISO A4 landscape\nlayout: {name: Sheet}\nobjects:\n  - viewport: {center: [100, 100, 0], width: V, height: 50, view_center: [0, 0, 0], scale: 1}\n",
+    json: r#"{"units": "mm", "paper": "ISO A4 landscape", "layout": {"name": "Sheet"}, "objects": [{"viewport": {"center": [100, 100, 0], "width": V, "height": 50, "view_center": [0, 0, 0], "scale": 1}}]}"#,
+};
+
+const VIEWPORT_HEIGHT: Place = Place {
+    name: "a viewport's height",
+    yaml: "units: mm\npaper: ISO A4 landscape\nlayout: {name: Sheet}\nobjects:\n  - viewport: {center: [100, 100, 0], width: 50, height: V, view_center: [0, 0, 0], scale: 1}\n",
+    json: r#"{"units": "mm", "paper": "ISO A4 landscape", "layout": {"name": "Sheet"}, "objects": [{"viewport": {"center": [100, 100, 0], "width": 50, "height": V, "view_center": [0, 0, 0], "scale": 1}}]}"#,
+};
+
+const VIEWPORT_CLIP_RADIUS: Place = Place {
+    name: "a circular viewport clip's radius",
+    yaml: "units: mm\npaper: ISO A4 landscape\nlayout: {name: Sheet}\nobjects:\n  - viewport: {clip: {center: [100, 100, 0], radius: V}, view_center: [0, 0, 0], scale: 1}\n",
+    json: r#"{"units": "mm", "paper": "ISO A4 landscape", "layout": {"name": "Sheet"}, "objects": [{"viewport": {"clip": {"center": [100, 100, 0], "radius": V}, "view_center": [0, 0, 0], "scale": 1}}]}"#,
+};
+
 const ANGLE: Place = Place {
     name: "an arc's start angle",
     yaml: "units: mm\nobjects:\n  - arc: {center: [0, 0, 0], radius: 1, start_angle: V, end_angle: 1}\n",
@@ -391,6 +447,12 @@ const BLOCK_CONTENT_VALUE: Place = Place {
     json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"mleader": {"leaders": [[[0, 0, 0], [20, 10, 0]]], "content": {"block": "P", "attributes": {"TAG": V}}}}]}"#,
 };
 
+const BLOCK_CONTENT_SCALE: Place = Place {
+    name: "the scale of a multileader's block content",
+    yaml: "units: mm\nblock_library: lib.yaml\nobjects:\n  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {block: L, scale: V}}\n",
+    json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"mleader": {"leaders": [[[0, 0, 0], [20, 10, 0]]], "content": {"block": "L", "scale": V}}}]}"#,
+};
+
 const TEXT_CONTENT_GAP: Place = Place {
     name: "the gap of a multileader with text content",
     yaml: "units: mm\nobjects:\n  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {text: A}, gap: V}\n",
@@ -488,6 +550,16 @@ fn cases() -> Vec<Case> {
         (&BLOCK_CONTENT_VALUE, "12", json!(12), true),
         (&BLOCK_CONTENT_VALUE, "'90%%d'", json!("90%%d"), false),
         (&BLOCK_CONTENT_VALUE, "'A%%%B'", json!("A%%%B"), false),
+        // A multileader's block content scale: a number more than 0, with no unit.
+        (&BLOCK_CONTENT_SCALE, "2", json!(2), true),
+        (&BLOCK_CONTENT_SCALE, "'0.5'", json!("0.5"), true),
+        (&BLOCK_CONTENT_SCALE, "'1e-2'", json!("1e-2"), true),
+        (&BLOCK_CONTENT_SCALE, "0", json!(0), false),
+        (&BLOCK_CONTENT_SCALE, "-1", json!(-1), false),
+        (&BLOCK_CONTENT_SCALE, "'0'", json!("0"), false),
+        (&BLOCK_CONTENT_SCALE, "'0.0'", json!("0.0"), false),
+        (&BLOCK_CONTENT_SCALE, "'-1'", json!("-1"), false),
+        (&BLOCK_CONTENT_SCALE, "'2 mm'", json!("2 mm"), false),
         (&ATTRIBUTE_VALUE, "'90%%d'", json!("90%%d"), true),
         (&TEXT_CONTENT_GAP, "1", json!(1), true),
         (&TEXT_CONTENT_GAP, "0", json!(0), true),
@@ -503,6 +575,10 @@ fn cases() -> Vec<Case> {
         (&PAPER, "[17, 11, 0]", json!([17, 11, 0]), false),
         (&PAPER, "[0, 11]", json!([0, 11]), false),
         (&PAPER, "[-17, 11]", json!([-17, 11]), false),
+        (&PAPER, "['0', 11]", json!(["0", 11]), false),
+        (&PAPER, "['0 mm', '10 mm']", json!(["0 mm", "10 mm"]), false),
+        (&PAPER, "['-17', 11]", json!(["-17", 11]), false),
+        (&PAPER, "['-17 mm', '11 mm']", json!(["-17 mm", "11 mm"]), false),
         (&PAPER, "[17, wide]", json!([17, "wide"]), false),
         (&PAPER, "17", json!(17), false),
         (&PAPER, "{width: 17}", json!({"width": 17}), false),
@@ -516,8 +592,14 @@ fn cases() -> Vec<Case> {
         // An insert's scale: a number more than 0, with no unit.
         (&INSERT_SCALE, "2", json!(2), true),
         (&INSERT_SCALE, "'0.5'", json!("0.5"), true),
+        (&INSERT_SCALE, "'0.05'", json!("0.05"), true),
+        (&INSERT_SCALE, "'2e1'", json!("2e1"), true),
         (&INSERT_SCALE, "0", json!(0), false),
         (&INSERT_SCALE, "-1", json!(-1), false),
+        (&INSERT_SCALE, "'0'", json!("0"), false),
+        (&INSERT_SCALE, "'0.0'", json!("0.0"), false),
+        (&INSERT_SCALE, "'-1'", json!("-1"), false),
+        (&INSERT_SCALE, "'-0.5'", json!("-0.5"), false),
         (&INSERT_SCALE, "'2 mm'", json!("2 mm"), false),
         (&INSERT_SCALE, "big", json!("big"), false),
         // An attribute's value: text which may be empty. Line breaks are
@@ -713,14 +795,78 @@ fn cases() -> Vec<Case> {
         (&DEGREE, "'2.5'", json!("2.5"), false),
         (&DEGREE, "'two'", json!("two"), false),
         (&DEGREE, "'+2'", json!("+2"), false),
-        // A length, with or without its own unit.
+        // A circle's radius: a length more than 0, with or without its own unit.
         (&RADIUS, "4", json!(4), true),
         (&RADIUS, "'4'", json!("4"), true),
         (&RADIUS, "4 in", json!("4 in"), true),
         (&RADIUS, "'4in'", json!("4in"), true),
+        (&RADIUS, "0", json!(0), false),
+        (&RADIUS, "-1", json!(-1), false),
+        (&RADIUS, "'0'", json!("0"), false),
+        (&RADIUS, "'0 mm'", json!("0 mm"), false),
+        (&RADIUS, "'-2'", json!("-2"), false),
+        (&RADIUS, "'-2 mm'", json!("-2 mm"), false),
         (&RADIUS, "'4 furlong'", json!("4 furlong"), false),
         (&RADIUS, "'4  in'", json!("4  in"), false),
         (&RADIUS, "'.5'", json!(".5"), false),
+        // Other lengths that must be more than 0 (arc radius, text height,
+        // image width/height, viewport width/height/clip radius).
+        (&ARC_RADIUS, "2", json!(2), true),
+        (&ARC_RADIUS, "'2 mm'", json!("2 mm"), true),
+        (&ARC_RADIUS, "0", json!(0), false),
+        (&ARC_RADIUS, "-1", json!(-1), false),
+        (&ARC_RADIUS, "'0'", json!("0"), false),
+        (&ARC_RADIUS, "'0 mm'", json!("0 mm"), false),
+        (&ARC_RADIUS, "'-1 mm'", json!("-1 mm"), false),
+        (&TEXT_HEIGHT, "2.5", json!(2.5), true),
+        (&TEXT_HEIGHT, "'0.1 in'", json!("0.1 in"), true),
+        (&TEXT_HEIGHT, "0", json!(0), false),
+        (&TEXT_HEIGHT, "-2", json!(-2), false),
+        (&TEXT_HEIGHT, "'0'", json!("0"), false),
+        (&TEXT_HEIGHT, "'0 mm'", json!("0 mm"), false),
+        (&TEXT_HEIGHT, "'-2 mm'", json!("-2 mm"), false),
+        (&IMAGE_WIDTH, "10", json!(10), true),
+        (&IMAGE_WIDTH, "'2 in'", json!("2 in"), true),
+        (&IMAGE_WIDTH, "0", json!(0), false),
+        (&IMAGE_WIDTH, "'0 mm'", json!("0 mm"), false),
+        (&IMAGE_WIDTH, "'-5'", json!("-5"), false),
+        (&IMAGE_HEIGHT, "10", json!(10), true),
+        (&IMAGE_HEIGHT, "'2 in'", json!("2 in"), true),
+        (&IMAGE_HEIGHT, "0", json!(0), false),
+        (&IMAGE_HEIGHT, "'0 mm'", json!("0 mm"), false),
+        (&IMAGE_HEIGHT, "'-5'", json!("-5"), false),
+        (&PDF_UNDERLAY_SCALE, "2", json!(2), true),
+        (&PDF_UNDERLAY_SCALE, "'0.5'", json!("0.5"), true),
+        (&PDF_UNDERLAY_SCALE, "0", json!(0), false),
+        (&PDF_UNDERLAY_SCALE, "-1", json!(-1), false),
+        (&PDF_UNDERLAY_SCALE, "'0'", json!("0"), false),
+        (&PDF_UNDERLAY_SCALE, "'0.0'", json!("0.0"), false),
+        (&PDF_UNDERLAY_SCALE, "'-1'", json!("-1"), false),
+        (&VIEWPORT_WIDTH, "80", json!(80), true),
+        (&VIEWPORT_WIDTH, "'4 in'", json!("4 in"), true),
+        (&VIEWPORT_WIDTH, "0", json!(0), false),
+        (&VIEWPORT_WIDTH, "'0'", json!("0"), false),
+        (&VIEWPORT_WIDTH, "'-10 mm'", json!("-10 mm"), false),
+        (&VIEWPORT_HEIGHT, "60", json!(60), true),
+        (&VIEWPORT_HEIGHT, "'3 in'", json!("3 in"), true),
+        (&VIEWPORT_HEIGHT, "0", json!(0), false),
+        (&VIEWPORT_HEIGHT, "'0 mm'", json!("0 mm"), false),
+        (&VIEWPORT_HEIGHT, "'-10'", json!("-10"), false),
+        (&VIEWPORT_CLIP_RADIUS, "40", json!(40), true),
+        (&VIEWPORT_CLIP_RADIUS, "'2 in'", json!("2 in"), true),
+        (&VIEWPORT_CLIP_RADIUS, "0", json!(0), false),
+        (&VIEWPORT_CLIP_RADIUS, "'0 mm'", json!("0 mm"), false),
+        (&VIEWPORT_CLIP_RADIUS, "'-5'", json!("-5"), false),
+        // An ellipse's ratio: more than 0 and at most 1.
+        (&ELLIPSE_RATIO, "0.5", json!(0.5), true),
+        (&ELLIPSE_RATIO, "'0.5'", json!("0.5"), true),
+        (&ELLIPSE_RATIO, "1", json!(1), true),
+        (&ELLIPSE_RATIO, "'1'", json!("1"), true),
+        (&ELLIPSE_RATIO, "0", json!(0), false),
+        (&ELLIPSE_RATIO, "-0.5", json!(-0.5), false),
+        (&ELLIPSE_RATIO, "'0'", json!("0"), false),
+        (&ELLIPSE_RATIO, "'0.0'", json!("0.0"), false),
+        (&ELLIPSE_RATIO, "'-0.5'", json!("-0.5"), false),
         // An angle: degrees with no unit.
         (&ANGLE, "90", json!(90), true),
         (&ANGLE, "'-45.5'", json!("-45.5"), true),
@@ -762,6 +908,9 @@ fn cases() -> Vec<Case> {
         (&SCALE, "1e-3", json!(0.001), true),
         (&SCALE, "0", json!(0), false),
         (&SCALE, "-1.5", json!(-1.5), false),
+        (&SCALE, "'0'", json!("0"), false),
+        (&SCALE, "'0.0'", json!("0.0"), false),
+        (&SCALE, "'-1.5'", json!("-1.5"), false),
         (&SCALE, "'2 mm'", json!("2 mm"), false),
         (&SCALE, "big", json!("big"), false),
         // A solid hatch has no scale.
@@ -814,6 +963,18 @@ fn cases() -> Vec<Case> {
             json!([{"edges": [{"line": {"from": [0, 0, 0], "to": [1, 0, 0]}}, {"arc": {"center": [0.5, 0, 0], "radius": 0.5, "start_angle": 0, "end_angle": 180}}]}]),
             true,
         ),
+        (
+            &BOUNDARY,
+            "[{edges: [{line: {from: [0, 0, 0], to: [1, 0, 0]}}, {arc: {center: [0.5, 0, 0], radius: 0, start_angle: 0, end_angle: 180}}]}]",
+            json!([{"edges": [{"line": {"from": [0, 0, 0], "to": [1, 0, 0]}}, {"arc": {"center": [0.5, 0, 0], "radius": 0, "start_angle": 0, "end_angle": 180}}]}]),
+            false,
+        ),
+        (
+            &BOUNDARY,
+            "[{edges: [{line: {from: [0, 0, 0], to: [1, 0, 0]}}, {arc: {center: [0.5, 0, 0], radius: '0 mm', start_angle: 0, end_angle: 180}}]}]",
+            json!([{"edges": [{"line": {"from": [0, 0, 0], "to": [1, 0, 0]}}, {"arc": {"center": [0.5, 0, 0], "radius": "0 mm", "start_angle": 0, "end_angle": 180}}]}]),
+            false,
+        ),
         (&BOUNDARY, "[]", json!([]), false),
         (
             &BOUNDARY,
@@ -859,6 +1020,9 @@ fn cases() -> Vec<Case> {
         (&STYLE_WIDTH_FACTOR, "100", json!(100), true),
         (&STYLE_WIDTH_FACTOR, "0.01", json!(0.01), true),
         (&STYLE_WIDTH_FACTOR, "0", json!(0), false),
+        (&STYLE_WIDTH_FACTOR, "'0'", json!("0"), false),
+        (&STYLE_WIDTH_FACTOR, "'0.0'", json!("0.0"), false),
+        (&STYLE_WIDTH_FACTOR, "'-0.5'", json!("-0.5"), false),
         (&STYLE_WIDTH_FACTOR, "101", json!(101), false),
         (&STYLE_WIDTH_FACTOR, "'0.8 mm'", json!("0.8 mm"), false),
         (&STYLE_WIDTH_FACTOR, "narrow", json!("narrow"), false),
@@ -1011,9 +1175,15 @@ fn cases() -> Vec<Case> {
         (&ATTACH, "bottom_right", json!("bottom_right"), true),
         (&ATTACH, "left", json!("left"), false),
         (&ATTACH, "middle", json!("middle"), false),
-        // An mtext width: a length, 0 or more (the sign JSON Schema cannot see).
+        // An mtext width: a length of 0 or more.
         (&MTEXT_WIDTH, "80", json!(80), true),
+        (&MTEXT_WIDTH, "0", json!(0), true),
+        (&MTEXT_WIDTH, "'0'", json!("0"), true),
+        (&MTEXT_WIDTH, "'0 mm'", json!("0 mm"), true),
         (&MTEXT_WIDTH, "'3 in'", json!("3 in"), true),
+        (&MTEXT_WIDTH, "-1", json!(-1), false),
+        (&MTEXT_WIDTH, "'-1'", json!("-1"), false),
+        (&MTEXT_WIDTH, "'-1 mm'", json!("-1 mm"), false),
         (&MTEXT_WIDTH, "wide", json!("wide"), false),
     ]);
     cases
