@@ -586,6 +586,7 @@ impl MLeader {
         let attachment = content.attachment.unwrap_or(style.attachment);
         let mut text = MText {
             contents: content.text.clone(),
+            runs: Vec::new(),
             position: connection,
             height,
             width: 0.0,
@@ -751,6 +752,7 @@ impl Leader {
         let side = self.side();
         Some(MText {
             contents: annotation.text.clone(),
+            runs: Vec::new(),
             position: Point3 {
                 x: end.x + side * self.gap,
                 ..end

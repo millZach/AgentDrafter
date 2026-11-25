@@ -126,6 +126,7 @@ fn mtext_reads_every_key_and_drops_line_breaks_at_the_end() {
         object,
         Object::MText(MText {
             contents: "FIRST LINE\nSECOND {LINE} 100%".into(),
+            runs: Vec::new(),
             position: Point3::new(0.0, 50.0, 0.0),
             height: 3.0,
             width: 80.0,
@@ -236,6 +237,85 @@ fn text_and_mtext_parse_and_round_trip_underline_and_overline() {
         ),
         other => panic!("expected mtext: {other:?}"),
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mtext_inline_runs_parse_build_draw_and_round_trip() {
+    // Rejects specifying both `contents` and `runs`.
+    let both_err =
+        object_error("mtext: {contents: A, runs: [{text: A}], position: [0, 0, 0], height: 2}");
+    assert_eq!(both_err.code, ErrorCode::BadValue);
+
+    // Full DWG build + read-back + display-list test with inline formatting (#61).
+    let dir = std::env::temp_dir().join(format!("agentdrafter-mtext-runs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let yaml = dir.join("sheet.yaml");
+    let dwg = dir.join("sheet.dwg");
+    std::fs::write(
+        &yaml,
+        "units: mm\nobjects:\n\
+         \x20 - mtext:\n\
+         \x20     position: [10, 50, 0]\n\
+         \x20     height: 3\n\
+         \x20     width: 80\n\
+         \x20     runs:\n\
+         \x20       - {text: 'NOTES:', font: Arial, bold: true, underline: true, color: red}\n\
+         \x20       - {text: \"\\n1. Plain text \"}\n\
+         \x20       - {text: 'BIG', height: 5, width_factor: 0.9, oblique: 12, tracking: 1.1, overline: true}\n",
+    )
+    .unwrap();
+    let settings = crate::Settings::default();
+    crate::build_with(
+        &crate::BuildRequest {
+            description: yaml,
+            output: Some(dwg.clone()),
+            overwrite: true,
+        },
+        &settings,
+    )
+    .unwrap();
+    let read = crate::read_original(&crate::ReadRequest {
+        source: dwg.clone(),
+        mirror: None,
+        no_mirror: false,
+    })
+    .unwrap();
+    assert!(read.decoded);
+    assert!(read.not_read.is_empty(), "{:?}", read.not_read);
+    let mirror = std::fs::read_to_string(read.mirror.as_deref().unwrap()).unwrap();
+    assert!(mirror.contains("runs:"), "{mirror}");
+    assert!(mirror.contains("bold: true"), "{mirror}");
+
+    let read_dwg = crate::dwg::read(&dwg).unwrap();
+    assert_eq!(read_dwg.objects.len(), 1);
+    let Object::MText(m) = &read_dwg.objects[0] else {
+        panic!("expected mtext");
+    };
+    assert_eq!(m.contents, "NOTES:\n1. Plain text BIG");
+    assert_eq!(m.runs.len(), 3);
+    assert_eq!(m.runs[0].font.as_deref(), Some("Arial"));
+    assert!(m.runs[0].bold && m.runs[0].underline);
+    assert_eq!(m.runs[0].color, Some(crate::model::ObjectColor::Index(1)));
+    assert_eq!(m.runs[2].height, Some(5.0));
+    assert_eq!(m.runs[2].width_factor, Some(0.9));
+    assert_eq!(m.runs[2].oblique, Some(12.0));
+    assert_eq!(m.runs[2].tracking, Some(1.1));
+    assert!(m.runs[2].overline);
+
+    // Drawing pipeline emits red (Color(1)) items for the first run alongside
+    // the layer's default colour items for the other runs.
+    let dl_req: crate::DisplayListRequest =
+        serde_json::from_value(serde_json::json!({ "source": dwg })).unwrap();
+    let dl = crate::display_list_with(&dl_req, &settings).unwrap();
+    assert!(
+        dl.display_list
+            .items
+            .iter()
+            .any(|it| it.color == crate::Color(1)),
+        "expected red inline-coloured run in display list"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

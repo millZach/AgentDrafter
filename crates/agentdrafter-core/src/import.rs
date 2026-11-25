@@ -1681,7 +1681,50 @@ fn object_value(object: &Object, names: &Names) -> Value {
             }
         }
         Object::MText(text) => {
-            put("contents", json!(text.contents));
+            if text.runs.is_empty() {
+                put("contents", json!(text.contents));
+            } else {
+                let runs_val: Vec<Value> = text
+                    .runs
+                    .iter()
+                    .map(|r| {
+                        let mut m = serde_json::Map::new();
+                        m.insert("text".into(), json!(r.text));
+                        if let Some(f) = &r.font {
+                            m.insert("font".into(), json!(f));
+                        }
+                        if r.bold {
+                            m.insert("bold".into(), json!(true));
+                        }
+                        if r.italic {
+                            m.insert("italic".into(), json!(true));
+                        }
+                        if let Some(h) = r.height {
+                            m.insert("height".into(), json!(h));
+                        }
+                        if let Some(w) = r.width_factor {
+                            m.insert("width_factor".into(), json!(w));
+                        }
+                        if let Some(q) = r.oblique {
+                            m.insert("oblique".into(), json!(q));
+                        }
+                        if let Some(t) = r.tracking {
+                            m.insert("tracking".into(), json!(t));
+                        }
+                        if r.underline {
+                            m.insert("underline".into(), json!(true));
+                        }
+                        if r.overline {
+                            m.insert("overline".into(), json!(true));
+                        }
+                        if let Some(c) = r.color {
+                            m.insert("color".into(), json!(c));
+                        }
+                        Value::Object(m)
+                    })
+                    .collect();
+                put("runs", Value::Array(runs_val));
+            }
             put("position", point_value(text.position));
             put("height", json!(text.height));
             if text.width != 0.0 {

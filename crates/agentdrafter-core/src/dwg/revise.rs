@@ -4509,6 +4509,59 @@ fn apply_mtext_change(
             ));
             dwg_mtext.value = text::mtext_styled_code(s, existing_wf, u, o);
         }
+        "runs" => {
+            let Some(arr) = value.as_array() else {
+                return Err(
+                    Error::new(ErrorCode::WrongType, "expected a list of mtext runs")
+                        .at_field(field),
+                );
+            };
+            if arr.is_empty() {
+                return Err(
+                    Error::new(ErrorCode::BadValue, "runs needs at least one span").at_field(field),
+                );
+            }
+            let mut runs: Vec<crate::text::MTextRun> = Vec::with_capacity(arr.len());
+            for (idx, item) in arr.iter().enumerate() {
+                let run_field = format!("{field}[{idx}]");
+                let run: crate::text::MTextRun =
+                    serde_json::from_value(item.clone()).map_err(|e| {
+                        Error::new(ErrorCode::BadValue, format!("invalid mtext run: {e}"))
+                            .at_field(&run_field)
+                    })?;
+                runs.push(run);
+            }
+            let plain: String = runs.iter().map(|r| r.text.as_str()).collect();
+            if plain.trim().is_empty() {
+                return Err(
+                    Error::new(ErrorCode::BadValue, "mtext runs cannot be empty").at_field(field),
+                );
+            }
+            let mut tmp = crate::text::MText {
+                contents: plain,
+                runs,
+                position: point(dwg_mtext.insertion_point),
+                height: dwg_mtext.height,
+                width: dwg_mtext.rectangle_width,
+                style: text::style_name(&dwg_mtext.style),
+                width_factor: None,
+                rotation: 0.0,
+                justify: Attachment::TopLeft,
+                underline: false,
+                overline: false,
+                layer: layer_of(&dwg_mtext.common),
+                field: None,
+                annotative: dwg_mtext.is_annotative,
+                annotation_scales: Vec::new(),
+                properties: Default::default(),
+            };
+            if let Some(parsed) = text::mtext_rich_contents(&dwg_mtext.value, dwg_mtext.height) {
+                tmp.width_factor = parsed.width_factor;
+                tmp.underline = parsed.underline;
+                tmp.overline = parsed.overline;
+            }
+            dwg_mtext.value = text::mtext_rich_code(&tmp);
+        }
         "position" => {
             dwg_mtext.insertion_point = vector(parse_point_json(value, units, &field)?);
         }

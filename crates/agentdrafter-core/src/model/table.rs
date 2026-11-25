@@ -350,6 +350,7 @@ impl Table {
         let up = [y[1] - v, (y[0] + y[1]) / 2.0, y[0] + v][at / 3];
         Some(MText {
             contents: cell.text.clone(),
+            runs: Vec::new(),
             position: Point3::new(across, up, self.position.z),
             height: cell.height.unwrap_or(row.text_height),
             width: (x[1] - x[0] - 2.0 * h).max(0.0),

@@ -35,6 +35,12 @@ pub(crate) const STANDARD_FONT: &str = "txt.shx";
 /// The narrowest and the widest width factor AutoCAD allows.
 pub(crate) const WIDTH_FACTORS: (f64, f64) = (0.01, 100.0);
 
+/// The range of oblique (slant) angles in degrees AutoCAD allows (`\Q`).
+pub(crate) const OBLIQUE_ANGLES: (f64, f64) = (-85.0, 85.0);
+
+/// The range of character tracking factors AutoCAD allows (`\T`).
+pub(crate) const TRACKING_FACTORS: (f64, f64) = (0.75, 4.0);
+
 fn standard() -> String {
     STANDARD.to_owned()
 }
@@ -108,6 +114,23 @@ pub(crate) fn font_name_problem(name: &str) -> Option<String> {
         Some(format!("`{name}` is not a font file name; {FONT_CHOICES}"))
     } else {
         None
+    }
+}
+
+/// Why `name` cannot name an inline MTEXT font (`\f` family name or font file
+/// name), or none when it can (#61).
+pub(crate) fn inline_font_name_problem(name: &str) -> Option<String> {
+    if name.trim().is_empty() {
+        Some("an inline font name cannot be empty".to_owned())
+    } else {
+        name.chars()
+            .find(|c| FORBIDDEN_IN_FONT_NAMES.contains(*c) || c.is_control())
+            .map(|c| {
+                format!(
+                    "an inline font name cannot hold `{}`: use a font family name such as `Arial` or a file name such as `arial.ttf` or `romans.shx`",
+                    c.escape_default()
+                )
+            })
     }
 }
 
@@ -291,12 +314,86 @@ pub struct Text {
     pub properties: crate::model::Properties,
 }
 
+/// One inline-formatted span inside a multiline text (`MText`), corresponding
+/// to AutoCAD's MTEXT formatting codes (`\f`/`\F`, `\H`, `\W`, `\Q`, `\T`,
+/// `\L`/`\l`, `\O`/`\o`, `\C`) (#61).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MTextRun {
+    /// Literal text of this span (`\n` starts a new line).
+    pub text: String,
+    /// Optional inline font override: a TrueType family name (`Arial`) or
+    /// font file name (`arial.ttf`, `romans.shx`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+    /// Bold (`|b1` in `\f...;`).
+    #[serde(default, skip_serializing_if = "crate::model::is_false")]
+    pub bold: bool,
+    /// Italic (`|i1` in `\f...;`).
+    #[serde(default, skip_serializing_if = "crate::model::is_false")]
+    pub italic: bool,
+    /// Optional character height override (`\H`), in the sheet's declared unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+    /// Optional width factor override (`\W`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width_factor: Option<f64>,
+    /// Optional oblique slant angle in degrees (`\Q`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oblique: Option<f64>,
+    /// Optional character spacing / tracking factor (`\T`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking: Option<f64>,
+    /// Underline (`\L` / `\l`).
+    #[serde(default, skip_serializing_if = "crate::model::is_false")]
+    pub underline: bool,
+    /// Overline (`\O` / `\o`).
+    #[serde(default, skip_serializing_if = "crate::model::is_false")]
+    pub overline: bool,
+    /// Optional inline colour override (`\C<n>;`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<crate::model::ObjectColor>,
+}
+
+impl MTextRun {
+    /// Whether this run carries no inline overrides beyond its literal text.
+    pub fn is_plain(&self) -> bool {
+        self.font.is_none()
+            && !self.bold
+            && !self.italic
+            && self.height.is_none()
+            && self.width_factor.is_none()
+            && self.oblique.is_none()
+            && self.tracking.is_none()
+            && !self.underline
+            && !self.overline
+            && self.color.is_none()
+    }
+
+    /// Whether this run has the exact same inline formatting as `other`.
+    pub fn same_style(&self, other: &Self) -> bool {
+        self.font == other.font
+            && self.bold == other.bold
+            && self.italic == other.italic
+            && self.height == other.height
+            && self.width_factor == other.width_factor
+            && self.oblique == other.oblique
+            && self.tracking == other.tracking
+            && self.underline == other.underline
+            && self.overline == other.overline
+            && self.color == other.color
+    }
+}
+
 /// Text of one or more lines in a box, as AutoCAD's MTEXT draws it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MText {
     /// What the text says, exactly as it shows; lines are separated by a
-    /// line break (`\n`).
+    /// line break (`\n`). When [`Self::runs`] is non-empty, this holds the
+    /// concatenated plain text of all runs.
     pub contents: String,
+    /// Optional inline-formatted spans (#61). Empty for plain multiline text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<MTextRun>,
     /// The point the text's box is attached at.
     pub position: Point3,
     /// The height of its capitals, in the declared unit.

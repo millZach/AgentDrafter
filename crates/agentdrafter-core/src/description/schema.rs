@@ -1160,6 +1160,65 @@ fn text_defs(defs: &mut Map<String, Value>) {
         ]);
         text
     });
+    defs.insert(
+        "mtext_run".into(),
+        json!({
+            "type": "object",
+            "description": "One inline-formatted span of a multiline text (AutoCAD MTEXT inline codes \\f/\\F, \\H, \\W, \\Q, \\T, \\L, \\O, \\C).",
+            "required": ["text"],
+            "additionalProperties": false,
+            "properties": {
+                "text": {
+                    "description": "Literal text of this span; \\n starts a new line.",
+                    "type": TEXT_TYPES,
+                },
+                "font": {
+                    "description": "Inline font family name (such as Arial) or font file name (such as arial.ttf or romans.shx).",
+                    "type": TEXT_TYPES,
+                },
+                "bold": {
+                    "description": "Whether this span is bold (|b1). Without it, false.",
+                    "type": "boolean",
+                },
+                "italic": {
+                    "description": "Whether this span is italic (|i1). Without it, false.",
+                    "type": "boolean",
+                },
+                "height": {
+                    "$ref": "#/$defs/height",
+                    "description": "Inline character height override (\\H), in the sheet's unit.",
+                },
+                "width_factor": {
+                    "$ref": "#/$defs/width_factor",
+                    "description": "Inline width factor override (\\W).",
+                },
+                "oblique": {
+                    "description": "Inline oblique slant angle in degrees (\\Q), from -85 to 85.",
+                    "type": "number",
+                    "minimum": -85,
+                    "maximum": 85,
+                },
+                "tracking": {
+                    "description": "Inline character spacing / tracking factor (\\T), from 0.75 to 4.",
+                    "type": "number",
+                    "minimum": 0.75,
+                    "maximum": 4,
+                },
+                "underline": {
+                    "description": "Whether this span is underlined (\\L...\\l). Without it, false.",
+                    "type": "boolean",
+                },
+                "overline": {
+                    "description": "Whether this span is overlined (\\O...\\o). Without it, false.",
+                    "type": "boolean",
+                },
+                "color": {
+                    "$ref": "#/$defs/object_color",
+                    "description": "Inline colour override (\\C<n>;): ByLayer, ByBlock, a named colour or an index from 1 to 255.",
+                },
+            },
+        }),
+    );
     defs.insert("mtext".into(), {
         let mut mtext = object_def(
             "Text of one or more lines in a box, as AutoCAD's MTEXT draws it.",
@@ -1170,10 +1229,18 @@ fn text_defs(defs: &mut Map<String, Value>) {
                                     shows, so not empty and not only white space. A line \
                                     break starts a new line, and line breaks at the end are \
                                     dropped. No control characters but line breaks. A \\, { or } \
-                                    shows as itself; formatting codes are not read. May be \
-                                    omitted when `field` is given.",
+                                    shows as itself; use `runs` for inline formatting. May be \
+                                    omitted when `runs` or `field` is given.",
                     "type": TEXT_TYPES,
                     "pattern": shows_pattern(),
+                },
+                "runs": {
+                    "description": "Inline-formatted spans of text (font, bold, italic, height, \
+                                    width_factor, oblique, tracking, underline, overline, color). \
+                                    Write either `contents` or `runs`, not both.",
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/$defs/mtext_run" },
                 },
                 "field": { "$ref": "#/$defs/field" },
                 "position": {
@@ -1214,6 +1281,7 @@ fn text_defs(defs: &mut Map<String, Value>) {
         );
         mtext["anyOf"] = json!([
             { "required": ["contents"] },
+            { "required": ["runs"] },
             { "required": ["field"] },
         ]);
         mtext
