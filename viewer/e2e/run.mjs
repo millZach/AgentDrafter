@@ -2572,8 +2572,9 @@ const checks = {
       shots.push(name);
     };
     // Waits for the journal to hold one more entry than `before`, a change
-    // set that landed on `sheet`, and for the page to draw what it added.
-    const landed = async (page, before, what, sheet = 'DP-LD-101') => {
+    // set that landed on `sheet`, and (when `waitDrawn` is true) for the page
+    // to draw what it added.
+    const landed = async (page, before, what, sheet = 'DP-LD-101', waitDrawn = true) => {
       const until = Date.now() + 30000;
       let entries = journal();
       while (!grownAndDone(entries, before)) {
@@ -2584,9 +2585,11 @@ const checks = {
       assert(entries.length === before + 1, `${what}: one journal entry, not ${entries.length - before}`);
       const entry = entries.at(-1);
       assert(entry.kind === 'change_set' && entry.landed_on?.includes(sheet), `${what} landed: ${JSON.stringify(entry)}`);
-      const added = (entry.objects ?? []).filter((o) => o.how === 'added' && o.id.startsWith(`${sheet}/`)).map((o) => o.id);
-      for (const id of added) {
-        await page.waitForFunction((wanted) => window.agentdrafterViewer.summary.objects.some((o) => o.id === wanted), id, { timeout: 15000 });
+      if (waitDrawn) {
+        const added = (entry.objects ?? []).filter((o) => o.how === 'added' && o.id.startsWith(`${sheet}/`)).map((o) => o.id);
+        for (const id of added) {
+          await page.waitForFunction((wanted) => window.agentdrafterViewer.summary.objects.some((o) => o.id === wanted), id, { timeout: 15000 });
+        }
       }
       return entry;
     };
@@ -2760,7 +2763,7 @@ const checks = {
         assert(journal().length === before, 'Esc with no copy placed lands nothing');
         assert(!(await bar(page)).includes('COPY'), `Esc ends the tool: ${await bar(page)}`);
         const history = () => page.evaluate(() => document.querySelector('.cmd .hist')?.textContent ?? '');
-        // A copy placed, then a journal entry opened: the copy is dropped, nothing sent.
+        // A copy placed, then a journal entry opened (#246): the copy lands first, then the entry shows.
         before = journal().length;
         let target = await pointOn(page, 'DP-LD-101/device');
         await typeIn(page, 'CO');
@@ -2770,22 +2773,63 @@ const checks = {
         assert((await bar(page)).includes('1 copy placed'), `a copy is placed: ${await bar(page)}`);
         await sideTab(page, 'journal');
         await page.click(`[data-entry="${seen.laptop.enter}"] .je-head`);
+        entry = await landed(page, before, 'Copy, journal entry opened', 'DP-LD-101', false);
+        op = copyOp(entry);
+        assert(JSON.stringify(op.from) === '[2,6.5,0]' && JSON.stringify(op.to) === '[2,3.5,0]', `journal entry open lands the placed copy: ${JSON.stringify(op)}`);
         await page.waitForFunction(() => document.querySelector('.cmdbar')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
-        await sleep(1500);
-        assert(journal().length === before, `a journal entry opened sends no copy: ${JSON.stringify(journal().at(-1))}`);
-        assert(!(await bar(page)).includes('COPY'), `the copy is dropped, the tool ended: ${await bar(page)}`);
+        assert(!(await bar(page)).includes('COPY'), `the copy landed and the tool ended: ${await bar(page)}`);
         await page.click('.opt[data-opt="live"]');
         await page.waitForFunction(() => !document.querySelector('.cmdbar')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
+        for (const id of (entry.objects ?? []).filter((o) => o.how === 'added' && o.id.startsWith('DP-LD-101/')).map((o) => o.id)) {
+          await page.waitForFunction((wanted) => window.agentdrafterViewer.summary.objects.some((o) => o.id === wanted), id, { timeout: 15000 });
+        }
         await sideTab(page, 'chat');
+        // A copy placed, then another sheet clicked (#246): the copy lands on DP-LD-101, then DP-LD-102 opens.
+        before = journal().length;
+        target = await pointOn(page, 'DP-LD-101/device');
+        await typeIn(page, 'CO');
+        await page.mouse.click(...target.at);
+        assert((await bar(page)).includes('1 object picked'), `Copy picks the device before sheet switch: ${await bar(page)}`);
+        await typeIn(page, '', '2,6.5', '@0,-2.5');
+        assert((await bar(page)).includes('1 copy placed'), `a copy is placed before sheet switch: ${await bar(page)}`);
+        await page.click('.tab:has-text("DP-LD-102")');
+        entry = await landed(page, before, 'Copy, sheet switched', 'DP-LD-101', false);
+        op = copyOp(entry);
+        assert(JSON.stringify(op.from) === '[2,6.5,0]' && JSON.stringify(op.to) === '[2,4,0]', `sheet switch lands the placed copy: ${JSON.stringify(op)}`);
+        await page.waitForFunction(() => window.agentdrafterViewer.summary?.sheet === 'DP-LD-102', null, { timeout: 15000 });
+        assert(!(await bar(page)).includes('COPY'), `sheet switch ends the tool: ${await bar(page)}`);
+        await page.click('.tab:has-text("DP-LD-101")');
+        await page.waitForFunction(() => window.agentdrafterViewer.summary?.sheet === 'DP-LD-101', null, { timeout: 15000 });
+        for (const id of (entry.objects ?? []).filter((o) => o.how === 'added' && o.id.startsWith('DP-LD-101/')).map((o) => o.id)) {
+          await page.waitForFunction((wanted) => window.agentdrafterViewer.summary.objects.some((o) => o.id === wanted), id, { timeout: 15000 });
+        }
+        // A template object's copy placed, then another sheet clicked (#246):
+        // stays on DP-LD-101 and shows the Change all band first.
+        before = journal().length;
+        target = await pointOn(page, 'DP-LD-101/junction-box');
+        await typeIn(page, 'CO');
+        await page.mouse.click(...target.at);
+        assert((await bar(page)).includes('1 object picked'), `Copy picks the junction box before sheet switch: ${await bar(page)}`);
+        await typeIn(page, '', '6.38,6.5', '@0,-2.5');
+        assert((await bar(page)).includes('1 copy placed'), `a template copy is placed before sheet switch: ${await bar(page)}`);
+        await page.click('.tab:has-text("DP-LD-102")');
+        await page.waitForSelector('[data-preview] [data-pv-summary]', { timeout: 30000 });
+        const askedOnSwitch = await page.textContent('[data-preview]');
+        assert(askedOnSwitch.includes('Copy') && askedOnSwitch.includes('Change all 7 sheets'), `sheet switch asks Change all first: ${askedOnSwitch}`);
+        assert(await page.evaluate(() => window.agentdrafterViewer.summary?.sheet) === 'DP-LD-101', 'stays on DP-LD-101 while Change all asks');
+        assert(!(await bar(page)).includes('COPY'), `the tool ended into preview: ${await bar(page)}`);
+        await page.click('[data-pv="cancel"]');
+        await page.waitForFunction(() => !document.querySelector('[data-preview]'), null, { timeout: 30000 });
+        assert(journal().length === before, 'Cancel writes nothing after sheet-switch preview');
         // A proposal waiting, then a template's copy placed and the proposal
-        // opened: the copy is dropped, not asked about, and the proposal shows.
+        // opened (#246): stays and shows the copy's Change all band first.
         const proposalFile = join(folder, 'proposal.json');
         writeFileSync(proposalFile, JSON.stringify(move('DP-LD-101/device', 0.1)));
         const proposed = agentIn(folder, 'propose', 'demo-plant', proposalFile);
         assert(proposed.ok, `a proposal waits: ${JSON.stringify(proposed)}`);
         const number = proposed.result.proposal;
         await page.waitForSelector(`[data-pcard="${number}"]`, { timeout: 30000 });
-        // The entry shown brought the view to its change: the whole sheet again.
+        // The whole sheet again.
         before = journal().length;
         target = await pointOn(page, 'DP-LD-101/junction-box');
         await typeIn(page, 'CO');
@@ -2795,9 +2839,17 @@ const checks = {
         assert((await bar(page)).includes('1 copy placed'), `a template's copy is placed: ${await bar(page)}`);
         await page.click(`[data-pcard="${number}"] [data-pc="show"]`);
         await page.waitForSelector('[data-preview] [data-pv-summary]', { timeout: 30000 });
+        const askedOnProposal = await page.textContent('[data-preview]');
+        assert(askedOnProposal.includes('Copy') && askedOnProposal.includes('Change all 7 sheets') && !/Discard/.test(askedOnProposal), `the copy's Change all band is shown first: ${askedOnProposal}`);
+        assert(!(await bar(page)).includes('COPY'), `the tool ended into preview: ${await bar(page)}`);
+        await page.click('[data-pv="cancel"]');
+        await page.waitForFunction(() => !document.querySelector('[data-preview]'), null, { timeout: 30000 });
+        assert(journal().length === before, 'cancelling the template copy writes nothing');
+        // Now open and discard the waiting proposal.
+        await page.click(`[data-pcard="${number}"] [data-pc="show"]`);
+        await page.waitForSelector('[data-preview] [data-pv-summary]', { timeout: 30000 });
         const opened = await page.textContent('[data-preview]');
-        assert(!opened.includes('Copy') && /Discard/.test(opened), `the proposal is shown, not the copy: ${opened}`);
-        assert(!(await bar(page)).includes('COPY'), `the copy is dropped, the tool ended: ${await bar(page)}`);
+        assert(!opened.includes('Copy') && /Discard/.test(opened), `the proposal is shown once Copy is closed: ${opened}`);
         await page.click('[data-pv="discard"]');
         await page.waitForFunction(() => !document.querySelector('[data-preview]'), null, { timeout: 30000 });
         assert(journal().slice(before).every((e) => e.kind === 'discard'), `only the discard is written: ${JSON.stringify(journal().slice(before))}`);
