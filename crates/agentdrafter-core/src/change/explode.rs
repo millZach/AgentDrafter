@@ -126,13 +126,14 @@ pub(crate) fn compute_explode(
         Object::Table(table) => explode_table(table, sheet)?,
         Object::MLine(mline) => explode_mline(mline, sheet)?,
         Object::CenterMark(cm) => explode_center_mark(cm)?,
+        Object::Solid3D(solid) => explode_solid3d(solid)?,
         other => {
             return Err(Error::new(
                 ErrorCode::BadValue,
                 format!(
                     "cannot explode a {}; `explode` works on inserts, polylines, donuts, \
                      revision clouds, hatches, dimensions, multileaders, leaders, tables, \
-                     multilines and centre marks",
+                     multilines, centre marks and 3D solids",
                     other.type_name()
                 ),
             ));
@@ -468,6 +469,22 @@ fn place_object(
             layer,
             properties,
         })),
+        Object::Solid3D(solid) => {
+            let body = crate::geometry::solid3d::transform_solid_body(
+                &solid.body,
+                |p: [f64; 3]| {
+                    let q = placement.point(Point3::new(p[0], p[1], p[2]));
+                    [q.x, q.y, q.z]
+                },
+                placement.mirrored(),
+            )
+            .ok()?;
+            Some(Object::Solid3D(crate::model::Solid3D {
+                body,
+                layer,
+                properties,
+            }))
+        }
         Object::RevisionCloud(rc) => {
             let boundary = match &rc.boundary {
                 RevisionCloudBoundary::Rectangle { from, to }
@@ -1387,6 +1404,33 @@ fn explode_center_mark(cm: &crate::model::CenterMark) -> Result<Vec<Object>, Err
             push(pt(-r0, 0.0), pt(-r1, 0.0));
             push(pt(0.0, r0), pt(0.0, r1));
             push(pt(0.0, -r0), pt(0.0, -r1));
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Solid3D -> 3D wireframe edge Lines
+// ---------------------------------------------------------------------------
+
+fn explode_solid3d(solid: &crate::model::Solid3D) -> Result<Vec<Object>, Error> {
+    let polylines = crate::geometry::solid3d::wireframe_polylines_3d(
+        &solid.body,
+        &crate::geometry::solid3d::OrthoView::TOP,
+    );
+    let mut out = Vec::new();
+    for poly in polylines {
+        for w in poly.windows(2) {
+            let a = Point3::new(w[0][0], w[0][1], w[0][2]);
+            let b = Point3::new(w[1][0], w[1][1], w[1][2]);
+            if non_degenerate_line(a, b) {
+                out.push(Object::Line(Line {
+                    from: a,
+                    to: b,
+                    layer: solid.layer.clone(),
+                    properties: solid.properties.clone(),
+                }));
+            }
         }
     }
     Ok(out)

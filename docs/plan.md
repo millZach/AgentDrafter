@@ -153,6 +153,7 @@ Three open DWG libraries each read 53 drawings (made-up ones and real ones under
 |---|---|
 | The language scripts are written in, and their sandbox | the comparison, when scripts are built |
 | Code signing for Windows and macOS | the drafting app shipping |
-| Real AutoCAD solids inside DWG | the 3D design |
 | A built-in assistant for the drafting app, on the drafter's own API key | the assistant's panel on the drafter's own agent |
 | What the drafting app opens beyond a drawing set | reading and revising a plant's DWG (#70, #71) |
+
+_Resolved since this table was written:_ **Real AutoCAD solids inside DWG** is decided in [ADR-0012](adr/0012-3d-solids-are-acis-3dsolid-in-dwg.md) (native ACIS `3DSOLID` via `acadrust`, pure-Rust sweeps & CSG booleans, 2D wireframe projection with viewport `view_direction`; see [`docs/solids-3d.md`](solids-3d.md)).

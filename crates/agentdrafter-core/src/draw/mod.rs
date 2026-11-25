@@ -744,6 +744,9 @@ struct Drawer<'a> {
     /// Optional explicit viewport bounds in model coordinates (for clipping
     /// `xline`/`ray` and sizing `pdsize <= 0` points).
     view_bounds: Option<Bounds>,
+    /// Orthographic 3D projection camera (top-down XY plan unless looking
+    /// through a viewport with a custom `view_direction`).
+    view: crate::geometry::solid3d::OrthoView,
 }
 
 impl<'a> Drawer<'a> {
@@ -837,6 +840,16 @@ impl<'a> Drawer<'a> {
                 Object::Wipeout(o) => {
                     for &p in &o.points {
                         include(flat(p));
+                    }
+                }
+                Object::Solid3D(o) => {
+                    let m = crate::geometry::solid3d::solid_metrics(&o.body);
+                    for &x in &[m.min[0], m.max[0]] {
+                        for &y in &[m.min[1], m.max[1]] {
+                            for &z in &[m.min[2], m.max[2]] {
+                                include(self.view.project([x, y, z]));
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -1352,7 +1365,10 @@ impl<'a> Drawer<'a> {
         };
         match object {
             Object::Line(line) => stroke(linetype::along(
-                &path(vec![flat(line.from), flat(line.to)]),
+                &path(vec![
+                    self.view.project([line.from.x, line.from.y, line.from.z]),
+                    self.view.project([line.to.x, line.to.y, line.to.z]),
+                ]),
                 pattern,
                 false,
             )),
@@ -1506,7 +1522,13 @@ impl<'a> Drawer<'a> {
                 out
             }
             Object::Polyline(polyline) => {
-                let mut points = path(polyline.points.iter().map(|&p| flat(p)).collect());
+                let mut points = path(
+                    polyline
+                        .points
+                        .iter()
+                        .map(|&p| self.view.project([p.x, p.y, p.z]))
+                        .collect(),
+                );
                 if polyline.closed && !points.is_empty() {
                     points.push(points[0]);
                 }
@@ -1585,6 +1607,15 @@ impl<'a> Drawer<'a> {
             Object::CenterMark(cm) => extra::draw_center_mark(cm, pen, placed),
             Object::CenterLine(cl) => extra::draw_center_line(cl, pen, placed),
             Object::Shape(sh) => extra::draw_shape(self, sh, pen, placed),
+            Object::Solid3D(solid) => {
+                let strokes =
+                    crate::geometry::solid3d::wireframe_strokes_2d(&solid.body, &self.view);
+                let mut runs = Vec::new();
+                for seg in strokes {
+                    runs.extend(linetype::along(&path(seg), pattern, false));
+                }
+                stroke(runs)
+            }
             // An insert, a table, a leader and a multiline draw nothing here:
             // their own methods of [`Drawer`] draw them.
             Object::Insert(_)
@@ -2094,6 +2125,7 @@ pub(crate) fn draw_sheet_for(
             sheet.anno_all_visible.unwrap_or(true)
         },
         view_bounds: None,
+        view: crate::geometry::solid3d::OrthoView::TOP,
     };
     let mut list = DisplayList::default();
     populate_images(sheet, &mut list);
@@ -2146,6 +2178,7 @@ pub(crate) fn draw_objects(
         annotation_scale: sheet.active_annotation_scale().factor(),
         anno_all_visible: true,
         view_bounds: None,
+        view: crate::geometry::solid3d::OrthoView::TOP,
     };
     let mut list = DisplayList::default();
     populate_images(sheet, &mut list);

@@ -1452,6 +1452,11 @@ fn object_value(object: &Object, names: &Names) -> Value {
                 put("oblique", json!(sh.oblique));
             }
         }
+        Object::Solid3D(solid) => {
+            for (k, v) in crate::description::solid3d::solid_body_to_map(&solid.body) {
+                put(&k, v);
+            }
+        }
         Object::Polyline(polyline) => {
             let flat = polyline.is_flat();
             let last = polyline.points.len().saturating_sub(1);

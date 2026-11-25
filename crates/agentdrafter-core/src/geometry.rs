@@ -12,6 +12,7 @@
 pub(crate) mod curve;
 pub mod measure;
 pub mod snap;
+pub(crate) mod solid3d;
 
 use std::f64::consts::TAU;
 
@@ -406,6 +407,17 @@ impl<'a> Reader<'a> {
                 })
             }
             Object::Point(_) | Object::Tolerance(_) | Object::Shape(_) => Vec::new(),
+            Object::Solid3D(solid) => {
+                let mut segs = Vec::new();
+                let mut idx = 0usize;
+                for poly in solid3d::wireframe_polylines_3d(&solid.body, &solid3d::OrthoView::TOP) {
+                    for w in poly.windows(2) {
+                        segs.push((format!("edges[{idx}]"), Curve::Segment { a: w[0], b: w[1] }));
+                        idx += 1;
+                    }
+                }
+                segs
+            }
             Object::Solid(solid) => {
                 let corners: Vec<P3> = solid.corners.iter().map(|&p| p3(p)).collect();
                 outline(&corners)
@@ -777,6 +789,16 @@ impl<'a> Reader<'a> {
             }
             Object::Shape(sh) => {
                 out.push((Insertion, String::new(), p3(sh.position)));
+            }
+            Object::Solid3D(solid) => {
+                let (pts, center) = solid3d::solid_key_points(&solid.body);
+                out.push((Center, String::new(), p3(center)));
+                for (i, pt) in pts.into_iter().enumerate() {
+                    out.push((Endpoint, format!("vertices[{i}]"), p3(pt)));
+                }
+                for (place, curve) in self.curves(object) {
+                    out.push((Midpoint, place, curve.point(0.5)));
+                }
             }
             Object::Arc(_) => {
                 for (_, curve) in self.curves(object) {

@@ -343,7 +343,11 @@ impl Outline {
                     }
                     crossed(pieces, true)
                 }
-                Object::XLine(_) | Object::Ray(_) | Object::Tolerance(_) | Object::Shape(_) => {}
+                Object::XLine(_)
+                | Object::Ray(_)
+                | Object::Tolerance(_)
+                | Object::Shape(_)
+                | Object::Solid3D(_) => {}
                 Object::Arc(a) => crossed(
                     vec![degrees_arc(a.center, a.radius, a.start_angle, a.end_angle)],
                     true,

@@ -30,6 +30,7 @@ pub(crate) mod leader_block;
 pub(crate) mod media;
 pub(crate) mod page_setup;
 pub(crate) mod revision_cloud;
+pub(crate) mod solid3d;
 pub(crate) mod table;
 pub(crate) mod wipeout;
 pub(crate) mod xref;
@@ -73,6 +74,7 @@ pub use revision_cloud::{
     RevisionCloud, RevisionCloudBoundary, RevisionCloudStyle, MOST_REVCLOUD_ARCS,
     REVCLOUD_APPLICATION, REVCLOUD_BULGE, REVCLOUD_CALLIGRAPHY_WIDTH_FACTOR,
 };
+pub use solid3d::{preset_view_direction, BooleanOp, Solid3D, SolidBody, VIEW_DIRECTION_PRESETS};
 pub use table::{
     LaidCell, RowKind, RowStyle, Table, TableCell, TableStyle, LINE_BOX, LINE_STEP,
     STANDARD_TABLE_STYLE,
@@ -398,6 +400,9 @@ pub enum Object {
     /// An SHX shape entity (`SHAPE`).
     #[serde(rename = "shape")]
     Shape(ShxShape),
+    /// A native 3D solid (`3DSOLID`, ACIS B-rep).
+    #[serde(rename = "solid3d")]
+    Solid3D(Solid3D),
 }
 
 impl Object {
@@ -434,6 +439,7 @@ impl Object {
             Object::CenterMark(_) => "center_mark",
             Object::CenterLine(_) => "center_line",
             Object::Shape(_) => "shape",
+            Object::Solid3D(_) => "solid3d",
         }
     }
 
@@ -470,6 +476,7 @@ impl Object {
             Object::CenterMark(o) => &o.layer,
             Object::CenterLine(o) => &o.layer,
             Object::Shape(o) => &o.layer,
+            Object::Solid3D(o) => &o.layer,
         }
     }
 
@@ -506,6 +513,7 @@ impl Object {
             Object::CenterMark(o) => &o.properties,
             Object::CenterLine(o) => &o.properties,
             Object::Shape(o) => &o.properties,
+            Object::Solid3D(o) => &o.properties,
         }
     }
 
@@ -541,6 +549,7 @@ impl Object {
             Object::CenterMark(o) => &mut o.properties,
             Object::CenterLine(o) => &mut o.properties,
             Object::Shape(o) => &mut o.properties,
+            Object::Solid3D(o) => &mut o.properties,
         }
     }
 

@@ -39,6 +39,9 @@ use super::operations::{
     Table, TableOp, Target, TextToFrontWhich, TransformBy, ROW_VALUE_KEY,
 };
 use super::replace::{TextMatchKind, TextMatcher, TextScope};
+use super::solid3d::{
+    build_boolean_solid, build_extrude_solid, build_revolve_solid, extract_profile,
+};
 use super::stretch::{compute_stretch, StretchAction, StretchBox};
 use super::trim_extend::{compute_extend, compute_trim, ExtendEnd, TrimKeep};
 use super::MARK_FILE;
@@ -64,7 +67,7 @@ use crate::error::{Error, ErrorCode};
 use crate::geometry::curve::Curve;
 use crate::geometry::{Reader, SnapRef};
 use crate::import::{drawing_unit, is_dxf, plan, write_plan, BlocksImported, Existing};
-use crate::model::Object;
+use crate::model::{BooleanOp, Object, Point3, Solid3D};
 use crate::set::{set_in_mark, sheet_mark, Notice, SET_SETTINGS_FILE};
 use crate::settings::Settings;
 use crate::text::placement::SheetFonts;
@@ -550,7 +553,15 @@ fn objects_changed(
         };
         let how = match (op.spec.kind, &op.body) {
             (Kind::Delete | Kind::Explode, _) => HowChanged::Deleted,
-            (Kind::Add(..) | Kind::Offset, _) => HowChanged::Added,
+            (
+                Kind::Add(..)
+                | Kind::AddBox
+                | Kind::AddCylinder
+                | Kind::Offset
+                | Kind::Extrude
+                | Kind::Revolve,
+                _,
+            ) => HowChanged::Added,
             (
                 Kind::Fillet,
                 Body::Fillet {
@@ -1412,7 +1423,9 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::Break { target, .. }
             | Body::TableEdit { target, .. }
             | Body::LeaderLine { target, .. }
-            | Body::DimensionFrom { target, .. } => match target {
+            | Body::DimensionFrom { target, .. }
+            | Body::Extrude { target, .. }
+            | Body::Revolve { target, .. } => match target {
                 Target::Id { sheet, .. } => (sheet, "target.id"),
                 Target::Name {
                     sheet: Some(sheet), ..
@@ -1517,7 +1530,9 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 }
                 continue;
             }
-            Body::Join { targets, .. } | Body::Explode { targets, .. } => {
+            Body::Join { targets, .. }
+            | Body::Explode { targets, .. }
+            | Body::SolidBoolean { targets, .. } => {
                 for (t, key) in targets {
                     let (sheet, field) = match t {
                         Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
@@ -1633,8 +1648,10 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         draw_order,
     } = &op.body
     {
-        let Kind::Add(object, _) = op.spec.kind else {
-            unreachable!("an add is an add")
+        let object = match op.spec.kind {
+            Kind::Add(object, _) => object,
+            Kind::AddBox | Kind::AddCylinder => "solid3d",
+            _ => unreachable!("an add is an add"),
         };
         let (file, list, sheets, first) = match to {
             AddTo::Sheet(name) => {
@@ -2063,6 +2080,76 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         return apply_add_mline_style(at, op, to, name, style);
     }
 
+    if let Body::Extrude {
+        target,
+        height,
+        direction,
+        taper_angle,
+        erase_source,
+        layer,
+        id,
+        name,
+    } = &op.body
+    {
+        return apply_extrude(
+            at,
+            op,
+            target,
+            *height,
+            *direction,
+            *taper_angle,
+            *erase_source,
+            layer.as_deref(),
+            id.as_deref(),
+            name.as_deref(),
+        );
+    }
+
+    if let Body::Revolve {
+        target,
+        axis_origin,
+        axis_direction,
+        angle,
+        erase_source,
+        layer,
+        id,
+        name,
+    } = &op.body
+    {
+        return apply_revolve(
+            at,
+            op,
+            target,
+            axis_origin,
+            *axis_direction,
+            *angle,
+            *erase_source,
+            layer.as_deref(),
+            id.as_deref(),
+            name.as_deref(),
+            settings,
+        );
+    }
+
+    if let Body::SolidBoolean {
+        op: bool_op,
+        targets,
+        layer,
+        id,
+        name,
+    } = &op.body
+    {
+        return apply_solid_boolean(
+            at,
+            op,
+            *bool_op,
+            targets,
+            layer.as_deref(),
+            id.as_deref(),
+            name.as_deref(),
+        );
+    }
+
     if let Body::Block {
         library,
         import: Some(import),
@@ -2170,6 +2257,9 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::SetObjectScales { .. }
         | Body::SetPointStyle { .. }
         | Body::AddMLineStyle { .. }
+        | Body::Extrude { .. }
+        | Body::Revolve { .. }
+        | Body::SolidBoolean { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2668,6 +2758,9 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::SetObjectScales { .. }
         | Body::SetPointStyle { .. }
         | Body::AddMLineStyle { .. }
+        | Body::Extrude { .. }
+        | Body::Revolve { .. }
+        | Body::SolidBoolean { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -10587,6 +10680,643 @@ fn apply_join(
     }
 }
 
+/// Extrudes an existing closed 2D profile (`Polyline`, `Circle`, or whole
+/// `Ellipse`) into a native ACIS `solid3d`: AutoCAD's `EXTRUDE` (`EXT`).
+#[allow(clippy::too_many_arguments)]
+fn apply_extrude(
+    at: &mut Attempt,
+    op: &Operation,
+    target: &Target,
+    height: f64,
+    direction: Option<Point3>,
+    taper_angle: f64,
+    erase_source: bool,
+    layer: Option<&str>,
+    id: Option<&str>,
+    name: Option<&str>,
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+    let found = match resolve(at, target, op) {
+        Ok(found) => found,
+        Err(applied) => return *applied,
+    };
+    let reach = at.reach(found.file, found.row);
+    if let Some(refusal) = many_paths(files, found.file, op, "target") {
+        return refusal;
+    }
+    if erase_source {
+        if let Some(locked_layer) =
+            batch_object_locked_layer(at, files, found.row, found.file, found.list, found.index)
+        {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::Locked,
+                    format!(
+                        "`{}` is on layer `{locked_layer}`, which is locked; cannot erase source \
+                         without unlocking it first",
+                        found.id
+                    ),
+                    "target",
+                ),
+            );
+        }
+    }
+    let rows = match at.rows_now() {
+        Ok(rows) => rows,
+        Err(e) => return fail(reach, e),
+    };
+    let record = match sheet_record(at, &rows, found.row, &mut Vec::new()) {
+        Ok(record) => record,
+        Err(e) => return fail(reach, e),
+    };
+    let local = found
+        .id
+        .split_once(ID_SEPARATOR)
+        .map_or(found.id.as_str(), |(_, l)| l);
+    let in_row = matches!(found.file, FileRef::Rows(_));
+    let Some(obj_idx) = record
+        .objects
+        .iter()
+        .position(|o| o.in_row == in_row && o.id.eq_ignore_ascii_case(local))
+    else {
+        return fail(
+            reach,
+            op_err(
+                ErrorCode::UnknownName,
+                format!("could not read `{}` to extrude it", found.id),
+                "target",
+            ),
+        );
+    };
+    let base = &record.sheet.objects[obj_idx];
+    let space = crate::query::space_of(&record.sheet, obj_idx);
+    let profile = match extract_profile(base, op.spec.name) {
+        Ok(p) => p,
+        Err(e) => return fail(reach, op_err(e.code, e.message, "target")),
+    };
+    let solid = match build_extrude_solid(
+        profile.points,
+        profile.bulges,
+        profile.exact_circle,
+        height,
+        direction,
+        taper_angle,
+        layer.map(str::to_owned).unwrap_or(profile.layer),
+        profile.properties,
+    ) {
+        Ok(s) => s,
+        Err(e) => return fail(reach, op_err(e.code, e.message, "height")),
+    };
+    let new_object = Object::Solid3D(solid);
+    let new_local_id = match id {
+        Some(explicit) => explicit.to_owned(),
+        None => {
+            let mut taken: BTreeSet<String> = BTreeSet::new();
+            for &k in &reach {
+                match at.objects(k) {
+                    Ok(objects) => {
+                        taken.extend(objects.into_iter().map(|o| o.3.id.to_lowercase()));
+                    }
+                    Err(e) => return fail(reach.clone(), e),
+                }
+            }
+            (1..)
+                .map(|n| format!("solid3d-{n}"))
+                .find(|candidate| !taken.contains(&candidate.to_lowercase()))
+                .expect("a free id")
+        }
+    };
+    let (kind, keys) = object_to_record_keys(&new_object, &new_local_id, name, space.as_deref());
+    let path = match found.file {
+        FileRef::Rows(f) => files.rows_files[f].path.clone(),
+        FileRef::Template(t) => files.templates[t].path.clone(),
+    };
+    let rec = match at.file(found.file) {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+    let added = match rec.add(found.list, kind, &keys, op.index) {
+        Ok(idx) => idx,
+        Err(e) => return fail(reach, op_err(e.code, e.message, "")),
+    };
+    let after = rec.object_text(found.list, added);
+    let mut ids_written = Vec::new();
+    let mut deleted = Vec::new();
+    if erase_source {
+        ids_written = rec.delete(found.list, found.index, op.index);
+        deleted.push((found.id.clone(), reach.clone()));
+    }
+    let full_id = format!("{}{ID_SEPARATOR}{new_local_id}", files.name(found.row));
+    let h_str = crate::description::number_text(height);
+    let erase_note = if erase_source {
+        format!(" and erases `{}`", found.id)
+    } else {
+        String::new()
+    };
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: Some(full_id.clone()),
+            before: None,
+            after: Some(after),
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written,
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
+            split_id: None,
+            deleted,
+            created: Vec::new(),
+            snapped: Vec::new(),
+            message: format!(
+                "extrudes `{}` by {h_str} ({}) to solid3d `{full_id}`{erase_note}",
+                found.id, files.units
+            ),
+        }),
+        sheets: reach,
+        refuse: false,
+    }
+}
+
+/// Revolves an existing closed 2D profile around a 3D axis into a native ACIS
+/// `solid3d`: AutoCAD's `REVOLVE` (`REV`).
+#[allow(clippy::too_many_arguments)]
+fn apply_revolve(
+    at: &mut Attempt,
+    op: &Operation,
+    target: &Target,
+    axis_origin: &OpPoint,
+    axis_direction: Point3,
+    angle: f64,
+    erase_source: bool,
+    layer: Option<&str>,
+    id: Option<&str>,
+    name: Option<&str>,
+    settings: &Settings,
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+    let found = match resolve(at, target, op) {
+        Ok(found) => found,
+        Err(applied) => return *applied,
+    };
+    let reach = at.reach(found.file, found.row);
+    if let Some(refusal) = many_paths(files, found.file, op, "target") {
+        return refusal;
+    }
+    if erase_source {
+        if let Some(locked_layer) =
+            batch_object_locked_layer(at, files, found.row, found.file, found.list, found.index)
+        {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::Locked,
+                    format!(
+                        "`{}` is on layer `{locked_layer}`, which is locked; cannot erase source \
+                         without unlocking it first",
+                        found.id
+                    ),
+                    "target",
+                ),
+            );
+        }
+    }
+    let rows = match at.rows_now() {
+        Ok(rows) => rows,
+        Err(e) => return fail(reach, e),
+    };
+    let record = match sheet_record(at, &rows, found.row, &mut Vec::new()) {
+        Ok(record) => record,
+        Err(e) => return fail(reach, e),
+    };
+    let local = found
+        .id
+        .split_once(ID_SEPARATOR)
+        .map_or(found.id.as_str(), |(_, l)| l);
+    let in_row = matches!(found.file, FileRef::Rows(_));
+    let Some(obj_idx) = record
+        .objects
+        .iter()
+        .position(|o| o.in_row == in_row && o.id.eq_ignore_ascii_case(local))
+    else {
+        return fail(
+            reach,
+            op_err(
+                ErrorCode::UnknownName,
+                format!("could not read `{}` to revolve it", found.id),
+                "target",
+            ),
+        );
+    };
+    let base = &record.sheet.objects[obj_idx];
+    let space = crate::query::space_of(&record.sheet, obj_idx);
+    let profile = match extract_profile(base, op.spec.name) {
+        Ok(p) => p,
+        Err(e) => return fail(reach, op_err(e.code, e.message, "target")),
+    };
+    let mut snapped = Vec::new();
+    let origin_xyz = match axis_origin {
+        OpPoint::At(xyz) => *xyz,
+        OpPoint::Snap(snap) => match snapped_points(at, op, &reach, &[snap], settings) {
+            Ok(mut pts) => {
+                let (xyz, res) = pts.remove(0);
+                snapped.push(res);
+                xyz
+            }
+            Err(e) => return fail(reach, e),
+        },
+    };
+    let solid = match build_revolve_solid(
+        profile.points,
+        profile.bulges,
+        Point3::new(origin_xyz[0], origin_xyz[1], origin_xyz[2]),
+        axis_direction,
+        angle,
+        layer.map(str::to_owned).unwrap_or(profile.layer),
+        profile.properties,
+    ) {
+        Ok(s) => s,
+        Err(e) => return fail(reach, op_err(e.code, e.message, "angle")),
+    };
+    let new_object = Object::Solid3D(solid);
+    let new_local_id = match id {
+        Some(explicit) => explicit.to_owned(),
+        None => {
+            let mut taken: BTreeSet<String> = BTreeSet::new();
+            for &k in &reach {
+                match at.objects(k) {
+                    Ok(objects) => {
+                        taken.extend(objects.into_iter().map(|o| o.3.id.to_lowercase()));
+                    }
+                    Err(e) => return fail(reach.clone(), e),
+                }
+            }
+            (1..)
+                .map(|n| format!("solid3d-{n}"))
+                .find(|candidate| !taken.contains(&candidate.to_lowercase()))
+                .expect("a free id")
+        }
+    };
+    let (kind, keys) = object_to_record_keys(&new_object, &new_local_id, name, space.as_deref());
+    let path = match found.file {
+        FileRef::Rows(f) => files.rows_files[f].path.clone(),
+        FileRef::Template(t) => files.templates[t].path.clone(),
+    };
+    let rec = match at.file(found.file) {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+    let added = match rec.add(found.list, kind, &keys, op.index) {
+        Ok(idx) => idx,
+        Err(e) => return fail(reach, op_err(e.code, e.message, "")),
+    };
+    let after = rec.object_text(found.list, added);
+    let mut ids_written = Vec::new();
+    let mut deleted = Vec::new();
+    if erase_source {
+        ids_written = rec.delete(found.list, found.index, op.index);
+        deleted.push((found.id.clone(), reach.clone()));
+    }
+    let full_id = format!("{}{ID_SEPARATOR}{new_local_id}", files.name(found.row));
+    let ang_str = crate::description::number_text(angle);
+    let erase_note = if erase_source {
+        format!(" and erases `{}`", found.id)
+    } else {
+        String::new()
+    };
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: Some(full_id.clone()),
+            before: None,
+            after: Some(after),
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written,
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
+            split_id: None,
+            deleted,
+            created: Vec::new(),
+            snapped,
+            message: format!(
+                "revolves `{}` by {ang_str}° to solid3d `{full_id}`{erase_note}",
+                found.id
+            ),
+        }),
+        sheets: reach,
+        refuse: false,
+    }
+}
+
+/// Evaluates a CSG boolean (`UNION`, `SUBTRACT`, `INTERSECT`) over two or more
+/// `solid3d` objects. The first solid's slot carries on (with `id` override if
+/// supplied) and the remaining operand solids are deleted.
+fn apply_solid_boolean(
+    at: &mut Attempt,
+    op: &Operation,
+    bool_op: BooleanOp,
+    targets: &[(Target, String)],
+    layer: Option<&str>,
+    id: Option<&str>,
+    name: Option<&str>,
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+    let mut found: Vec<(Found, &str)> = Vec::with_capacity(targets.len());
+    let mut reach_set: BTreeSet<usize> = BTreeSet::new();
+    for (t, key) in targets {
+        match resolve(at, t, op) {
+            Ok(f) => {
+                reach_set.extend(at.reach(f.file, f.row));
+                found.push((f, key.as_str()));
+            }
+            Err(applied) => return keyed(*applied, op, key),
+        }
+    }
+    let reach: Vec<usize> = reach_set.into_iter().collect();
+    let row0 = found[0].0.row;
+
+    for (i, (f, key)) in found.iter().enumerate() {
+        if let Some(refusal) = many_paths(files, f.file, op, key) {
+            return refusal;
+        }
+        if f.row != row0 {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::BadValue,
+                    format!(
+                        "`{}` is on sheet `{}`, not on sheet `{}`",
+                        f.id,
+                        files.name(f.row),
+                        files.name(row0)
+                    ),
+                    key,
+                ),
+            );
+        }
+        if let Some((_, first_key)) = found[..i]
+            .iter()
+            .find(|(g, _)| (g.file, g.list, g.index) == (f.file, f.list, f.index))
+        {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::BadValue,
+                    format!("`{}` is named twice, at {first_key} and {key}", f.id),
+                    key,
+                ),
+            );
+        }
+        if let Some(locked_layer) =
+            batch_object_locked_layer(at, files, f.row, f.file, f.list, f.index)
+        {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::Locked,
+                    format!(
+                        "`{}` is on layer `{locked_layer}`, which is locked; unlock it first with \
+                         change_layer, set: {{\"locked\": false}}",
+                        f.id
+                    ),
+                    key,
+                ),
+            );
+        }
+        if i > 0 && f.file != found[0].0.file {
+            let shared = |file: FileRef| matches!(file, FileRef::Template(t) if files.templates[t].sheets.len() > 1);
+            if shared(found[0].0.file) || shared(f.file) {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "cannot combine a shared template solid with a row-only solid on `{}`",
+                            files.name(row0)
+                        ),
+                        key,
+                    ),
+                );
+            }
+        }
+    }
+
+    let rows = match at.rows_now() {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+    let record = match sheet_record(at, &rows, row0, &mut Vec::new()) {
+        Ok(r) => r,
+        Err(e) => return fail(reach, e),
+    };
+
+    let mut indices = Vec::with_capacity(found.len());
+    for (f, key) in &found {
+        let local =
+            f.id.split_once(ID_SEPARATOR)
+                .map_or(f.id.as_str(), |(_, l)| l);
+        let in_row = matches!(f.file, FileRef::Rows(_));
+        let Some(idx) = record
+            .objects
+            .iter()
+            .position(|o| o.in_row == in_row && o.id.eq_ignore_ascii_case(local))
+        else {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::UnknownName,
+                    format!("could not read `{}` for `{}`", f.id, bool_op.name()),
+                    key,
+                ),
+            );
+        };
+        if let Some(&first_idx) = indices.first() {
+            if !record.sheet.same_space(first_idx, idx) {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{}` is in a different space from `{}`",
+                            f.id, found[0].0.id
+                        ),
+                        key,
+                    ),
+                );
+            }
+        }
+        indices.push(idx);
+    }
+
+    let mut solids: Vec<&Solid3D> = Vec::with_capacity(indices.len());
+    for (&idx, (f, key)) in indices.iter().zip(&found) {
+        match &record.sheet.objects[idx] {
+            Object::Solid3D(s) => solids.push(s),
+            other => {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{}` expects 3D solids (`solid3d`), but `{}` is a {}",
+                            bool_op.name(),
+                            f.id,
+                            other.type_name()
+                        ),
+                        key,
+                    ),
+                );
+            }
+        }
+    }
+
+    let combined = match build_boolean_solid(bool_op, &solids, layer.map(str::to_owned)) {
+        Ok(s) => Object::Solid3D(s),
+        Err(e) => return fail(reach, op_err(e.code, e.message, "")),
+    };
+
+    let f0 = &found[0].0;
+    let local0 = match id {
+        Some(explicit) => explicit.to_owned(),
+        None => f0
+            .id
+            .split_once(ID_SEPARATOR)
+            .map_or(f0.id.as_str(), |(_, l)| l)
+            .to_owned(),
+    };
+    let eff_name = name.or(record.objects[indices[0]].name.as_deref());
+    let space = crate::query::space_of(&record.sheet, indices[0]);
+    let (bkind, bkeys) = object_to_record_keys(&combined, &local0, eff_name, space.as_deref());
+
+    let path = match f0.file {
+        FileRef::Rows(f) => files.rows_files[f].path.clone(),
+        FileRef::Template(t) => files.templates[t].path.clone(),
+    };
+    let (before, after) = {
+        let rec0 = match at.file(f0.file) {
+            Ok(r) => r,
+            Err(e) => return fail(reach, e),
+        };
+        let b = rec0.object_text(f0.list, f0.index);
+        if let Err(e) = rec0.replace_object(f0.list, f0.index, bkind, &bkeys, op.index) {
+            return fail(reach, op_err(e.code, e.message, found[0].1));
+        }
+        let a = rec0.object_text(f0.list, f0.index);
+        (b, a)
+    };
+
+    let mut to_delete: Vec<(FileRef, ObjectList, usize, String, Vec<usize>)> = found[1..]
+        .iter()
+        .map(|(f, _)| {
+            (
+                f.file,
+                f.list,
+                f.index,
+                f.id.clone(),
+                at.reach(f.file, f.row),
+            )
+        })
+        .collect();
+    let deleted_in_order: Vec<(String, Vec<usize>)> = to_delete
+        .iter()
+        .map(|(_, _, _, id, on)| (id.clone(), on.clone()))
+        .collect();
+    to_delete.sort_by_key(|a| std::cmp::Reverse(a.2));
+
+    let mut ids_written: Vec<String> = Vec::new();
+    for (file, list, idx, _, on) in to_delete {
+        let rec = match at.file(file) {
+            Ok(r) => r,
+            Err(e) => return fail(reach, e),
+        };
+        let kept = rec.delete(list, idx, op.index);
+        for place in kept {
+            for &s in &on {
+                ids_written.push(format!("{}/{place}", files.name(s)));
+            }
+        }
+    }
+
+    let kept_full_id = format!("{}{ID_SEPARATOR}{local0}", files.name(row0));
+    let removed_list: Vec<String> = deleted_in_order
+        .iter()
+        .map(|(id, _)| format!("`{id}`"))
+        .collect();
+    let message = format!(
+        "applies `{}` to {} solids into solid3d `{kept_full_id}` (removed {})",
+        bool_op.name(),
+        found.len(),
+        removed_list.join(", ")
+    );
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: Some(kept_full_id),
+            before: Some(before),
+            after: Some(after),
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written,
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            replacements: Vec::new(),
+            attributes_set: Vec::new(),
+            split_id: None,
+            deleted: deleted_in_order,
+            created: Vec::new(),
+            snapped: Vec::new(),
+            message,
+        }),
+        sheets: reach,
+        refuse: false,
+    }
+}
+
 /// Moves endpoints, vertices and rigid objects lying inside `corners` by
 /// `motion`, leaving vertices outside the box fixed: AutoCAD's `STRETCH` (`S`).
 #[allow(clippy::too_many_arguments)]
@@ -12647,6 +13377,8 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::Trim { target, .. }
         | Body::Extend { target, .. }
         | Body::Break { target, .. }
+        | Body::Extrude { target, .. }
+        | Body::Revolve { target, .. }
         | Body::Fillet {
             mode: CornerMode::Polyline { target },
             ..
@@ -12671,7 +13403,8 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::DrawOrder { targets, .. }
         | Body::Join { targets, .. }
         | Body::Explode { targets, .. }
-        | Body::SetObjectScales { targets, .. } => targets.iter().any(|(t, _)| reaches(t)),
+        | Body::SetObjectScales { targets, .. }
+        | Body::SolidBoolean { targets, .. } => targets.iter().any(|(t, _)| reaches(t)),
         Body::Block { library, .. } => {
             files.library(library.as_deref()).ok() == files.library_of[files.template_of[k]]
         }
@@ -12766,7 +13499,10 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
         | Body::SetAnnotationScale { .. }
         | Body::SetObjectScales { .. }
         | Body::SetPointStyle { .. }
-        | Body::AddMLineStyle { .. } => {
+        | Body::AddMLineStyle { .. }
+        | Body::Extrude { .. }
+        | Body::Revolve { .. }
+        | Body::SolidBoolean { .. } => {
             let key = rest.rsplit('.').next().unwrap_or("");
             if key.is_empty() {
                 "name".to_owned()
@@ -13024,6 +13760,8 @@ fn target_words(op: &Operation) -> String {
         | Body::Trim { target, .. }
         | Body::Extend { target, .. }
         | Body::Break { target, .. }
+        | Body::Extrude { target, .. }
+        | Body::Revolve { target, .. }
         | Body::Fillet {
             mode: CornerMode::Polyline { target },
             ..
@@ -13151,6 +13889,10 @@ fn target_words(op: &Operation) -> String {
             ..
         } => format!("point style of sheet `{s}`'s template"),
         Body::AddMLineStyle { name, .. } => format!("multiline style `{name}`"),
+        Body::SolidBoolean { targets, .. } => match targets.as_slice() {
+            [(only, _)] => only.words(),
+            many => format!("{} solids", many.len()),
+        },
         Body::SetObjectScales { targets, .. } => match targets.as_slice() {
             [(only, _)] => only.words(),
             many => format!("{} objects", many.len()),

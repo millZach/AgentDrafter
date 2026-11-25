@@ -59,6 +59,7 @@ mod leader;
 mod media;
 mod page_setup;
 mod revise;
+mod solid3d;
 mod table;
 mod text;
 mod wipeout;
@@ -1340,6 +1341,7 @@ fn dwg_object(
         Object::Point(pt) => EntityType::Point(extra::dwg_point(pt)),
         Object::XLine(xl) => EntityType::XLine(extra::dwg_xline(xl)),
         Object::Ray(ray) => EntityType::Ray(extra::dwg_ray(ray)),
+        Object::Solid3D(solid) => EntityType::Solid3D(solid3d::dwg_solid3d(solid)?),
         Object::Insert(insert) => {
             let Some(definition) = blocks.iter().find(|b| b.name == insert.block) else {
                 return Err(Error::new(
@@ -3000,6 +3002,7 @@ fn read_object_in(
         EntityType::Underlay(u) => {
             Object::PdfUnderlay(media::read_pdf_underlay(drawing?, u, layer)?)
         }
+        EntityType::Solid3D(solid) => Object::Solid3D(solid3d::read_solid3d(solid, layer)?),
         EntityType::Polyline3D(spatial)
             if !spatial.flags.spline_fit
                 && !spatial.flags.is_3d_mesh

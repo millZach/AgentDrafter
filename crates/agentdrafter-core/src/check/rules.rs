@@ -734,7 +734,8 @@ impl Sheet<'_> {
             | Object::Tolerance(_)
             | Object::CenterMark(_)
             | Object::CenterLine(_)
-            | Object::Shape(_) => Drawn::Line,
+            | Object::Shape(_)
+            | Object::Solid3D(_) => Drawn::Line,
             Object::Hatch(_)
             | Object::Solid(_)
             | Object::Donut(_)

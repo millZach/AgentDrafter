@@ -85,8 +85,12 @@ AutoCAD's paper-space tab that holds a sheet: its name, its paper, its paper spa
 _Avoid_: sheet (a sheet is the page; a layout holds one), tab, paper space (the space a layout draws in)
 
 **Viewport**:
-A window on a layout's paper that shows model space at a scale, centred on a model point, its view centre, as AutoCAD's MVIEW makes one: seen from above, rectangular or clipped to a clipping boundary, cut at its edge, and locked or not against its view being changed, with layers frozen in it alone or none. It is an object of paper space, and its frame plots as AutoCAD's does: a rectangle as its thinnest line, a clipping boundary with the viewport's pen.
+A window on a layout's paper that shows model space at a scale, centred on a model point, its view centre, as AutoCAD's MVIEW makes one: seen from above (`top`, `[0, 0, 1]`) or along an optional `view_direction` (such as `front`, `right`, `se_isometric`, or any non-zero `[x, y, z]`), rectangular or clipped to a clipping boundary, cut at its edge, and locked or not against its view being changed, with layers frozen in it alone or none. It is an object of paper space, and its frame plots as AutoCAD's does: a rectangle as its thinnest line, a clipping boundary with the viewport's pen.
 _Avoid_: view, window (a window is a selection box), viewport alone for AutoCAD's model-space tiles (VPORTS)
+
+**View direction**:
+The orthographic direction vector (`view_direction` on a viewport; AutoCAD's `VIEWPORT` group 16/26/36, named preset `top`/`bottom`/`front`/`back`/`left`/`right`/`sw_isometric`/`se_isometric`/`ne_isometric`/`nw_isometric` or `[x, y, z]`) looking towards the model-space origin when projecting 3D geometry and 3D solids through a paper-space viewport.
+_Avoid_: camera (the projection is orthographic), angle
 
 **Clipping boundary**:
 The closed polyline, its segments straight or arcs, or the circle on a layout's paper that a viewport is clipped to instead of its rectangle, as AutoCAD's VPCLIP and MVIEW's Object and Polygonal options make it: model space shows inside it alone, its ink cut there, and it is the viewport's frame. The viewport's window is the box round it.
@@ -155,6 +159,14 @@ _Avoid_: dot, ring, filled circle
 **2D solid**:
 A filled triangle or quadrilateral, AutoCAD's SOLID object. A sheet description lists its corners round the outline.
 _Avoid_: solid (alone it is a hatch's `SOLID` fill, or AutoCAD's 3D solid), filled polygon
+
+**3D solid**:
+A closed 3D solid body (`solid3d` in a sheet description or block library; AutoCAD's native ACIS `3DSOLID` per ADR-0012): an exact analytic primitive (`box`, `cylinder`, `cone`, `sphere`, `torus`, `wedge`, `pyramid`), a swept solid (`extrude`, `revolve`), a CSG boolean (`union`, `subtract`, `intersect`), or a closed 2-manifold planar polyhedron (`mesh`). Drawn as 2D wireframe (feature edges and view-dependent silhouettes) through the single drawing pipeline, queried for 3D `extents`, `volume`, `surface_area`, and snaps, and created or combined with `add_solid3d` (`3DSOLID`), `add_box` (`BOX`), `add_cylinder` (`CYLINDER`), `extrude` (`EXTRUDE`/`EXT`), `revolve` (`REVOLVE`/`REV`), `union` (`UNION`/`UNI`), `subtract` (`SUBTRACT`/`SU`), and `intersect` (`INTERSECT`/`IN`).
+_Avoid_: mesh (a `mesh` is only one construction kind of `solid3d`), 3D model, solid (ambiguous with 2D solid and solid hatch)
+
+**CSG boolean**:
+A constructive solid geometry operation (`union`, `subtract`, or `intersect`) combining two or more 3D solids into one closed 2-manifold 3D solid.
+_Avoid_: merge, combine, clip
 
 **Revision cloud**:
 A closed lightweight polyline of outward-bowing (or reversed, inward-bowing) arcs drawn round a rectangle, a polygon or an existing object's extents to call out a revised region, as AutoCAD's REVCLOUD draws it, in `normal` or tapered `calligraphy` style and carrying AutoCAD's `RevcloudProps` extended data so AutoCAD's REVCLOUD can modify it.

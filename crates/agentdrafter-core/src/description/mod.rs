@@ -47,6 +47,7 @@ mod revision_cloud;
 pub(crate) mod schema;
 mod set;
 mod set_schema;
+pub(crate) mod solid3d;
 mod strict_yaml;
 mod table;
 mod table_schema;

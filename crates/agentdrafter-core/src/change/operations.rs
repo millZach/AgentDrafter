@@ -21,7 +21,9 @@ use crate::description::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::geometry::{SnapKind, SnapRef};
-use crate::model::{DimensionKind, ISO_DIMENSION_STYLE, STANDARD_DIMENSION_STYLE};
+use crate::model::{
+    BooleanOp, DimensionKind, Point3, ISO_DIMENSION_STYLE, STANDARD_DIMENSION_STYLE,
+};
 use crate::query::snap::{check_shape, no_kind};
 use crate::query::Selection;
 use crate::units::{parse_length, LengthError, Unit};
@@ -136,6 +138,17 @@ pub(crate) enum Kind {
     /// Adds or updates a named multiline style (`mline_styles` / `ACAD_MLINESTYLE`):
     /// AutoCAD's MLSTYLE.
     AddMLineStyle,
+    /// Adds a 3D box solid (`solid3d` with `kind: box`): AutoCAD's BOX.
+    AddBox,
+    /// Adds a 3D cylinder solid (`solid3d` with `kind: cylinder`): AutoCAD's CYLINDER.
+    AddCylinder,
+    /// Extrudes a closed 2D profile (closed polyline, circle, or whole ellipse) into a
+    /// 3D solid: AutoCAD's EXTRUDE (EXT).
+    Extrude,
+    /// Revolves a closed 2D profile around a 3D axis into a 3D solid: AutoCAD's REVOLVE (REV).
+    Revolve,
+    /// Combines 3D solids by CSG boolean (`UNION` / `SUBTRACT` / `INTERSECT`).
+    SolidBoolean(BooleanOp),
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -324,6 +337,11 @@ impl Spec {
             Kind::Add("xline", None) => &["XL"],
             Kind::Add("mline", None) => &["ML"],
             Kind::Add("tolerance", None) => &["TOL"],
+            Kind::Extrude => &["EXT"],
+            Kind::Revolve => &["REV"],
+            Kind::SolidBoolean(BooleanOp::Union) => &["UNI"],
+            Kind::SolidBoolean(BooleanOp::Subtract) => &["SU"],
+            Kind::SolidBoolean(BooleanOp::Intersect) => &["IN"],
             _ => &[],
         }
     }
@@ -375,7 +393,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 102] = [
+pub(crate) const SPECS: [Spec; 110] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -399,6 +417,7 @@ pub(crate) const SPECS: [Spec; 102] = [
     add("add_center_mark", "CENTERMARK", "center_mark"),
     add("add_center_line", "CENTERLINE", "center_line"),
     add("add_shape", "SHAPE", "shape"),
+    add("add_solid3d", "3DSOLID", "solid3d"),
     add("insert_block", "INSERT", "insert"),
     add("add_table", "TABLE", "table"),
     add("add_mleader", "MLEADER", "mleader"),
@@ -669,6 +688,41 @@ pub(crate) const SPECS: [Spec; 102] = [
         name: "add_mline_style",
         alias: "MLSTYLE",
         kind: Kind::AddMLineStyle,
+    },
+    Spec {
+        name: "add_box",
+        alias: "BOX",
+        kind: Kind::AddBox,
+    },
+    Spec {
+        name: "add_cylinder",
+        alias: "CYLINDER",
+        kind: Kind::AddCylinder,
+    },
+    Spec {
+        name: "extrude",
+        alias: "EXTRUDE",
+        kind: Kind::Extrude,
+    },
+    Spec {
+        name: "revolve",
+        alias: "REVOLVE",
+        kind: Kind::Revolve,
+    },
+    Spec {
+        name: "union",
+        alias: "UNION",
+        kind: Kind::SolidBoolean(BooleanOp::Union),
+    },
+    Spec {
+        name: "subtract",
+        alias: "SUBTRACT",
+        kind: Kind::SolidBoolean(BooleanOp::Subtract),
+    },
+    Spec {
+        name: "intersect",
+        alias: "INTERSECT",
+        kind: Kind::SolidBoolean(BooleanOp::Intersect),
     },
 ];
 
@@ -1317,6 +1371,50 @@ fn does(spec: &Spec) -> String {
                                 linetype), optional background `fill_color`, `display_joints`, \
                                 `start_angle`, `end_angle`, and end-cap flags. AutoCAD's MLSTYLE."
             .to_owned(),
+        Kind::AddBox => "Adds an axis-aligned 3D box solid (`solid3d` with `kind: box`), written \
+                         as a native ACIS `3DSOLID` in DWG/DXF: `origin` (minimum XYZ corner, \
+                         which may be a snapped point), `length` (X), `width` (Y), and `height` \
+                         (Z), to a sheet's row (`sheet`) or a template (`template`). AutoCAD's BOX."
+            .to_owned(),
+        Kind::AddCylinder => "Adds a 3D circular cylinder solid (`solid3d` with `kind: cylinder`), \
+                              written as a native ACIS `3DSOLID` in DWG/DXF: `base` (bottom circle \
+                              centre, which may be a snapped point), `radius`, and `height` (+Z), \
+                              to a sheet's row (`sheet`) or a template (`template`). AutoCAD's \
+                              CYLINDER."
+            .to_owned(),
+        Kind::Extrude => "Extrudes an existing closed 2D profile (`target`: a closed polyline, \
+                          circle, or whole ellipse) by `height` along optional `direction` \
+                          (default `[0, 0, 1]`) with optional `taper_angle` (degrees, `-85..85`) \
+                          into a native ACIS `3DSOLID` (`solid3d`). Erases the source profile by \
+                          default (`erase_source: false` keeps it). AutoCAD's EXTRUDE (EXT)."
+            .to_owned(),
+        Kind::Revolve => "Revolves an existing closed 2D profile (`target`: a closed polyline, \
+                          circle, or whole ellipse) around the 3D axis through `axis_origin` \
+                          (point or snapped point) along `axis_direction` by `angle` degrees \
+                          (default `360`, `(0, 360]`) into a native ACIS `3DSOLID` (`solid3d`). \
+                          Erases the source profile by default (`erase_source: false` keeps it). \
+                          AutoCAD's REVOLVE (REV)."
+            .to_owned(),
+        Kind::SolidBoolean(BooleanOp::Union) => {
+            "Combines two or more 3D solids (`targets`) by CSG union into one native ACIS \
+             `3DSOLID` (`solid3d`). The first solid's ID carries on (unless `id` overrides it) \
+             and the remaining solids are removed. AutoCAD's UNION (UNI)."
+                .to_owned()
+        }
+        Kind::SolidBoolean(BooleanOp::Subtract) => {
+            "Subtracts one or more 3D solids (`subtract`) from a base 3D solid (`target`) by CSG \
+             difference into one native ACIS `3DSOLID` (`solid3d`). The base solid's ID carries on \
+             (unless `id` overrides it) and the subtracted tool solids are removed. AutoCAD's \
+             SUBTRACT (SU)."
+                .to_owned()
+        }
+        Kind::SolidBoolean(BooleanOp::Intersect) => {
+            "Intersects two or more 3D solids (`targets`) by CSG intersection into one native ACIS \
+             `3DSOLID` (`solid3d`) holding their shared volume. The first solid's ID carries on \
+             (unless `id` overrides it) and the remaining solids are removed. AutoCAD's INTERSECT \
+             (IN)."
+                .to_owned()
+        }
     }
 }
 
@@ -3414,6 +3512,317 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
             }
             schema
         }
+        Kind::AddBox => {
+            let mut props = Map::new();
+            props.insert(
+                "sheet".into(),
+                json!({
+                    "description": "The sheet to add the 3D box to, in its row (optional on an original DWG).",
+                    "$ref": "#/$defs/sheet_name",
+                }),
+            );
+            props.insert(
+                "template".into(),
+                json!({
+                    "description": "The template to add the 3D box to. Give sheet or template.",
+                    "$ref": "#/$defs/template_path",
+                }),
+            );
+            props.insert(
+                "draw_order".into(),
+                json!({
+                    "description": "Optional draw-order placement: front, back, {\"above\": target}, or {\"under\": target}.",
+                    "$ref": "#/$defs/draw_order",
+                }),
+            );
+            props.insert(
+                "origin".into(),
+                json!({
+                    "description": "Minimum corner `[x, y, z]` of the box (or a snapped point).",
+                    "$ref": "#/$defs/snapped_point",
+                }),
+            );
+            props.insert(
+                "size".into(),
+                json!({
+                    "description": "Positive dimensions `[length_x, width_y, height_z]` (give `size`, or `length`, `width` and `height`).",
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/length_more_than_0" },
+                    "minItems": 3,
+                    "maxItems": 3,
+                }),
+            );
+            props.insert(
+                "length".into(),
+                json!({
+                    "description": "Box X dimension (give with `width` and `height`, or give `size`).",
+                    "$ref": "#/$defs/length_more_than_0",
+                }),
+            );
+            props.insert(
+                "width".into(),
+                json!({
+                    "description": "Box Y dimension (give with `length` and `height`, or give `size`).",
+                    "$ref": "#/$defs/length_more_than_0",
+                }),
+            );
+            props.insert(
+                "height".into(),
+                json!({
+                    "description": "Box Z dimension (give with `length` and `width`, or give `size`).",
+                    "$ref": "#/$defs/length_more_than_0",
+                }),
+            );
+            if let Some(solid_props) = defs["solid3d"].get("properties").and_then(Value::as_object)
+            {
+                for key in [
+                    "layer",
+                    "color",
+                    "linetype",
+                    "lineweight",
+                    "plot_style",
+                    "transparency",
+                    "space",
+                    "id",
+                    "name",
+                ] {
+                    if let Some(v) = solid_props.get(key) {
+                        props.insert(key.into(), v.clone());
+                    }
+                }
+            }
+            let mut schema = json!({
+                "type": "object",
+                "required": ["origin"],
+                "additionalProperties": false,
+                "properties": props,
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
+        Kind::AddCylinder => {
+            let mut props = Map::new();
+            props.insert(
+                "sheet".into(),
+                json!({
+                    "description": "The sheet to add the 3D cylinder to, in its row (optional on an original DWG).",
+                    "$ref": "#/$defs/sheet_name",
+                }),
+            );
+            props.insert(
+                "template".into(),
+                json!({
+                    "description": "The template to add the 3D cylinder to. Give sheet or template.",
+                    "$ref": "#/$defs/template_path",
+                }),
+            );
+            props.insert(
+                "draw_order".into(),
+                json!({
+                    "description": "Optional draw-order placement: front, back, {\"above\": target}, or {\"under\": target}.",
+                    "$ref": "#/$defs/draw_order",
+                }),
+            );
+            props.insert(
+                "base".into(),
+                json!({
+                    "description": "Bottom circle centre `[x, y, z]` of the cylinder (or a snapped point).",
+                    "$ref": "#/$defs/snapped_point",
+                }),
+            );
+            props.insert(
+                "radius".into(),
+                json!({
+                    "description": "Positive radius of the cylinder.",
+                    "$ref": "#/$defs/length_more_than_0",
+                }),
+            );
+            props.insert(
+                "height".into(),
+                json!({
+                    "description": "Positive height of the cylinder along `+Z`.",
+                    "$ref": "#/$defs/length_more_than_0",
+                }),
+            );
+            if let Some(solid_props) = defs["solid3d"].get("properties").and_then(Value::as_object)
+            {
+                for key in [
+                    "layer",
+                    "color",
+                    "linetype",
+                    "lineweight",
+                    "plot_style",
+                    "transparency",
+                    "space",
+                    "id",
+                    "name",
+                ] {
+                    if let Some(v) = solid_props.get(key) {
+                        props.insert(key.into(), v.clone());
+                    }
+                }
+            }
+            let mut schema = json!({
+                "type": "object",
+                "required": ["base", "radius", "height"],
+                "additionalProperties": false,
+                "properties": props,
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
+        Kind::Extrude => json!({
+            "type": "object",
+            "required": ["target", "height"],
+            "additionalProperties": false,
+            "properties": {
+                "target": target,
+                "height": {
+                    "description": "Non-zero extrusion distance (in drawing units).",
+                    "$ref": "#/$defs/length",
+                },
+                "direction": {
+                    "description": "Optional non-zero 3D extrusion direction vector (default `[0, 0, 1]`).",
+                    "$ref": "#/$defs/point",
+                },
+                "taper_angle": {
+                    "description": "Optional draft/taper angle in degrees between -85 and 85 (positive tapers inward; default 0).",
+                    "type": "number",
+                    "minimum": -85.0,
+                    "maximum": 85.0,
+                },
+                "erase_source": {
+                    "description": "Whether to delete the source 2D profile (AutoCAD DELOBJ). True when left out.",
+                    "type": "boolean",
+                },
+                "layer": {
+                    "description": "Optional layer for the extruded solid; inherits the source profile's layer when left out.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "id": {
+                    "description": "Optional ID for the extruded 3D solid.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "name": {
+                    "description": "Optional name for the extruded 3D solid.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+            },
+        }),
+        Kind::Revolve => json!({
+            "type": "object",
+            "required": ["target", "axis_origin", "axis_direction"],
+            "additionalProperties": false,
+            "properties": {
+                "target": target,
+                "axis_origin": {
+                    "description": "A point on the axis of revolution (or a snapped point).",
+                    "$ref": "#/$defs/snapped_point",
+                },
+                "axis_direction": {
+                    "description": "Non-zero 3D direction vector of the axis of revolution.",
+                    "$ref": "#/$defs/point",
+                },
+                "angle": {
+                    "description": "Sweep angle in degrees in `(0, 360]` (default 360).",
+                    "type": "number",
+                    "exclusiveMinimum": 0.0,
+                    "maximum": 360.0,
+                },
+                "erase_source": {
+                    "description": "Whether to delete the source 2D profile (AutoCAD DELOBJ). True when left out.",
+                    "type": "boolean",
+                },
+                "layer": {
+                    "description": "Optional layer for the revolved solid; inherits the source profile's layer when left out.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "id": {
+                    "description": "Optional ID for the revolved 3D solid.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "name": {
+                    "description": "Optional name for the revolved 3D solid.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+            },
+        }),
+        Kind::SolidBoolean(BooleanOp::Union | BooleanOp::Intersect) => json!({
+            "type": "object",
+            "required": ["targets"],
+            "additionalProperties": false,
+            "properties": {
+                "targets": {
+                    "description": "Two or more 3D solids (`solid3d`) to combine; the first solid's ID carries on unless `id` overrides it.",
+                    "type": "array",
+                    "minItems": 2,
+                    "items": target,
+                },
+                "layer": {
+                    "description": "Optional layer for the resulting 3D solid; inherits the first solid's layer when left out.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "id": {
+                    "description": "Optional ID override for the resulting 3D solid.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "name": {
+                    "description": "Optional name for the resulting 3D solid.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+            },
+        }),
+        Kind::SolidBoolean(BooleanOp::Subtract) => json!({
+            "type": "object",
+            "required": ["target", "subtract"],
+            "additionalProperties": false,
+            "properties": {
+                "target": target,
+                "subtract": {
+                    "description": "One 3D solid, or a non-empty list of 3D solids, to subtract from `target`.",
+                    "anyOf": [
+                        { "$ref": "#/$defs/target" },
+                        {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": { "$ref": "#/$defs/target" },
+                        },
+                    ],
+                },
+                "layer": {
+                    "description": "Optional layer for the resulting 3D solid; inherits `target`'s layer when left out.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "id": {
+                    "description": "Optional ID override for the resulting 3D solid.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "name": {
+                    "description": "Optional name for the resulting 3D solid.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+            },
+        }),
         Kind::SetObjectScales => {
             let mut schema = json!({
                 "type": "object",
@@ -4615,6 +5024,503 @@ fn read_add_mline_style_body(
         style.insert(k.clone(), v.clone());
     }
     Ok(Body::AddMLineStyle { to, name, style })
+}
+
+#[inline(never)]
+fn read_add_solid_shortcut_to(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<AddTo, Error> {
+    match (map.get("sheet"), map.get("template")) {
+        (Some(Value::String(sheet)), None) => Ok(AddTo::Sheet(sheet.clone())),
+        (None, Some(Value::String(template))) => Ok(AddTo::Template(template.clone())),
+        (Some(_), Some(_)) => Err(fail(
+            ErrorCode::Usage,
+            "give sheet or template, not both: an object added to a sheet goes in \
+             its row, and one added to a template is on every sheet built from it"
+                .to_owned(),
+            "",
+        )),
+        (None, None) => match default_sheet {
+            Some(sheet) => Ok(AddTo::Sheet(sheet.to_owned())),
+            None => Err(fail(
+                ErrorCode::MissingKey,
+                "missing key `sheet`: name the sheet to add it to, in its row, or \
+                 give template to add it to a template"
+                    .to_owned(),
+                "sheet",
+            )),
+        },
+        (Some(_), None) => Err(fail(
+            ErrorCode::WrongType,
+            "expected a sheet's name".to_owned(),
+            "sheet",
+        )),
+        (None, Some(_)) => Err(fail(
+            ErrorCode::WrongType,
+            "expected a template's path".to_owned(),
+            "template",
+        )),
+    }
+}
+
+#[inline(never)]
+fn read_add_box_body(
+    map: &Map<String, Value>,
+    defs: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let draw_order = match map.get("draw_order") {
+        None => None,
+        Some(v) => Some(
+            read_draw_order_place(v, "draw_order")
+                .map_err(|(code, message, field)| fail(code, message, &field))?,
+        ),
+    };
+    if !map.contains_key("origin") {
+        return Err(fail(
+            ErrorCode::MissingKey,
+            "missing key `origin`; a 3D box needs `origin` and `size` (or `length`, `width` and `height`)"
+                .to_owned(),
+            "origin",
+        ));
+    }
+    let has_size = map.contains_key("size");
+    let has_lwh =
+        map.contains_key("length") || map.contains_key("width") || map.contains_key("height");
+    if has_size && has_lwh {
+        return Err(fail(
+            ErrorCode::Usage,
+            "give `size` or `length`/`width`/`height`, not both".to_owned(),
+            "size",
+        ));
+    }
+    let size_value = if let Some(sz) = map.get("size") {
+        sz.clone()
+    } else {
+        let l = map.get("length").ok_or_else(|| {
+            fail(
+                ErrorCode::MissingKey,
+                "missing key `size` (or `length`, `width` and `height`)".to_owned(),
+                "length",
+            )
+        })?;
+        let w = map.get("width").ok_or_else(|| {
+            fail(
+                ErrorCode::MissingKey,
+                "missing key `width` (give `length`, `width` and `height`, or `size`)".to_owned(),
+                "width",
+            )
+        })?;
+        let h = map.get("height").ok_or_else(|| {
+            fail(
+                ErrorCode::MissingKey,
+                "missing key `height` (give `length`, `width` and `height`, or `size`)".to_owned(),
+                "height",
+            )
+        })?;
+        Value::Array(vec![l.clone(), w.clone(), h.clone()])
+    };
+    let to = read_add_solid_shortcut_to(map, default_sheet, fail)?;
+    let mut keys = Map::new();
+    keys.insert("kind".into(), Value::String("box".to_owned()));
+    keys.insert("origin".into(), map["origin"].clone());
+    keys.insert("size".into(), size_value);
+    for (k, v) in map {
+        if matches!(
+            k.as_str(),
+            OP_KEY
+                | "sheet"
+                | "template"
+                | "draw_order"
+                | "origin"
+                | "size"
+                | "length"
+                | "width"
+                | "height"
+        ) {
+            continue;
+        }
+        keys.insert(k.clone(), v.clone());
+    }
+    let schema = defs.get("op_solid3d").unwrap_or(&defs["solid3d"]);
+    let mut snaps = Vec::new();
+    for (key, value) in &keys {
+        let slots: Vec<&Value> = schema["properties"].get(key).into_iter().collect();
+        snaps_in(value, &slots, defs, &format!("/{key}"), key, &mut snaps)
+            .map_err(|(code, message, field)| fail(code, message, &field))?;
+    }
+    Ok(Body::Add {
+        to,
+        keys,
+        snaps,
+        draw_order,
+    })
+}
+
+#[inline(never)]
+fn read_add_cylinder_body(
+    map: &Map<String, Value>,
+    defs: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let draw_order = match map.get("draw_order") {
+        None => None,
+        Some(v) => Some(
+            read_draw_order_place(v, "draw_order")
+                .map_err(|(code, message, field)| fail(code, message, &field))?,
+        ),
+    };
+    for req in ["base", "radius", "height"] {
+        if !map.contains_key(req) {
+            return Err(fail(
+                ErrorCode::MissingKey,
+                format!("missing key `{req}`; a 3D cylinder needs `base`, `radius` and `height`"),
+                req,
+            ));
+        }
+    }
+    let to = read_add_solid_shortcut_to(map, default_sheet, fail)?;
+    let mut keys = Map::new();
+    keys.insert("kind".into(), Value::String("cylinder".to_owned()));
+    for (k, v) in map {
+        if matches!(k.as_str(), OP_KEY | "sheet" | "template" | "draw_order") {
+            continue;
+        }
+        keys.insert(k.clone(), v.clone());
+    }
+    let schema = defs.get("op_solid3d").unwrap_or(&defs["solid3d"]);
+    let mut snaps = Vec::new();
+    for (key, value) in &keys {
+        let slots: Vec<&Value> = schema["properties"].get(key).into_iter().collect();
+        snaps_in(value, &slots, defs, &format!("/{key}"), key, &mut snaps)
+            .map_err(|(code, message, field)| fail(code, message, &field))?;
+    }
+    Ok(Body::Add {
+        to,
+        keys,
+        snaps,
+        draw_order,
+    })
+}
+
+#[inline(never)]
+fn read_optional_nonempty_str(
+    map: &Map<String, Value>,
+    key: &str,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Option<String>, Error> {
+    match map.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if !s.trim().is_empty() => Ok(Some(s.clone())),
+        Some(Value::String(_)) => Err(fail(
+            ErrorCode::BadValue,
+            format!("`{key}` cannot be empty"),
+            key,
+        )),
+        Some(_) => Err(fail(
+            ErrorCode::WrongType,
+            format!("expected a non-empty string under `{key}`"),
+            key,
+        )),
+    }
+}
+
+#[inline(never)]
+fn read_extrude_body(
+    map: &Map<String, Value>,
+    units: Unit,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let target_val = map.get("target").ok_or_else(|| {
+        fail(
+            ErrorCode::MissingKey,
+            "missing key `target`, the closed polyline, circle, or ellipse to extrude".to_owned(),
+            "target",
+        )
+    })?;
+    let target = read_target(target_val).map_err(|(c, m, f)| fail(c, m, &f))?;
+    let height_val = map.get("height").ok_or_else(|| {
+        fail(
+            ErrorCode::MissingKey,
+            "missing key `height`, the non-zero extrusion height".to_owned(),
+            "height",
+        )
+    })?;
+    let height = length(height_val, units).map_err(|m| fail(ErrorCode::BadNumber, m, "height"))?;
+    if height.abs() <= 1e-9 {
+        return Err(fail(
+            ErrorCode::BadValue,
+            "`height` must be non-zero".to_owned(),
+            "height",
+        ));
+    }
+    let direction = match map.get("direction") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let d = distance(v, units, "direction").map_err(|(c, m, f)| fail(c, m, &f))?;
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if !len.is_finite() || len <= 1e-12 {
+                return Err(fail(
+                    ErrorCode::BadValue,
+                    "`direction` cannot be [0, 0, 0]".to_owned(),
+                    "direction",
+                ));
+            }
+            Some(Point3::new(d[0], d[1], d[2]))
+        }
+    };
+    let taper_angle = match map.get("taper_angle") {
+        None | Some(Value::Null) => 0.0,
+        Some(Value::Number(n)) => {
+            let a = n.as_f64().ok_or_else(|| {
+                fail(
+                    ErrorCode::BadNumber,
+                    "expected a finite number under `taper_angle`".to_owned(),
+                    "taper_angle",
+                )
+            })?;
+            if !a.is_finite() || !(-85.0..=85.0).contains(&a) {
+                return Err(fail(
+                    ErrorCode::BadValue,
+                    "`taper_angle` must be between -85 and 85 degrees".to_owned(),
+                    "taper_angle",
+                ));
+            }
+            a
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected a number of degrees under `taper_angle`".to_owned(),
+                "taper_angle",
+            ))
+        }
+    };
+    let erase_source = match map.get("erase_source") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected a boolean under `erase_source`".to_owned(),
+                "erase_source",
+            ))
+        }
+    };
+    let layer = read_optional_nonempty_str(map, "layer", fail)?;
+    let id = read_optional_nonempty_str(map, "id", fail)?;
+    let name = read_optional_nonempty_str(map, "name", fail)?;
+    Ok(Body::Extrude {
+        target,
+        height,
+        direction,
+        taper_angle,
+        erase_source,
+        layer,
+        id,
+        name,
+    })
+}
+
+#[inline(never)]
+fn read_revolve_body(
+    map: &Map<String, Value>,
+    units: Unit,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let target_val = map.get("target").ok_or_else(|| {
+        fail(
+            ErrorCode::MissingKey,
+            "missing key `target`, the closed polyline, circle, or ellipse to revolve".to_owned(),
+            "target",
+        )
+    })?;
+    let target = read_target(target_val).map_err(|(c, m, f)| fail(c, m, &f))?;
+    let origin_val = map.get("axis_origin").ok_or_else(|| {
+        fail(
+            ErrorCode::MissingKey,
+            "missing key `axis_origin`, a point on the axis of revolution".to_owned(),
+            "axis_origin",
+        )
+    })?;
+    let axis_origin =
+        op_point(origin_val, units, "axis_origin").map_err(|(c, m, f)| fail(c, m, &f))?;
+    let dir_val = map.get("axis_direction").ok_or_else(|| {
+        fail(
+            ErrorCode::MissingKey,
+            "missing key `axis_direction`, the direction vector of the axis of revolution"
+                .to_owned(),
+            "axis_direction",
+        )
+    })?;
+    let d = distance(dir_val, units, "axis_direction").map_err(|(c, m, f)| fail(c, m, &f))?;
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if !len.is_finite() || len <= 1e-12 {
+        return Err(fail(
+            ErrorCode::BadValue,
+            "`axis_direction` cannot be [0, 0, 0]".to_owned(),
+            "axis_direction",
+        ));
+    }
+    let axis_direction = Point3::new(d[0], d[1], d[2]);
+    let angle = match map.get("angle") {
+        None | Some(Value::Null) => 360.0,
+        Some(Value::Number(n)) => {
+            let a = n.as_f64().ok_or_else(|| {
+                fail(
+                    ErrorCode::BadNumber,
+                    "expected a finite number under `angle`".to_owned(),
+                    "angle",
+                )
+            })?;
+            if !a.is_finite() || a <= 0.0 || a > 360.0 {
+                return Err(fail(
+                    ErrorCode::BadValue,
+                    "`angle` must be more than 0 and at most 360 degrees".to_owned(),
+                    "angle",
+                ));
+            }
+            a
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected a number of degrees under `angle`".to_owned(),
+                "angle",
+            ))
+        }
+    };
+    let erase_source = match map.get("erase_source") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected a boolean under `erase_source`".to_owned(),
+                "erase_source",
+            ))
+        }
+    };
+    let layer = read_optional_nonempty_str(map, "layer", fail)?;
+    let id = read_optional_nonempty_str(map, "id", fail)?;
+    let name = read_optional_nonempty_str(map, "name", fail)?;
+    Ok(Body::Revolve {
+        target,
+        axis_origin,
+        axis_direction,
+        angle,
+        erase_source,
+        layer,
+        id,
+        name,
+    })
+}
+
+#[inline(never)]
+fn read_solid_boolean_body(
+    op: BooleanOp,
+    map: &Map<String, Value>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let targets = match op {
+        BooleanOp::Union | BooleanOp::Intersect => match map.get("targets") {
+            Some(Value::Array(items)) if items.len() >= 2 => items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let at = format!("targets[{i}]");
+                    read_target(item).map(|t| (t, at.clone())).map_err(|e| {
+                        let (c, m, f) = target_at(&at, e);
+                        fail(c, m, &f)
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(Value::Array(_)) => {
+                return Err(fail(
+                    ErrorCode::BadValue,
+                    format!("`{}` requires at least 2 targets", op.name()),
+                    "targets",
+                ))
+            }
+            Some(_) => {
+                return Err(fail(
+                    ErrorCode::WrongType,
+                    "expected a list of at least 2 target 3D solids under `targets`".to_owned(),
+                    "targets",
+                ))
+            }
+            None => {
+                return Err(fail(
+                    ErrorCode::MissingKey,
+                    format!(
+                        "missing key `targets`, at least 2 3D solids to {}",
+                        op.name()
+                    ),
+                    "targets",
+                ))
+            }
+        },
+        BooleanOp::Subtract => {
+            let base_val = map.get("target").ok_or_else(|| {
+                fail(
+                    ErrorCode::MissingKey,
+                    "missing key `target`, the base 3D solid to subtract from".to_owned(),
+                    "target",
+                )
+            })?;
+            let base = read_target(base_val).map_err(|(c, m, f)| fail(c, m, &f))?;
+            let sub_val = map.get("subtract").ok_or_else(|| {
+                fail(
+                    ErrorCode::MissingKey,
+                    "missing key `subtract`, one or more 3D solids to subtract from `target`"
+                        .to_owned(),
+                    "subtract",
+                )
+            })?;
+            let mut list = vec![(base, "target".to_owned())];
+            match sub_val {
+                Value::Array(items) if !items.is_empty() => {
+                    for (i, item) in items.iter().enumerate() {
+                        let at = format!("subtract[{i}]");
+                        let t = read_target(item).map_err(|e| {
+                            let (c, m, f) = target_at(&at, e);
+                            fail(c, m, &f)
+                        })?;
+                        list.push((t, at));
+                    }
+                }
+                Value::Array(_) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`subtract` must name at least one 3D solid".to_owned(),
+                        "subtract",
+                    ));
+                }
+                other => {
+                    let t = read_target(other).map_err(|e| {
+                        let (c, m, f) = target_at("subtract", e);
+                        fail(c, m, &f)
+                    })?;
+                    list.push((t, "subtract".to_owned()));
+                }
+            }
+            list
+        }
+    };
+    let layer = read_optional_nonempty_str(map, "layer", fail)?;
+    let id = read_optional_nonempty_str(map, "id", fail)?;
+    let name = read_optional_nonempty_str(map, "name", fail)?;
+    Ok(Body::SolidBoolean {
+        op,
+        targets,
+        layer,
+        id,
+        name,
+    })
 }
 
 #[inline(never)]
@@ -5884,6 +6790,36 @@ pub(crate) enum Body {
         to: AddTo,
         name: String,
         style: Map<String, Value>,
+    },
+    /// Extrudes a closed 2D profile into a 3D solid (AutoCAD `EXTRUDE` / `EXT`).
+    Extrude {
+        target: Target,
+        height: f64,
+        direction: Option<Point3>,
+        taper_angle: f64,
+        erase_source: bool,
+        layer: Option<String>,
+        id: Option<String>,
+        name: Option<String>,
+    },
+    /// Revolves a closed 2D profile around a 3D axis into a 3D solid (AutoCAD `REVOLVE` / `REV`).
+    Revolve {
+        target: Target,
+        axis_origin: OpPoint,
+        axis_direction: Point3,
+        angle: f64,
+        erase_source: bool,
+        layer: Option<String>,
+        id: Option<String>,
+        name: Option<String>,
+    },
+    /// Combines 3D solids by CSG boolean (`UNION`, `SUBTRACT`, `INTERSECT`).
+    SolidBoolean {
+        op: BooleanOp,
+        targets: Vec<(Target, String)>,
+        layer: Option<String>,
+        id: Option<String>,
+        name: Option<String>,
     },
 }
 
@@ -7478,6 +8414,85 @@ fn operation(
                 "end_inner_arcs_cap",
             ])?;
             read_add_mline_style_body(map, default_sheet, &fail)?
+        }
+        Kind::AddBox => {
+            keys(&[
+                "sheet",
+                "template",
+                "draw_order",
+                "origin",
+                "size",
+                "length",
+                "width",
+                "height",
+                "layer",
+                "color",
+                "linetype",
+                "lineweight",
+                "plot_style",
+                "transparency",
+                "space",
+                "id",
+                "name",
+            ])?;
+            read_add_box_body(map, defs, default_sheet, &fail)?
+        }
+        Kind::AddCylinder => {
+            keys(&[
+                "sheet",
+                "template",
+                "draw_order",
+                "base",
+                "radius",
+                "height",
+                "layer",
+                "color",
+                "linetype",
+                "lineweight",
+                "plot_style",
+                "transparency",
+                "space",
+                "id",
+                "name",
+            ])?;
+            read_add_cylinder_body(map, defs, default_sheet, &fail)?
+        }
+        Kind::Extrude => {
+            keys(&[
+                "target",
+                "height",
+                "direction",
+                "taper_angle",
+                "erase_source",
+                "layer",
+                "id",
+                "name",
+            ])?;
+            read_extrude_body(map, units, &fail)?
+        }
+        Kind::Revolve => {
+            keys(&[
+                "target",
+                "axis_origin",
+                "axis_direction",
+                "angle",
+                "erase_source",
+                "layer",
+                "id",
+                "name",
+            ])?;
+            read_revolve_body(map, units, &fail)?
+        }
+        Kind::SolidBoolean(BooleanOp::Union | BooleanOp::Intersect) => {
+            keys(&["targets", "layer", "id", "name"])?;
+            let Kind::SolidBoolean(op) = spec.kind else {
+                unreachable!()
+            };
+            read_solid_boolean_body(op, map, &fail)?
+        }
+        Kind::SolidBoolean(BooleanOp::Subtract) => {
+            keys(&["target", "subtract", "layer", "id", "name"])?;
+            read_solid_boolean_body(BooleanOp::Subtract, map, &fail)?
         }
         Kind::SetAttributes => {
             keys(&[

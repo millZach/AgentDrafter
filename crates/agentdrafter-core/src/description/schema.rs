@@ -1034,6 +1034,8 @@ fn defs() -> Map<String, Value> {
     dimension_schema::dimension_defs(&mut defs);
     defs.insert("viewport".into(), super::layout::viewport_def());
     defs.insert("viewport_clip".into(), super::layout::clip_def());
+    defs.insert("solid_body".into(), super::solid3d::solid_body_def());
+    defs.insert("solid3d".into(), super::solid3d::solid3d_def());
     block_schema::add_defs(&mut defs);
     defs
 }

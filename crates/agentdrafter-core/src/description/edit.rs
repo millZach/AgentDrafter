@@ -2330,8 +2330,15 @@ impl RecordFile {
                     "position",
                 )
                 | ("xline", "through")
-                | ("ray", "from") => {
+                | ("ray", "from")
+                | ("solid3d", "origin" | "base" | "center" | "axis_origin") => {
                     move_point(&mut entry.value, by, units, &field)?;
+                }
+                ("solid3d", "profile" | "vertices") => {
+                    move_points(&mut entry.value, by, units, &field)?;
+                }
+                ("solid3d", "operands") => {
+                    move_solid_operands(&mut entry.value, by, units, &field)?;
                 }
                 ("donut", "center") => move_point(&mut entry.value, by, units, &field)?,
                 // A viewport moves on the paper; its view moves with it.
@@ -4380,6 +4387,56 @@ pub(super) fn node_of(value: &Value) -> Node {
                 .collect(),
         )),
     }
+}
+
+pub(super) fn node_to_json(node: &Node) -> Value {
+    if node.is_bare_null() {
+        return Value::Null;
+    }
+    match &node.kind {
+        Kind::Scalar(text) => Value::String(text.clone()),
+        Kind::Sequence(items) => Value::Array(items.iter().map(node_to_json).collect()),
+        Kind::Mapping(entries) => {
+            let mut map = Map::new();
+            for e in entries {
+                map.insert(e.key.clone(), node_to_json(&e.value));
+            }
+            Value::Object(map)
+        }
+    }
+}
+
+fn move_solid_operands(
+    node: &mut Node,
+    by: [f64; 3],
+    units: Unit,
+    field: &str,
+) -> Result<(), Error> {
+    let Kind::Sequence(items) = &mut node.kind else {
+        return Err(not_a_point(field));
+    };
+    for (i, item) in items.iter_mut().enumerate() {
+        let item_path = index_path(field, i);
+        let Kind::Mapping(entries) = &mut item.kind else {
+            return Err(not_a_point(&item_path));
+        };
+        for entry in entries.iter_mut() {
+            let sub = key_path(&item_path, &entry.key);
+            match entry.key.as_str() {
+                "origin" | "base" | "center" | "axis_origin" => {
+                    move_point(&mut entry.value, by, units, &sub)?;
+                }
+                "profile" | "vertices" => {
+                    move_points(&mut entry.value, by, units, &sub)?;
+                }
+                "operands" => {
+                    move_solid_operands(&mut entry.value, by, units, &sub)?;
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Adds to `spans` where each quoted scalar of `node`, and each quoted key

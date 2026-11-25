@@ -54,6 +54,10 @@ pub(super) fn draw(drawer: &Drawer, tolerance: f64, list: &mut DisplayList) {
                 min: model_min,
                 max: model_max,
             }),
+            view: viewport.view_direction.map_or(
+                crate::geometry::solid3d::OrthoView::TOP,
+                crate::geometry::solid3d::OrthoView::from_direction,
+            ),
         };
         let fine = tolerance / viewport.scale;
         let mut model = DisplayList::default();
