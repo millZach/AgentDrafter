@@ -34,9 +34,10 @@ use super::from_dimension::dimension_from;
 use super::journal::{commit_change_set, HowChanged, Keeping, Landing, ObjectChanged, SheetFailed};
 use super::offset::{compute_offset, object_to_record_keys, OffsetBy, OffsetSide};
 use super::operations::{
-    op_error, read_change_set, AddTo, BlockOp, Body, CornerMode, DrawOrderPlace, FromOp, Import,
-    Kind, Motion, OpBreakBy, OpOffsetBy, OpOffsetSide, OpPoint, Operation, Pattern, PointSnap,
-    Table, TableOp, Target, TextToFrontWhich, TransformBy, ROW_VALUE_KEY,
+    op_error, read_change_set, resolve_rotate_angle, resolve_scale_factor, AddTo, BlockOp, Body,
+    CornerMode, DrawOrderPlace, FromOp, Import, Kind, Motion, OpBreakBy, OpOffsetBy, OpOffsetSide,
+    OpPoint, Operation, Pattern, PointSnap, Table, TableOp, Target, TextToFrontWhich, TransformBy,
+    ROW_VALUE_KEY,
 };
 use super::replace::{TextMatchKind, TextMatcher, TextScope};
 use super::solid3d::{
@@ -7036,14 +7037,28 @@ fn apply_transform(
         }
     };
     let t = match by {
-        TransformBy::Rotate { base_point, angle } => match point(at, base_point) {
-            Ok(base) => Transform::rotate(base, *angle),
-            Err(e) => return fail(reach, e),
-        },
-        TransformBy::Scale { base_point, factor } => match point(at, base_point) {
-            Ok(base) => Transform::scale(base, *factor),
-            Err(e) => return fail(reach, e),
-        },
+        TransformBy::Rotate { base_point, angle } => {
+            let base = match point(at, base_point) {
+                Ok(base) => base,
+                Err(e) => return fail(reach, e),
+            };
+            let degrees = match resolve_rotate_angle(angle, base, op, |p| point(at, p)) {
+                Ok(degrees) => degrees,
+                Err(e) => return fail(reach, e),
+            };
+            Transform::rotate(base, degrees)
+        }
+        TransformBy::Scale { base_point, factor } => {
+            let base = match point(at, base_point) {
+                Ok(base) => base,
+                Err(e) => return fail(reach, e),
+            };
+            let f = match resolve_scale_factor(factor, base, op, |p| point(at, p)) {
+                Ok(f) => f,
+                Err(e) => return fail(reach, e),
+            };
+            Transform::scale(base, f)
+        }
         TransformBy::Mirror { first, second } => {
             let a = match point(at, first) {
                 Ok(a) => a,
@@ -7287,8 +7302,34 @@ fn apply_copy(
         }
     };
     let mut path_id = None;
-    let mut mirror: Option<(Transform, [[f64; 3]; 2])> = None;
+    let mut copy_transform: Option<Transform> = None;
+    let mut mirror_line: Option<[[f64; 3]; 2]> = None;
     let places = match pattern {
+        Pattern::Rotate { base_point, angle } => {
+            let base = match point(at, base_point, &mut snapped) {
+                Ok(base) => base,
+                Err(e) => return fail(reach, e),
+            };
+            let degrees =
+                match resolve_rotate_angle(angle, base, op, |p| point(at, p, &mut snapped)) {
+                    Ok(degrees) => degrees,
+                    Err(e) => return fail(reach, e),
+                };
+            copy_transform = Some(Transform::rotate(base, degrees));
+            array::offsets(&[[0.0; 3]])
+        }
+        Pattern::Scale { base_point, factor } => {
+            let base = match point(at, base_point, &mut snapped) {
+                Ok(base) => base,
+                Err(e) => return fail(reach, e),
+            };
+            let f = match resolve_scale_factor(factor, base, op, |p| point(at, p, &mut snapped)) {
+                Ok(f) => f,
+                Err(e) => return fail(reach, e),
+            };
+            copy_transform = Some(Transform::scale(base, f));
+            array::offsets(&[[0.0; 3]])
+        }
         Pattern::Mirror { first, second } => {
             let a = match point(at, first, &mut snapped) {
                 Ok(a) => a,
@@ -7299,7 +7340,10 @@ fn apply_copy(
                 Err(e) => return fail(reach, e),
             };
             match Transform::mirror(a, b) {
-                Some(t) => mirror = Some((t, [a, b])),
+                Some(t) => {
+                    copy_transform = Some(t);
+                    mirror_line = Some([a, b]);
+                }
                 None => return fail(reach, no_mirror_line(op)),
             }
             array::offsets(&[[0.0; 3]])
@@ -7405,10 +7449,10 @@ fn apply_copy(
         }
     }
 
-    // A mirrored copy is of an object the sheet description holds
-    // mirrored.
+    // A transformed copy (rotated, scaled or mirrored) is of an object the
+    // sheet description holds transformed.
     let mut resolved = vec![Resolved::default(); found.len()];
-    if let Some((t, _)) = &mirror {
+    if let Some(t) = &copy_transform {
         for (f, field) in &found {
             let why = match at.file(f.file) {
                 Ok(record) => record.refuses_transform(f.list, f.index, t, units),
@@ -7479,7 +7523,7 @@ fn apply_copy(
                     if place.turn != 0.0 {
                         record.turn_by(f.list, index, place.about, place.turn, units, op.index)?;
                     }
-                    if let Some((t, _)) = &mirror {
+                    if let Some(t) = &copy_transform {
                         record.transform(f.list, index, t, resolved, units, op.index)?;
                     }
                     Ok(())
@@ -7495,9 +7539,24 @@ fn apply_copy(
                     (None, None, None, Some(item), Some(distance))
                 }
             };
-            // A mirrored copy is placed by its mirror line, not an offset.
-            let offset = offset.filter(|_| mirror.is_none());
-            let turned = place.turn != 0.0;
+            // A rotated, scaled or mirrored copy is placed by its transform,
+            // not an offset.
+            let offset = offset.filter(|_| copy_transform.is_none());
+            let (turned, scaled, about) = match copy_transform {
+                Some(t) => match t.how() {
+                    How::Rotate(deg) => (Some(deg), None, Some(t.about())),
+                    How::Scale(f) => (None, Some(f), Some(t.about())),
+                    How::Mirror(_) => (None, None, None),
+                },
+                None => {
+                    let turned = place.turn != 0.0;
+                    (
+                        turned.then_some(place.turn),
+                        None,
+                        turned.then_some(place.about),
+                    )
+                }
+            };
             copies.push(Copied {
                 id: format!("{}{ID_SEPARATOR}{local}", files.name(k)),
                 source: f.id.clone(),
@@ -7507,9 +7566,10 @@ fn apply_copy(
                 item,
                 along,
                 by: place.by,
-                turned: turned.then_some(place.turn),
-                about: turned.then_some(place.about),
-                mirrored_across: mirror.as_ref().map(|(_, line)| *line),
+                turned,
+                scaled,
+                about,
+                mirrored_across: mirror_line,
             });
             copy_sheets.push(on);
         }
@@ -7532,14 +7592,36 @@ fn apply_copy(
             format!("{n} {many}")
         }
     };
+    let keep_pronoun = if found.len() == 1 { "it" } else { "them" };
     let how = match pattern {
-        Pattern::Mirror { .. } => {
-            let (_, [a, b]) = mirror.expect("a mirror's line");
+        Pattern::Rotate { .. } => {
+            let t = copy_transform.expect("a rotate transform");
+            let How::Rotate(deg) = t.how() else {
+                unreachable!()
+            };
             format!(
-                "across the line through [{}] and [{}] ({units}), keeping {}",
+                "by {} degrees about [{}] ({units}), keeping {keep_pronoun}",
+                numbers(&[deg]),
+                numbers(&t.about()),
+            )
+        }
+        Pattern::Scale { .. } => {
+            let t = copy_transform.expect("a scale transform");
+            let How::Scale(f) = t.how() else {
+                unreachable!()
+            };
+            format!(
+                "by {} about [{}] ({units}), keeping {keep_pronoun}",
+                numbers(&[f]),
+                numbers(&t.about()),
+            )
+        }
+        Pattern::Mirror { .. } => {
+            let [a, b] = mirror_line.expect("a mirror's line");
+            format!(
+                "across the line through [{}] and [{}] ({units}), keeping {keep_pronoun}",
                 numbers(&a),
                 numbers(&b),
-                if found.len() == 1 { "it" } else { "them" }
             )
         }
         Pattern::Offsets(_) if places.len() == 1 => {
@@ -7639,6 +7721,8 @@ fn apply_copy(
     let ids: Vec<String> = copies.iter().map(|c| format!("`{}`", c.id)).collect();
     let verb = match op.spec.kind {
         Kind::Array => "arrays",
+        Kind::Rotate => "turns",
+        Kind::Scale => "scales",
         Kind::Mirror => "mirrors",
         _ => "copies",
     };

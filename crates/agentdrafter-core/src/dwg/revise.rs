@@ -2076,6 +2076,44 @@ impl RevisionSession {
         Ok((new_hex, record))
     }
 
+    /// Copies the object at `hex` into the same space, scaled by `factor` about
+    /// `about` (AutoCAD SCALE Copy option, #252).
+    pub(crate) fn copy_scale_object(
+        &mut self,
+        hex: &str,
+        about: [f64; 3],
+        factor: f64,
+    ) -> Result<(String, MutationHandles), Error> {
+        let handle = parse_hex_handle(hex)?;
+        let space = self.ensure_sheet_entity(handle, hex)?;
+        let app_handle = self.agentdrafter_app_handle();
+        let Some(original) = self.drawing.get_entity(handle).cloned() else {
+            return Err(Error::new(
+                ErrorCode::UnknownName,
+                format!("no object with handle `{hex}` in the drawing"),
+            ));
+        };
+        let mut copy = original;
+        sanitize_clone(&mut copy, app_handle);
+        scale_entity(&mut copy, about, factor)?;
+        let new_handle = self.insert_into_space(copy, &space)?;
+        let new_hex = handle_text(new_handle);
+        let mut record = MutationHandles::default();
+        self.expected_added.insert(new_handle.value());
+        record.added.push(new_hex.clone());
+        if let Some(owner) = self
+            .drawing
+            .get_entity(new_handle)
+            .map(|e| e.common().owner_handle.value())
+        {
+            if owner != 0 {
+                self.expected_spaces_mutated.insert(owner);
+            }
+        }
+        self.assign_child_handles(new_handle, &mut record);
+        Ok((new_hex, record))
+    }
+
     /// Deletes the object at `hex` (and its owned attributes/seqend if an
     /// `Insert`, or owned vertices if a `Polyline3D`) from `CadDocument`.
     pub(crate) fn delete_object(&mut self, hex: &str) -> Result<MutationHandles, Error> {

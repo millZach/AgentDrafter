@@ -29,9 +29,9 @@ use crate::change::fillet_chamfer::{
 };
 use crate::change::offset::{compute_offset, OffsetBy, OffsetSide};
 use crate::change::operations::{
-    op_error, read_change_set_for_original, AddTo, Body, CornerMode, DrawOrderPlace, Motion,
-    OpBreakBy, OpOffsetBy, OpOffsetSide, OpPoint, Operation, Pattern, Table, TableOp, Target,
-    TransformBy,
+    op_error, read_change_set_for_original, resolve_rotate_angle, resolve_scale_factor, AddTo,
+    Body, CornerMode, DrawOrderPlace, Motion, OpBreakBy, OpOffsetBy, OpOffsetSide, OpPoint,
+    Operation, Pattern, Table, TableOp, Target, TransformBy,
 };
 use crate::change::original_journal::OriginalJournal;
 use crate::change::replace::{TextMatcher, TextScope};
@@ -105,6 +105,8 @@ pub struct RevisionCopy {
     pub by: [f64; 3],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turned: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scaled: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub about: Option<[f64; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4681,28 +4683,34 @@ fn apply_revision_op(
             let summary = match by {
                 TransformBy::Rotate { base_point, angle } => {
                     let about = resolve_op_point(base_point, record, settings, op, &mut snapped)?;
+                    let deg = resolve_rotate_angle(angle, about, op, |p| {
+                        resolve_op_point(p, record, settings, op, &mut snapped)
+                    })?;
                     for found in &resolved {
                         let h = session
-                            .rotate_object(&found.handle, about, *angle)
+                            .rotate_object(&found.handle, about, deg)
                             .map_err(|e| op_error(index, op_name, e.code, e.message, ""))?;
                         extend_handles(&mut all_handles, h);
                     }
                     format!(
-                        "rotated {} object{} by {angle} deg",
+                        "rotated {} object{} by {deg} deg",
                         resolved.len(),
                         plural(resolved.len())
                     )
                 }
                 TransformBy::Scale { base_point, factor } => {
                     let about = resolve_op_point(base_point, record, settings, op, &mut snapped)?;
+                    let f = resolve_scale_factor(factor, about, op, |p| {
+                        resolve_op_point(p, record, settings, op, &mut snapped)
+                    })?;
                     for found in &resolved {
                         let h = session
-                            .scale_object(&found.handle, about, *factor)
+                            .scale_object(&found.handle, about, f)
                             .map_err(|e| op_error(index, op_name, e.code, e.message, ""))?;
                         extend_handles(&mut all_handles, h);
                     }
                     format!(
-                        "scaled {} object{} by {factor}",
+                        "scaled {} object{} by {f}",
                         resolved.len(),
                         plural(resolved.len())
                     )
@@ -4752,6 +4760,60 @@ fn apply_revision_op(
             let mut all_handles = MutationHandles::default();
 
             match pattern {
+                Pattern::Rotate { base_point, angle } => {
+                    let about = resolve_op_point(base_point, record, settings, op, &mut snapped)?;
+                    let deg = resolve_rotate_angle(angle, about, op, |p| {
+                        resolve_op_point(p, record, settings, op, &mut snapped)
+                    })?;
+                    for found in &resolved {
+                        let (new_hex, h) = session
+                            .copy_object(&found.handle, [0.0; 3], deg, about)
+                            .map_err(|e| op_error(index, op_name, e.code, e.message, ""))?;
+                        extend_handles(&mut all_handles, h);
+                        copies.push(RevisionCopy {
+                            id: handle_id(sheet_name, &new_hex),
+                            handle: new_hex,
+                            source: found.id.clone(),
+                            offset: None,
+                            row: None,
+                            column: None,
+                            item: None,
+                            along: None,
+                            by: [0.0; 3],
+                            turned: Some(deg),
+                            scaled: None,
+                            about: Some(about),
+                            mirrored_across: None,
+                        });
+                    }
+                }
+                Pattern::Scale { base_point, factor } => {
+                    let about = resolve_op_point(base_point, record, settings, op, &mut snapped)?;
+                    let f = resolve_scale_factor(factor, about, op, |p| {
+                        resolve_op_point(p, record, settings, op, &mut snapped)
+                    })?;
+                    for found in &resolved {
+                        let (new_hex, h) = session
+                            .copy_scale_object(&found.handle, about, f)
+                            .map_err(|e| op_error(index, op_name, e.code, e.message, ""))?;
+                        extend_handles(&mut all_handles, h);
+                        copies.push(RevisionCopy {
+                            id: handle_id(sheet_name, &new_hex),
+                            handle: new_hex,
+                            source: found.id.clone(),
+                            offset: None,
+                            row: None,
+                            column: None,
+                            item: None,
+                            along: None,
+                            by: [0.0; 3],
+                            turned: None,
+                            scaled: Some(f),
+                            about: Some(about),
+                            mirrored_across: None,
+                        });
+                    }
+                }
                 Pattern::Mirror { first, second } => {
                     let a = resolve_op_point(first, record, settings, op, &mut snapped)?;
                     let b = resolve_op_point(second, record, settings, op, &mut snapped)?;
@@ -4771,6 +4833,7 @@ fn apply_revision_op(
                             along: None,
                             by: [0.0; 3],
                             turned: None,
+                            scaled: None,
                             about: None,
                             mirrored_across: Some([a, b]),
                         });
@@ -4881,7 +4944,9 @@ fn apply_revision_op(
                                 op_error(index, op_name, ErrorCode::BadValue, why, "path")
                             })?
                         }
-                        Pattern::Mirror { .. } => unreachable!(),
+                        Pattern::Rotate { .. } | Pattern::Scale { .. } | Pattern::Mirror { .. } => {
+                            unreachable!()
+                        }
                     };
                     for place in &places {
                         for found in &resolved {
@@ -4910,6 +4975,7 @@ fn apply_revision_op(
                                 along,
                                 by: place.by,
                                 turned: (place.turn != 0.0).then_some(place.turn),
+                                scaled: None,
                                 about: (place.turn != 0.0).then_some(place.about),
                                 mirrored_across: None,
                             });
