@@ -1001,11 +1001,15 @@ fn does(spec: &Spec) -> String {
                         copies, with its source and its place in the array. AutoCAD's ARRAY, \
                         ARRAYRECT, ARRAYPOLAR and ARRAYPATH, without the associative array."
             .to_owned(),
-        Kind::Rotate => "Turns objects in place, target, one by its ID or its name, or \
-                         targets, several of one sheet, by angle degrees, anticlockwise, \
-                         negative clockwise, about base_point, a point or a snapped point, as \
-                         AutoCAD's ROTATE takes them. Every point each is drawn through turns \
-                         about it, and so does every direction it is drawn in: a text's, an \
+        Kind::Rotate => "Turns objects, target, one by its ID or its name, or targets, several of \
+                         one sheet, about base_point, a point or a snapped point, by angle \
+                         degrees anticlockwise (negative clockwise), or by reference_angle (a \
+                         number in degrees or two points) turned to new_angle (degrees or two \
+                         points) or new_point (from base_point), as AutoCAD's ROTATE with \
+                         Reference takes them. Turns in place by default, each keeping its ID; \
+                         copy: true keeps the sources and makes rotated copies listed under \
+                         copies, as ROTATE's Copy option does. Every point each is drawn through \
+                         turns about it, and so does every direction it is drawn in: a text's, an \
                          mtext's and an insert's rotation, an arc's angles, an ellipse's major \
                          axis, a patterned hatch's angle and origin and a linear dimension's \
                          angle. A multileader's and a leader's text stays level, laid out again \
@@ -1013,20 +1017,24 @@ fn does(spec: &Spec) -> String {
                          lay it out. A turn by a multiple of 90 degrees lands exactly. A table, \
                          which has no rotation, and a viewport are not turned, nor an ordinate \
                          dimension but by a multiple of 90 degrees, which swaps its axis at a \
-                         quarter turn. Each keeps its ID. AutoCAD's ROTATE."
+                         quarter turn. AutoCAD's ROTATE."
             .to_owned(),
-        Kind::Scale => "Scales objects in place, target or targets as rotate takes them, by \
-                        factor, a number more than 0, about base_point, a point or a snapped \
-                        point, as AutoCAD's SCALE takes them. Every point each is drawn through \
-                        moves away from it or towards it, along Z too, and every length it is \
-                        drawn with is scaled: a radius, a text's and an mtext's height and \
-                        width, a polyline's widths, a donut's diameters, an insert's scale and \
-                        a patterned hatch's pattern scale, and a multileader's and a leader's \
-                        arrow size, gap, landing and text height, written as its own when its \
-                        style or the sheet's default gives them. A dimension's text and arrows \
-                        stay as its style draws them, and it measures its new length. A table, \
-                        whose text its style sizes, and a viewport are not scaled. Each keeps \
-                        its ID. AutoCAD's SCALE."
+        Kind::Scale => "Scales objects, target or targets as rotate takes them, about base_point, \
+                        a point or a snapped point, by factor, a number more than 0, or by \
+                        reference_length (a positive length or two points) scaled to new_length \
+                        (a positive length or two points) or new_point (distance from \
+                        base_point), as AutoCAD's SCALE with Reference takes them. Scales in \
+                        place by default, each keeping its ID; copy: true keeps the sources and \
+                        makes scaled copies listed under copies, as SCALE's Copy option does. \
+                        Every point each is drawn through moves away from it or towards it, \
+                        along Z too, and every length it is drawn with is scaled: a radius, a \
+                        text's and an mtext's height and width, a polyline's widths, a donut's \
+                        diameters, an insert's scale and a patterned hatch's pattern scale, and a \
+                        multileader's and a leader's arrow size, gap, landing and text height, \
+                        written as its own when its style or the sheet's default gives them. A \
+                        dimension's text and arrows stay as its style draws them, and it measures \
+                        its new length. A table, whose text its style sizes, and a viewport are \
+                        not scaled. AutoCAD's SCALE."
             .to_owned(),
         Kind::Mirror => "Mirrors objects, target or targets as rotate takes them, across the \
                          line through first_point and second_point, each a point or a snapped \
@@ -5751,46 +5759,190 @@ fn copied_objects_properties(schema: &mut Value) {
 }
 
 /// The schema of `rotate`, `scale` or `mirror`: the objects, by target or
-/// targets, and the base point and angle, the base point and factor, or
-/// the mirror line's two points.
+/// targets, and the base point and angle (or Reference), the base point and
+/// factor (or Reference), or the mirror line's two points.
 fn transform_schema(kind: Kind) -> Value {
     let verb = match kind {
         Kind::Rotate => "turn",
         Kind::Scale => "scale",
         _ => "mirror",
     };
+    let two_points = json!({
+        "type": "array",
+        "items": { "$ref": "#/$defs/snapped_point" },
+        "minItems": 2,
+        "maxItems": 2,
+    });
+    let mut rules = vec![copied_objects_rule()];
     let (required, properties) = match kind {
-        Kind::Rotate => (
-            json!(["base_point", "angle"]),
-            json!({
-                "base_point": {
-                    "description": "The point they turn about, as AutoCAD's ROTATE takes it: a \
-                                    point or a snapped point.",
-                    "$ref": "#/$defs/snapped_point",
-                },
-                "angle": {
-                    "description": "How far they turn, in degrees anticlockwise, negative \
-                                    clockwise, a number. A multiple of 90 lands exactly.",
-                    "type": "number",
-                },
-            }),
-        ),
-        Kind::Scale => (
-            json!(["base_point", "factor"]),
-            json!({
-                "base_point": {
-                    "description": "The point they are scaled about, which stays where it is, \
-                                    as AutoCAD's SCALE takes it: a point or a snapped point.",
-                    "$ref": "#/$defs/snapped_point",
-                },
-                "factor": {
-                    "description": "How much they are enlarged, the same along every axis: a \
-                                    number more than 0, less than 1 to make them smaller.",
-                    "type": "number",
-                    "exclusiveMinimum": 0,
-                },
-            }),
-        ),
+        Kind::Rotate => {
+            rules.push(json!({
+                "oneOf": [
+                    {
+                        "required": ["angle"],
+                        "not": {
+                            "anyOf": [
+                                { "required": ["reference_angle"] },
+                                { "required": ["new_angle"] },
+                                { "required": ["new_point"] },
+                            ],
+                        },
+                    },
+                    {
+                        "required": ["reference_angle", "new_angle"],
+                        "not": {
+                            "anyOf": [
+                                { "required": ["angle"] },
+                                { "required": ["new_point"] },
+                            ],
+                        },
+                    },
+                    {
+                        "required": ["reference_angle", "new_point"],
+                        "not": {
+                            "anyOf": [
+                                { "required": ["angle"] },
+                                { "required": ["new_angle"] },
+                            ],
+                        },
+                    },
+                ],
+            }));
+            (
+                json!(["base_point"]),
+                json!({
+                    "base_point": {
+                        "description": "The point they turn about, as AutoCAD's ROTATE takes it: \
+                                        a point or a snapped point.",
+                        "$ref": "#/$defs/snapped_point",
+                    },
+                    "angle": {
+                        "description": "How far they turn, in degrees anticlockwise, negative \
+                                        clockwise, a number. A multiple of 90 lands exactly. \
+                                        Give angle, or reference_angle with new_angle or new_point.",
+                        "type": "number",
+                    },
+                    "reference_angle": {
+                        "description": "AutoCAD ROTATE's Reference angle: a number in degrees, or \
+                                        two points [from, to] (each a point or snapped point, \
+                                        apart seen from above) whose direction is turned to \
+                                        new_angle or new_point.",
+                        "oneOf": [
+                            { "type": "number" },
+                            two_points,
+                        ],
+                    },
+                    "new_angle": {
+                        "description": "The target angle for Reference mode: a number in degrees, \
+                                        or two points [from, to] (each a point or snapped point, \
+                                        apart seen from above, AutoCAD's Points option). Give \
+                                        with reference_angle.",
+                        "oneOf": [
+                            { "type": "number" },
+                            two_points,
+                        ],
+                    },
+                    "new_point": {
+                        "description": "The target point for Reference mode: a point or snapped \
+                                        point apart from base_point seen from above; turns \
+                                        reference_angle to the direction from base_point to \
+                                        new_point. Give with reference_angle.",
+                        "$ref": "#/$defs/snapped_point",
+                    },
+                    "copy": {
+                        "description": "Keep the source objects and make rotated copies beside \
+                                        them (AutoCAD ROTATE's Copy option): true or false. \
+                                        Without it, false.",
+                        "type": "boolean",
+                    },
+                }),
+            )
+        }
+        Kind::Scale => {
+            rules.push(json!({
+                "oneOf": [
+                    {
+                        "required": ["factor"],
+                        "not": {
+                            "anyOf": [
+                                { "required": ["reference_length"] },
+                                { "required": ["new_length"] },
+                                { "required": ["new_point"] },
+                            ],
+                        },
+                    },
+                    {
+                        "required": ["reference_length", "new_length"],
+                        "not": {
+                            "anyOf": [
+                                { "required": ["factor"] },
+                                { "required": ["new_point"] },
+                            ],
+                        },
+                    },
+                    {
+                        "required": ["reference_length", "new_point"],
+                        "not": {
+                            "anyOf": [
+                                { "required": ["factor"] },
+                                { "required": ["new_length"] },
+                            ],
+                        },
+                    },
+                ],
+            }));
+            (
+                json!(["base_point"]),
+                json!({
+                    "base_point": {
+                        "description": "The point they are scaled about, which stays where it is, \
+                                        as AutoCAD's SCALE takes it: a point or a snapped point.",
+                        "$ref": "#/$defs/snapped_point",
+                    },
+                    "factor": {
+                        "description": "How much they are enlarged, the same along every axis: a \
+                                        number more than 0, less than 1 to make them smaller. \
+                                        Give factor, or reference_length with new_length or \
+                                        new_point.",
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                    },
+                    "reference_length": {
+                        "description": "AutoCAD SCALE's Reference length: a positive length (in \
+                                        the set's declared unit or with its own unit), or two \
+                                        points [from, to] (each a point or snapped point, apart) \
+                                        whose distance is scaled to new_length or new_point.",
+                        "oneOf": [
+                            { "$ref": "#/$defs/length_more_than_0" },
+                            two_points,
+                        ],
+                    },
+                    "new_length": {
+                        "description": "The target length for Reference mode: a positive length, \
+                                        or two points [from, to] (each a point or snapped point, \
+                                        apart, AutoCAD's Points option). Give with \
+                                        reference_length.",
+                        "oneOf": [
+                            { "$ref": "#/$defs/length_more_than_0" },
+                            two_points,
+                        ],
+                    },
+                    "new_point": {
+                        "description": "The target point for Reference mode: a point or snapped \
+                                        point apart from base_point; scales reference_length to \
+                                        the distance from base_point to new_point. Give with \
+                                        reference_length.",
+                        "$ref": "#/$defs/snapped_point",
+                    },
+                    "copy": {
+                        "description": "Keep the source objects and make scaled copies beside \
+                                        them (AutoCAD SCALE's Copy option): true or false. \
+                                        Without it, false.",
+                        "type": "boolean",
+                    },
+                }),
+            )
+        }
         _ => (
             json!(["first_point", "second_point"]),
             json!({
@@ -5819,7 +5971,7 @@ fn transform_schema(kind: Kind) -> Value {
         "type": "object",
         "required": required,
         "additionalProperties": false,
-        "allOf": [copied_objects_rule()],
+        "allOf": rules,
         "properties": properties,
     });
     schema["properties"]["target"] = json!({
@@ -6879,18 +7031,243 @@ pub(crate) enum Motion {
     },
 }
 
+/// An angle given directly in degrees, or as the direction from `from` to
+/// `to` seen from above (AutoCAD ROTATE's Reference / Points option).
+#[derive(Clone, Debug)]
+pub(crate) enum AngleSpec {
+    Degrees(f64),
+    Between {
+        from: Box<OpPoint>,
+        to: Box<OpPoint>,
+    },
+}
+
+/// The target angle of a Reference `rotate`: an angle (degrees or two points)
+/// or a single point whose direction is taken from `base_point`.
+#[derive(Clone, Debug)]
+pub(crate) enum RotateTarget {
+    Angle(AngleSpec),
+    Point(Box<OpPoint>),
+}
+
+/// How `rotate` specifies its turn: a plain angle in degrees, or a reference
+/// angle turned to a new angle or point (#252).
+#[derive(Clone, Debug)]
+pub(crate) enum RotateAngle {
+    Plain(f64),
+    Reference {
+        reference: AngleSpec,
+        target: RotateTarget,
+    },
+}
+
+/// A positive length given directly, or as the 3D distance between `from` and
+/// `to` (AutoCAD SCALE's Reference / Points option).
+#[derive(Clone, Debug)]
+pub(crate) enum LengthSpec {
+    Direct(f64),
+    Between {
+        from: Box<OpPoint>,
+        to: Box<OpPoint>,
+    },
+}
+
+/// The target length of a Reference `scale`: a length (direct or two points)
+/// or a single point whose distance is taken from `base_point`.
+#[derive(Clone, Debug)]
+pub(crate) enum ScaleTarget {
+    Length(LengthSpec),
+    Point(Box<OpPoint>),
+}
+
+/// How `scale` specifies its scale factor: a plain factor > 0, or a reference
+/// length scaled to a new length or point (#252).
+#[derive(Clone, Debug)]
+pub(crate) enum ScaleFactor {
+    Plain(f64),
+    Reference {
+        reference: LengthSpec,
+        target: ScaleTarget,
+    },
+}
+
+/// Direction from `from` to `to` seen from above, in degrees anticlockwise
+/// from `+X`, exact for multiples of 45° and portable via `libm::atan2`
+/// elsewhere. `None` when the two points coincide in XY or are non-finite.
+pub(crate) fn direction_degrees(from: [f64; 3], to: [f64; 3]) -> Option<f64> {
+    let dx = to[0] - from[0];
+    let dy = to[1] - from[1];
+    if !dx.is_finite() || !dy.is_finite() || (dx == 0.0 && dy == 0.0) {
+        return None;
+    }
+    Some(if dy == 0.0 {
+        if dx > 0.0 {
+            0.0
+        } else {
+            180.0
+        }
+    } else if dx == 0.0 {
+        if dy > 0.0 {
+            90.0
+        } else {
+            270.0
+        }
+    } else if dx == dy {
+        if dx > 0.0 {
+            45.0
+        } else {
+            225.0
+        }
+    } else if dx == -dy {
+        if dy > 0.0 {
+            135.0
+        } else {
+            315.0
+        }
+    } else {
+        libm::atan2(dy, dx).to_degrees()
+    })
+}
+
+/// Euclidean distance between `from` and `to`, or `None` when they coincide
+/// or the distance is non-finite.
+pub(crate) fn distance_3d(from: [f64; 3], to: [f64; 3]) -> Option<f64> {
+    let dx = to[0] - from[0];
+    let dy = to[1] - from[1];
+    let dz = to[2] - from[2];
+    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+    (dist.is_finite() && dist > 0.0).then_some(dist)
+}
+
+/// Resolves a `rotate` operation's plain or Reference angle into degrees.
+pub(crate) fn resolve_rotate_angle(
+    angle: &RotateAngle,
+    base: [f64; 3],
+    op: &Operation,
+    mut resolve_point: impl FnMut(&OpPoint) -> Result<[f64; 3], Error>,
+) -> Result<f64, Error> {
+    let mut resolve_spec = |spec: &AngleSpec, field: &str| -> Result<f64, Error> {
+        match spec {
+            AngleSpec::Degrees(deg) => Ok(*deg),
+            AngleSpec::Between { from, to } => {
+                let a = resolve_point(from)?;
+                let b = resolve_point(to)?;
+                direction_degrees(a, b).ok_or_else(|| {
+                    op_error(
+                        op.index,
+                        op.spec.name,
+                        ErrorCode::BadValue,
+                        format!(
+                            "{field}[1] is {field}[0] seen from above, so the two give no \
+                             direction; give two points apart"
+                        ),
+                        &format!("{field}[1]"),
+                    )
+                })
+            }
+        }
+    };
+    match angle {
+        RotateAngle::Plain(deg) => Ok(*deg),
+        RotateAngle::Reference { reference, target } => {
+            let ref_deg = resolve_spec(reference, "reference_angle")?;
+            let new_deg = match target {
+                RotateTarget::Angle(spec) => resolve_spec(spec, "new_angle")?,
+                RotateTarget::Point(pt) => {
+                    let p = resolve_point(pt)?;
+                    direction_degrees(base, p).ok_or_else(|| {
+                        op_error(
+                            op.index,
+                            op.spec.name,
+                            ErrorCode::BadValue,
+                            "new_point is base_point seen from above, so it gives no direction; \
+                             give a point apart from base_point",
+                            "new_point",
+                        )
+                    })?
+                }
+            };
+            Ok(new_deg - ref_deg)
+        }
+    }
+}
+
+/// Resolves a `scale` operation's plain or Reference factor into a positive
+/// scale factor.
+pub(crate) fn resolve_scale_factor(
+    factor: &ScaleFactor,
+    base: [f64; 3],
+    op: &Operation,
+    mut resolve_point: impl FnMut(&OpPoint) -> Result<[f64; 3], Error>,
+) -> Result<f64, Error> {
+    let mut resolve_spec = |spec: &LengthSpec, field: &str| -> Result<f64, Error> {
+        match spec {
+            LengthSpec::Direct(len) => Ok(*len),
+            LengthSpec::Between { from, to } => {
+                let a = resolve_point(from)?;
+                let b = resolve_point(to)?;
+                distance_3d(a, b).ok_or_else(|| {
+                    op_error(
+                        op.index,
+                        op.spec.name,
+                        ErrorCode::BadValue,
+                        format!(
+                            "{field}[1] is {field}[0], so their distance is 0; give two points \
+                             apart"
+                        ),
+                        &format!("{field}[1]"),
+                    )
+                })
+            }
+        }
+    };
+    match factor {
+        ScaleFactor::Plain(f) => Ok(*f),
+        ScaleFactor::Reference { reference, target } => {
+            let ref_len = resolve_spec(reference, "reference_length")?;
+            let new_len = match target {
+                ScaleTarget::Length(spec) => resolve_spec(spec, "new_length")?,
+                ScaleTarget::Point(pt) => {
+                    let p = resolve_point(pt)?;
+                    distance_3d(base, p).ok_or_else(|| {
+                        op_error(
+                            op.index,
+                            op.spec.name,
+                            ErrorCode::BadValue,
+                            "new_point is base_point, so the new length is 0; give a point apart \
+                             from base_point",
+                            "new_point",
+                        )
+                    })?
+                }
+            };
+            let ratio = new_len / ref_len;
+            if !(ratio.is_finite() && ratio > 0.0) {
+                return Err(op_error(
+                    op.index,
+                    op.spec.name,
+                    ErrorCode::BadValue,
+                    "the reference scale factor is not a finite number more than 0",
+                    "reference_length",
+                ));
+            }
+            Ok(ratio)
+        }
+    }
+}
+
 /// How a rotate, a scale or a mirror in place transforms its objects.
 #[derive(Clone, Debug)]
 pub(crate) enum TransformBy {
-    /// Turns them by `angle` degrees, anticlockwise, about `base_point`.
+    /// Turns them by `angle` about `base_point`.
     Rotate {
         base_point: Box<OpPoint>,
-        angle: f64,
+        angle: RotateAngle,
     },
     /// Scales them by `factor` about `base_point`.
     Scale {
         base_point: Box<OpPoint>,
-        factor: f64,
+        factor: ScaleFactor,
     },
     /// Mirrors them across the line through `first` and `second`.
     Mirror {
@@ -6932,6 +7309,16 @@ pub(crate) enum Pattern {
         spacing: Option<f64>,
         align: bool,
     },
+    /// One copy turned about `base_point` by `angle` (ROTATE Copy option).
+    Rotate {
+        base_point: Box<OpPoint>,
+        angle: RotateAngle,
+    },
+    /// One copy scaled about `base_point` by `factor` (SCALE Copy option).
+    Scale {
+        base_point: Box<OpPoint>,
+        factor: ScaleFactor,
+    },
     /// One copy mirrored across the line through `first` and `second`: a
     /// mirror that keeps its source, as AutoCAD's MIRROR does by default.
     Mirror {
@@ -6944,7 +7331,7 @@ impl Pattern {
     /// How many places it puts copies at.
     pub(crate) fn places(&self) -> usize {
         match self {
-            Pattern::Mirror { .. } => 1,
+            Pattern::Rotate { .. } | Pattern::Scale { .. } | Pattern::Mirror { .. } => 1,
             Pattern::Offsets(motions) => motions.len(),
             Pattern::Rectangular { rows, columns, .. } => rows * columns - 1,
             Pattern::Polar { count, .. } | Pattern::Path { count, .. } => count - 1,
@@ -9912,11 +10299,30 @@ fn target_at(at: &str, (code, message, field): KeyError) -> KeyError {
 }
 
 /// A rotate, a scale or a mirror sent as `map`, as `spec` names it: a
-/// mirror that keeps its source is a copy, mirrored.
+/// rotate or scale with `copy: true`, or a mirror that keeps its source,
+/// becomes a copy transformed.
 fn read_transform(map: &Map<String, Value>, spec: &Spec, units: Unit) -> Result<Body, KeyError> {
     let allowed: &[&str] = match spec.kind {
-        Kind::Rotate => &["target", "targets", "base_point", "angle"],
-        Kind::Scale => &["target", "targets", "base_point", "factor"],
+        Kind::Rotate => &[
+            "target",
+            "targets",
+            "base_point",
+            "angle",
+            "reference_angle",
+            "new_angle",
+            "new_point",
+            "copy",
+        ],
+        Kind::Scale => &[
+            "target",
+            "targets",
+            "base_point",
+            "factor",
+            "reference_length",
+            "new_length",
+            "new_point",
+            "copy",
+        ],
         _ => &[
             "target",
             "targets",
@@ -9977,29 +10383,285 @@ fn read_transform(map: &Map<String, Value>, spec: &Spec, units: Unit) -> Result<
             )),
         }
     };
+    let optional_bool = |key: &str| -> Result<bool, KeyError> {
+        match map.get(key) {
+            None => Ok(false),
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(_) => Err((
+                ErrorCode::WrongType,
+                "expected true or false".to_owned(),
+                key.to_owned(),
+            )),
+        }
+    };
+    let read_angle_spec = |key: &str, what: &str| -> Result<AngleSpec, KeyError> {
+        match &map[key] {
+            Value::Number(n) => match n.as_f64() {
+                Some(v) if v.is_finite() => Ok(AngleSpec::Degrees(v)),
+                _ => Err((
+                    ErrorCode::BadNumber,
+                    format!("{key} is too large; expected {what}"),
+                    key.to_owned(),
+                )),
+            },
+            Value::Array(items) if items.len() == 2 => {
+                let a = op_point(&items[0], units, &format!("{key}[0]"))?;
+                let b = op_point(&items[1], units, &format!("{key}[1]"))?;
+                if let (OpPoint::At(pa), OpPoint::At(pb)) = (&a, &b) {
+                    if direction_degrees(*pa, *pb).is_none() {
+                        return Err((
+                            ErrorCode::BadValue,
+                            format!(
+                                "{key}[1] is {key}[0] seen from above, so the two give no \
+                                 direction; give two points apart"
+                            ),
+                            format!("{key}[1]"),
+                        ));
+                    }
+                }
+                Ok(AngleSpec::Between {
+                    from: Box::new(a),
+                    to: Box::new(b),
+                })
+            }
+            _ => Err((
+                ErrorCode::WrongType,
+                format!("expected {what}: a number in degrees or two points [from, to]"),
+                key.to_owned(),
+            )),
+        }
+    };
+    let read_length_spec = |key: &str, what: &str| -> Result<LengthSpec, KeyError> {
+        match &map[key] {
+            Value::Array(items) if items.len() == 2 => {
+                let a = op_point(&items[0], units, &format!("{key}[0]"))?;
+                let b = op_point(&items[1], units, &format!("{key}[1]"))?;
+                if let (OpPoint::At(pa), OpPoint::At(pb)) = (&a, &b) {
+                    if distance_3d(*pa, *pb).is_none() {
+                        return Err((
+                            ErrorCode::BadValue,
+                            format!(
+                                "{key}[1] is {key}[0], so their distance is 0; give two points \
+                                 apart"
+                            ),
+                            format!("{key}[1]"),
+                        ));
+                    }
+                }
+                Ok(LengthSpec::Between {
+                    from: Box::new(a),
+                    to: Box::new(b),
+                })
+            }
+            Value::Array(_) => Err((
+                ErrorCode::WrongType,
+                format!("expected {what}: a positive length or two points [from, to]"),
+                key.to_owned(),
+            )),
+            other => {
+                let len = length(other, units)
+                    .map_err(|message| (ErrorCode::BadNumber, message, key.to_owned()))?;
+                if len <= 0.0 {
+                    return Err((
+                        ErrorCode::BadValue,
+                        format!("{key} is {len}; a reference or target length must be more than 0"),
+                        key.to_owned(),
+                    ));
+                }
+                Ok(LengthSpec::Direct(len))
+            }
+        }
+    };
+    let given = |key: &str| map.contains_key(key);
     let by = match spec.kind {
-        Kind::Rotate => TransformBy::Rotate {
-            base_point: point("base_point", "the point they turn about")?,
-            angle: number(
-                "angle",
-                "how far they turn, in degrees anticlockwise, a number such as 90",
-            )?,
-        },
+        Kind::Rotate => {
+            let base_point = point("base_point", "the point they turn about")?;
+            let copy = optional_bool("copy")?;
+            let angle = match (
+                given("angle"),
+                given("reference_angle"),
+                given("new_angle"),
+                given("new_point"),
+            ) {
+                (true, false, false, false) => RotateAngle::Plain(number(
+                    "angle",
+                    "how far they turn, in degrees anticlockwise, a number such as 90",
+                )?),
+                (false, true, true, false) => RotateAngle::Reference {
+                    reference: read_angle_spec("reference_angle", "the reference angle")?,
+                    target: RotateTarget::Angle(read_angle_spec("new_angle", "the new angle")?),
+                },
+                (false, true, false, true) => {
+                    let reference = read_angle_spec("reference_angle", "the reference angle")?;
+                    let target_pt = point("new_point", "the point giving the new angle")?;
+                    if let (OpPoint::At(base), OpPoint::At(pt)) =
+                        (base_point.as_ref(), target_pt.as_ref())
+                    {
+                        if direction_degrees(*base, *pt).is_none() {
+                            return Err((
+                                ErrorCode::BadValue,
+                                "new_point is base_point seen from above, so it gives no \
+                                 direction; give a point apart from base_point"
+                                    .to_owned(),
+                                "new_point".to_owned(),
+                            ));
+                        }
+                    }
+                    RotateAngle::Reference {
+                        reference,
+                        target: RotateTarget::Point(target_pt),
+                    }
+                }
+                (false, false, false, false) => {
+                    return Err((
+                        ErrorCode::MissingKey,
+                        "missing key `angle`, how far they turn in degrees anticlockwise; or give \
+                         reference_angle with new_angle or new_point"
+                            .to_owned(),
+                        "angle".to_owned(),
+                    ));
+                }
+                (false, true, false, false) => {
+                    return Err((
+                        ErrorCode::MissingKey,
+                        "missing key `new_angle` (or `new_point`): a Reference rotate takes \
+                         reference_angle and either new_angle or new_point"
+                            .to_owned(),
+                        "new_angle".to_owned(),
+                    ));
+                }
+                (false, false, true, _) | (false, false, false, true) => {
+                    return Err((
+                        ErrorCode::MissingKey,
+                        "missing key `reference_angle`: a Reference rotate takes reference_angle \
+                         with new_angle or new_point"
+                            .to_owned(),
+                        "reference_angle".to_owned(),
+                    ));
+                }
+                (false, true, true, true) => {
+                    return Err((
+                        ErrorCode::Usage,
+                        "give new_angle or new_point, not both".to_owned(),
+                        "".to_owned(),
+                    ));
+                }
+                (true, _, _, _) => {
+                    return Err((
+                        ErrorCode::Usage,
+                        "give angle, or reference_angle with new_angle or new_point, not both"
+                            .to_owned(),
+                        "".to_owned(),
+                    ));
+                }
+            };
+            if copy {
+                return Ok(Body::Copy {
+                    targets,
+                    pattern: Pattern::Rotate { base_point, angle },
+                });
+            }
+            TransformBy::Rotate { base_point, angle }
+        }
         Kind::Scale => {
             let base_point = point("base_point", "the point they are scaled about")?;
-            let factor = number(
-                "factor",
-                "how much they are enlarged, a number more than 0 such as 2",
-            )?;
-            if factor <= 0.0 {
-                return Err((
-                    ErrorCode::BadValue,
-                    format!(
-                        "factor is {factor}; a scale factor is more than 0, less than 1 to make \
-                         them smaller"
-                    ),
-                    "factor".to_owned(),
-                ));
+            let copy = optional_bool("copy")?;
+            let factor = match (
+                given("factor"),
+                given("reference_length"),
+                given("new_length"),
+                given("new_point"),
+            ) {
+                (true, false, false, false) => {
+                    let f = number(
+                        "factor",
+                        "how much they are enlarged, a number more than 0 such as 2",
+                    )?;
+                    if f <= 0.0 {
+                        return Err((
+                            ErrorCode::BadValue,
+                            format!(
+                                "factor is {f}; a scale factor is more than 0, less than 1 to \
+                                 make them smaller"
+                            ),
+                            "factor".to_owned(),
+                        ));
+                    }
+                    ScaleFactor::Plain(f)
+                }
+                (false, true, true, false) => ScaleFactor::Reference {
+                    reference: read_length_spec("reference_length", "the reference length")?,
+                    target: ScaleTarget::Length(read_length_spec("new_length", "the new length")?),
+                },
+                (false, true, false, true) => {
+                    let reference = read_length_spec("reference_length", "the reference length")?;
+                    let target_pt = point("new_point", "the point giving the new length")?;
+                    if let (OpPoint::At(base), OpPoint::At(pt)) =
+                        (base_point.as_ref(), target_pt.as_ref())
+                    {
+                        if distance_3d(*base, *pt).is_none() {
+                            return Err((
+                                ErrorCode::BadValue,
+                                "new_point is base_point, so the new length is 0; give a point \
+                                 apart from base_point"
+                                    .to_owned(),
+                                "new_point".to_owned(),
+                            ));
+                        }
+                    }
+                    ScaleFactor::Reference {
+                        reference,
+                        target: ScaleTarget::Point(target_pt),
+                    }
+                }
+                (false, false, false, false) => {
+                    return Err((
+                        ErrorCode::MissingKey,
+                        "missing key `factor`, a scale factor more than 0; or give \
+                         reference_length with new_length or new_point"
+                            .to_owned(),
+                        "factor".to_owned(),
+                    ));
+                }
+                (false, true, false, false) => {
+                    return Err((
+                        ErrorCode::MissingKey,
+                        "missing key `new_length` (or `new_point`): a Reference scale takes \
+                         reference_length and either new_length or new_point"
+                            .to_owned(),
+                        "new_length".to_owned(),
+                    ));
+                }
+                (false, false, true, _) | (false, false, false, true) => {
+                    return Err((
+                        ErrorCode::MissingKey,
+                        "missing key `reference_length`: a Reference scale takes \
+                         reference_length with new_length or new_point"
+                            .to_owned(),
+                        "reference_length".to_owned(),
+                    ));
+                }
+                (false, true, true, true) => {
+                    return Err((
+                        ErrorCode::Usage,
+                        "give new_length or new_point, not both".to_owned(),
+                        "".to_owned(),
+                    ));
+                }
+                (true, _, _, _) => {
+                    return Err((
+                        ErrorCode::Usage,
+                        "give factor, or reference_length with new_length or new_point, not both"
+                            .to_owned(),
+                        "".to_owned(),
+                    ));
+                }
+            };
+            if copy {
+                return Ok(Body::Copy {
+                    targets,
+                    pattern: Pattern::Scale { base_point, factor },
+                });
             }
             TransformBy::Scale { base_point, factor }
         }
@@ -10017,17 +10679,7 @@ fn read_transform(map: &Map<String, Value>, spec: &Spec, units: Unit) -> Result<
                     ));
                 }
             }
-            let erase = match map.get("erase_source") {
-                None => false,
-                Some(Value::Bool(b)) => *b,
-                Some(_) => {
-                    return Err((
-                        ErrorCode::WrongType,
-                        "expected true or false".to_owned(),
-                        "erase_source".to_owned(),
-                    ))
-                }
-            };
+            let erase = optional_bool("erase_source")?;
             if !erase {
                 return Ok(Body::Copy {
                     targets,

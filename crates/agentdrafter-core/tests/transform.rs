@@ -9,9 +9,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, change_with, display_list_with, operations, query_with, read_dwg, undo, Answer,
-    ChangeReport, ChangeRequest, DisplayListRequest, ErrorCode, HowChanged, Object, Query,
-    QueryRequest, Reply, Selection, SetBuildRequest, Settings, UndoRequest,
+    build_set_with, change_with, display_list_with, operations, query_with, read_dwg, revise_with,
+    undo, Answer, ChangeReport, ChangeRequest, DisplayListRequest, ErrorCode, HowChanged, Object,
+    Query, QueryRequest, Reply, ReviseRequest, Selection, SetBuildRequest, Settings, UndoRequest,
 };
 use serde_json::{json, Value};
 
@@ -593,12 +593,317 @@ fn what_cannot_be_held_or_is_wrong_is_refused_and_changes_nothing() {
         (ErrorCode::MissingKey, Some("operations[0].base_point"))
     );
     let e = refused(
-        json!({"op": "rotate", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "angle": 90, "copy": true}),
+        json!({"op": "rotate", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "angle": 90, "twist": true}),
     );
     assert_eq!(e.code, ErrorCode::UnknownKey);
+    let e = refused(
+        json!({"op": "rotate", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "angle": 90, "copy": "yes"}),
+    );
+    assert_eq!(e.code, ErrorCode::WrongType);
     let e = refused(
         json!({"op": "mirror", "target": {"id": "ROT-001/spoke"}, "first_point": [0, 0, 0], "second_point": [0, 1, 0], "erase_source": "yes"}),
     );
     assert_eq!(e.code, ErrorCode::WrongType);
     assert_eq!(snapshot::snapshot(&set), before);
+}
+
+#[test]
+fn rotate_reference_and_copy_options_match_autocad() {
+    let set = strip_set("rotate-ref-copy");
+    let before = snapshot::snapshot(&set);
+
+    // 1) Reference angle in degrees -> new angle in degrees (30 -> 120 = +90 exact).
+    // 2) Reference angle from two snapped points -> new_point from base_point, with copy: true.
+    // 3) Plain angle with copy: true keeps the source and makes a rotated copy.
+    let report = lands(
+        &set,
+        json!([
+            {
+                "op": "rotate",
+                "target": {"id": "ROT-001/spoke"},
+                "base_point": [100, 100, 0],
+                "reference_angle": 30,
+                "new_angle": 120
+            },
+            {
+                "op": "RO",
+                "target": {"id": "ROT-001/spoke"},
+                "base_point": [100, 100, 0],
+                "reference_angle": [
+                    {"snap": {"id": "ROT-001/spoke", "snap": "endpoint", "which": "from"}},
+                    {"snap": {"id": "ROT-001/spoke", "snap": "endpoint", "which": "to"}}
+                ],
+                "new_point": [90, 100, 0],
+                "copy": true
+            },
+            {
+                "op": "rotate",
+                "target": {"id": "ROT-001/note"},
+                "base_point": [70, 10, 0],
+                "reference_angle": [[0, 0, 0], [10, 0, 0]],
+                "new_angle": [[0, 0, 0], [0, 10, 0]],
+                "copy": true
+            }
+        ]),
+    );
+
+    assert_eq!(report.operations[0].transformed, ["ROT-001/spoke"]);
+    assert_eq!(report.operations[1].copies.len(), 1);
+    let copy1 = &report.operations[1].copies[0];
+    assert_eq!(copy1.id, "ROT-001/spoke-1");
+    assert_eq!(copy1.source, "ROT-001/spoke");
+    assert_eq!(copy1.turned, Some(90.0));
+    assert_eq!(copy1.scaled, None);
+    assert_eq!(copy1.about, Some([100.0, 100.0, 0.0]));
+    assert!(copy1.offset.is_none());
+    assert_eq!(report.operations[1].snapped.len(), 2);
+
+    assert_eq!(report.operations[2].copies.len(), 1);
+    let copy2 = &report.operations[2].copies[0];
+    assert_eq!(copy2.id, "ROT-001/note-1");
+    assert_eq!(copy2.turned, Some(90.0));
+
+    let objs = recorded(&set);
+    // spoke was turned +90 (100,100)->(110,100) => (100,100)->(100,110)
+    match &objs["ROT-001/spoke"] {
+        Object::Line(l) => {
+            assert_eq!((l.from.x, l.from.y), (100.0, 100.0));
+            assert_eq!((l.to.x, l.to.y), (100.0, 110.0));
+        }
+        other => panic!("expected line, got {other:?}"),
+    }
+    // spoke-1 is a copy turned another +90 (90 -> 180) => (100,100)->(90,100)
+    match &objs["ROT-001/spoke-1"] {
+        Object::Line(l) => {
+            assert_eq!((l.from.x, l.from.y), (100.0, 100.0));
+            assert_eq!((l.to.x, l.to.y), (90.0, 100.0));
+        }
+        other => panic!("expected line, got {other:?}"),
+    }
+    // Original note stays at rotation 15; copy note-1 is at rotation 105.
+    match (&objs["ROT-001/note"], &objs["ROT-001/note-1"]) {
+        (Object::Text(src), Object::Text(dup)) => {
+            assert!((src.rotation - 15.0).abs() < 1e-9);
+            assert!((dup.rotation - 105.0).abs() < 1e-9);
+        }
+        other => panic!("expected texts, got {other:?}"),
+    }
+
+    // Undo puts the set back byte for byte.
+    let undone = undo(&UndoRequest {
+        set: set.clone(),
+        change_set: report.journal_entry.unwrap(),
+        dry_run: false,
+    });
+    assert!(undone.ok, "{:#?}", undone.error);
+    assert_eq!(snapshot::snapshot(&set), before);
+}
+
+#[test]
+fn scale_reference_and_copy_options_match_autocad() {
+    let set = strip_set("scale-ref-copy");
+    let before = snapshot::snapshot(&set);
+
+    // 1) Reference length in units -> new length in units (10 mm -> 25 mm = 2.5x).
+    // 2) Reference length from snapped endpoints -> new_point from base_point with copy: true.
+    // 3) Reference length from two points -> new_length from two points with copy: true on mleader.
+    let report = lands(
+        &set,
+        json!([
+            {
+                "op": "scale",
+                "target": {"id": "ROT-001/spoke"},
+                "base_point": [100, 100, 0],
+                "reference_length": "10 mm",
+                "new_length": "25 mm"
+            },
+            {
+                "op": "SC",
+                "target": {"id": "ROT-001/spoke"},
+                "base_point": [100, 100, 0],
+                "reference_length": [
+                    {"snap": {"id": "ROT-001/spoke", "snap": "endpoint", "which": "from"}},
+                    {"snap": {"id": "ROT-001/spoke", "snap": "endpoint", "which": "to"}}
+                ],
+                "new_point": [150, 100, 0],
+                "copy": true
+            },
+            {
+                "op": "scale",
+                "target": {"id": "ROT-001/bend"},
+                "base_point": [30, 30, 0],
+                "reference_length": [[0, 0, 0], [4, 0, 0]],
+                "new_length": [[0, 0, 0], [0, 12, 0]],
+                "copy": true
+            }
+        ]),
+    );
+
+    assert_eq!(report.operations[0].transformed, ["ROT-001/spoke"]);
+    assert_eq!(report.operations[1].copies.len(), 1);
+    let copy1 = &report.operations[1].copies[0];
+    assert_eq!(copy1.id, "ROT-001/spoke-1");
+    assert_eq!(copy1.source, "ROT-001/spoke");
+    assert_eq!(copy1.turned, None);
+    assert_eq!(copy1.scaled, Some(2.0));
+    assert_eq!(copy1.about, Some([100.0, 100.0, 0.0]));
+    assert!(copy1.offset.is_none());
+
+    assert_eq!(report.operations[2].copies.len(), 1);
+    let copy2 = &report.operations[2].copies[0];
+    assert_eq!(copy2.id, "ROT-001/bend-1");
+    assert_eq!(copy2.scaled, Some(3.0));
+
+    let objs = recorded(&set);
+    // spoke scaled 2.5x: (100,100)->(125,100); spoke-1 copied and scaled 2x: (100,100)->(150,100).
+    match (&objs["ROT-001/spoke"], &objs["ROT-001/spoke-1"]) {
+        (Object::Line(src), Object::Line(dup)) => {
+            assert!((src.to.x - 125.0).abs() < 1e-9);
+            assert!((dup.to.x - 150.0).abs() < 1e-9);
+        }
+        other => panic!("expected lines, got {other:?}"),
+    }
+    // bend stays radius 4; bend-1 copy has radius 12.
+    match (&objs["ROT-001/bend"], &objs["ROT-001/bend-1"]) {
+        (Object::Arc(src), Object::Arc(dup)) => {
+            assert!((src.radius - 4.0).abs() < 1e-9);
+            assert!((dup.radius - 12.0).abs() < 1e-9);
+        }
+        other => panic!("expected arcs, got {other:?}"),
+    }
+
+    // Undo puts the set back byte for byte.
+    let undone = undo(&UndoRequest {
+        set: set.clone(),
+        change_set: report.journal_entry.unwrap(),
+        dry_run: false,
+    });
+    assert!(undone.ok, "{:#?}", undone.error);
+    assert_eq!(snapshot::snapshot(&set), before);
+}
+
+#[test]
+fn rotate_and_scale_reference_and_copy_validation_errors() {
+    let set = strip_set("ref-copy-errors");
+    let before = snapshot::snapshot(&set);
+    let refused = |op: Value| {
+        let reply = send(&set, json!([op]), false);
+        assert!(!reply.ok, "expected refusal, got {reply:#?}");
+        reply.error.unwrap()
+    };
+    let failed = |op: Value| {
+        let report = send(&set, json!([op]), false).result.unwrap();
+        assert_eq!(report.landed, 0);
+        report.operations[0].error.clone().unwrap()
+    };
+
+    // Mutually exclusive plain + reference options.
+    assert_eq!(
+        refused(json!({"op": "rotate", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "angle": 90, "reference_angle": 0, "new_angle": 90})).code,
+        ErrorCode::Usage
+    );
+    assert_eq!(
+        refused(json!({"op": "rotate", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "reference_angle": 0, "new_angle": 90, "new_point": [1, 0, 0]})).code,
+        ErrorCode::Usage
+    );
+    assert_eq!(
+        refused(json!({"op": "scale", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "factor": 2, "reference_length": 1, "new_length": 2})).code,
+        ErrorCode::Usage
+    );
+    assert_eq!(
+        refused(json!({"op": "scale", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "reference_length": 1, "new_length": 2, "new_point": [2, 0, 0]})).code,
+        ErrorCode::Usage
+    );
+    // Missing half of Reference pair.
+    assert_eq!(
+        refused(json!({"op": "rotate", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "reference_angle": 10})).code,
+        ErrorCode::MissingKey
+    );
+    assert_eq!(
+        refused(json!({"op": "rotate", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "new_angle": 90})).code,
+        ErrorCode::MissingKey
+    );
+    assert_eq!(
+        refused(json!({"op": "scale", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "reference_length": 5})).code,
+        ErrorCode::MissingKey
+    );
+    assert_eq!(
+        refused(json!({"op": "scale", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "new_length": 10})).code,
+        ErrorCode::MissingKey
+    );
+    // Degenerate / non-positive reference values.
+    assert_eq!(
+        refused(json!({"op": "scale", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "reference_length": 0, "new_length": 10})).code,
+        ErrorCode::BadValue
+    );
+    assert_eq!(
+        refused(json!({"op": "scale", "target": {"id": "ROT-001/spoke"}, "base_point": [0, 0, 0], "reference_length": [[1, 1, 0], [1, 1, 0]], "new_length": 10})).code,
+        ErrorCode::BadValue
+    );
+    assert_eq!(
+        refused(json!({"op": "rotate", "target": {"id": "ROT-001/spoke"}, "base_point": [5, 5, 0], "reference_angle": 0, "new_point": [5, 5, 2]})).code,
+        ErrorCode::BadValue
+    );
+    // Table is still refused with copy: true.
+    assert_eq!(
+        failed(json!({"op": "rotate", "target": {"id": "ROT-001/list"}, "base_point": [0, 0, 0], "angle": 90, "copy": true})).code,
+        ErrorCode::BadValue
+    );
+    assert_eq!(
+        failed(json!({"op": "scale", "target": {"id": "ROT-001/list"}, "base_point": [0, 0, 0], "factor": 2, "copy": true})).code,
+        ErrorCode::BadValue
+    );
+    // Snapped points resolving to coincidence fail cleanly.
+    assert_eq!(
+        failed(json!({
+            "op": "scale",
+            "target": {"id": "ROT-001/spoke"},
+            "base_point": [100, 100, 0],
+            "reference_length": 10,
+            "new_point": {"snap": {"id": "ROT-001/spoke", "snap": "endpoint", "which": "from"}}
+        }))
+        .code,
+        ErrorCode::BadValue
+    );
+    assert_eq!(snapshot::snapshot(&set), before);
+}
+
+#[test]
+fn rotate_and_scale_reference_and_copy_work_on_original_dwg() {
+    let set = strip_set("original-ref-copy");
+    let dwg = set.join("dwg").join("ROT-001.dwg");
+    let req: ReviseRequest = serde_json::from_value(json!({
+        "set": dwg,
+        "change_set": {
+            "operations": [
+                {
+                    "op": "rotate",
+                    "target": {"id": "ROT-001/spoke"},
+                    "base_point": [100, 100, 0],
+                    "reference_angle": [[0, 0, 0], [10, 0, 0]],
+                    "new_angle": [[0, 0, 0], [0, 10, 0]],
+                    "copy": true
+                },
+                {
+                    "op": "scale",
+                    "target": {"id": "ROT-001/spoke"},
+                    "base_point": [100, 100, 0],
+                    "reference_length": 10,
+                    "new_length": 25,
+                    "copy": true
+                }
+            ]
+        }
+    }))
+    .unwrap();
+    let reply = revise_with(&req, &Settings::default());
+    assert!(reply.ok, "{:#?}", reply.error);
+    let report = reply.result.unwrap();
+    assert_eq!(report.operations.len(), 2);
+    assert_eq!(report.operations[0].copies.len(), 1);
+    assert_eq!(report.operations[0].copies[0].turned, Some(90.0));
+    assert_eq!(report.operations[0].copies[0].scaled, None);
+    assert_eq!(report.operations[1].copies.len(), 1);
+    assert_eq!(report.operations[1].copies[0].scaled, Some(2.5));
+    assert_eq!(report.operations[1].copies[0].turned, None);
 }

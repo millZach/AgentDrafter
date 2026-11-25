@@ -362,7 +362,10 @@ pub struct Copied {
     /// `about`; left out when it was not turned.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turned: Option<f64>,
-    /// The point it was turned about.
+    /// How much it was scaled about `about`; left out when it was not scaled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scaled: Option<f64>,
+    /// The point it was turned or scaled about.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub about: Option<[f64; 3]>,
     /// For a mirror, the two points of the line it was mirrored across.
