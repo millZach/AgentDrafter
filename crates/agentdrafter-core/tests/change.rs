@@ -1795,11 +1795,14 @@ fn an_adds_schema_takes_exactly_what_the_add_takes() {
             false,
         ),
         // An attribute's fixed parts are one line, as its value is.
+        // Control characters other than line breaks are refused by both schema
+        // and reader; line breaks are accepted by the schema (for multiline
+        // attributes, #117) and refused by the reader on single-line definitions.
         (
             on_template(
                 insert.clone(),
                 "attributes",
-                json!({"TITLE": ["A\n", {"row": "SHEET"}]}),
+                json!({"TITLE": ["A\t", {"row": "SHEET"}]}),
             ),
             false,
         ),

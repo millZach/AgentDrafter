@@ -36,7 +36,8 @@ pub(crate) mod wipeout;
 pub(crate) mod xref;
 pub use annotation_scale::{AnnotationScale, DEFAULT_ANNOTATION_SCALE};
 pub use block::{
-    attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert,
+    attribute_mtext, attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Cell,
+    Insert,
 };
 pub use dimension::{
     AngularUnit, DecimalSeparator, Dimension, DimensionKind, DimensionPart, DimensionStyle,

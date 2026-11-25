@@ -1011,7 +1011,10 @@ fn the_template_schema_accepts_exactly_the_templates_the_reader_accepts() {
             json!([{"value": "A"}]),
             false,
         ),
-        (&ATTRIBUTE_LIST, "[\"A\\nB\"]", json!(["A\nB"]), false),
+        // Control characters other than line breaks are refused by both reader
+        // and schema; line breaks are accepted by the schema (for multiline
+        // attributes, #117) and refused by the reader on single-line definitions.
+        (&ATTRIBUTE_LIST, "[\"A\\tB\"]", json!(["A\tB"]), false),
     ]);
     // A text's contents written in the template must show, as in a sheet
     // description; an attribute's value may be empty.

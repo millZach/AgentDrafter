@@ -14,23 +14,28 @@
 
 use acadrust::entities::{
     AttributeDefinition as DwgAttributeDefinition, AttributeEntity, AttributeFlags,
-    HorizontalAlignment as Horizontal, Insert as DwgInsert, MTextFlag,
-    VerticalAlignment as Vertical,
+    DrawingDirection, HorizontalAlignment as Horizontal, Insert as DwgInsert, LineSpacingStyle,
+    MText as DwgMText, MTextFlag, VerticalAlignment as Vertical,
 };
 use acadrust::tables::{AppId, BlockRecord, TableEntry};
 use acadrust::types::{Handle, Vector3};
 use acadrust::CadDocument;
 
-use super::text::{style_name, text_code, text_contents};
+use super::text::{
+    attachment_of, dwg_mtext, mtext_code, mtext_styled_contents, style_name, text_code,
+    text_contents,
+};
 use super::{point, vector};
 use crate::description::normalize_degrees;
 use crate::error::{Error, ErrorCode};
-use crate::model::block::definition_text;
-use crate::model::{
-    attribute_text, Attribute, AttributeDefinition, Block, Insert, Point3, Xref, XrefKind,
-    LAYER_ZERO,
+use crate::model::block::{
+    attachment_to_justify, definition_mtext, definition_text, justify_to_attachment,
 };
-use crate::text::{Justify, Text};
+use crate::model::{
+    attribute_mtext, attribute_text, Attribute, AttributeDefinition, Block, Insert, Point3, Xref,
+    XrefKind, LAYER_ZERO,
+};
+use crate::text::{Justify, MText, Text};
 
 /// The registered application whose extended data on an object holds its
 /// ID, and on an insert its name as well, each as a key followed by its
@@ -160,13 +165,58 @@ pub(super) fn dwg_xref_insert(insert: &Insert) -> DwgInsert {
 
 /// The DWG attribute definition for one of ours, which starts at `start`:
 /// its position when it is left-justified, and otherwise where AutoCAD
-/// would start its tag.
+/// would start its tag. A multi-line definition (#117) carries an embedded
+/// MTEXT payload as AutoCAD R2018+ writes it.
 pub(super) fn dwg_attribute_definition(
     definition: &AttributeDefinition,
     start_of: &dyn Fn(&Text) -> Point3,
 ) -> DwgAttributeDefinition {
-    let text = definition_text(definition);
     let (_, horizontal, vertical) = alignment(definition.justify);
+    if definition.multiline {
+        let coded = mtext_code(&definition.default, None);
+        let mut dwg =
+            DwgAttributeDefinition::new(definition.tag.clone(), definition.prompt.clone(), coded);
+        dwg.insertion_point = vector(definition.position);
+        dwg.alignment_point = if definition.justify == Justify::Left {
+            Vector3::ZERO
+        } else {
+            vector(definition.position)
+        };
+        dwg.height = definition.height;
+        dwg.rotation = definition.rotation.to_radians();
+        dwg.width_factor = definition.width_factor;
+        dwg.text_style.clone_from(&definition.style);
+        dwg.horizontal_alignment = horizontal;
+        dwg.vertical_alignment = vertical;
+        dwg.flags = AttributeFlags {
+            invisible: definition.invisible,
+            constant: definition.constant,
+            verify: definition.verify,
+            preset: definition.preset,
+            ..AttributeFlags::default()
+        };
+        dwg.lock_position = definition.lock_position;
+        dwg.is_multiline = true;
+        dwg.mtext_flag = if definition.constant {
+            MTextFlag::ConstantMultiLine
+        } else {
+            MTextFlag::MultiLine
+        };
+        dwg.line_count = definition.default.split('\n').count() as i16;
+        let emb_model = MText {
+            contents: definition.default.clone(),
+            width_factor: None,
+            ..definition_mtext(definition)
+        };
+        let mut emb = dwg_mtext(&emb_model);
+        definition.layer.clone_into(&mut emb.common.layer);
+        super::set_properties(&mut emb.common, &definition.properties);
+        dwg.embedded_mtext = Some(Box::new(emb));
+        definition.layer.clone_into(&mut dwg.common.layer);
+        super::set_properties(&mut dwg.common, &definition.properties);
+        return dwg;
+    }
+    let text = definition_text(definition);
     let mut dwg = DwgAttributeDefinition::new(
         definition.tag.clone(),
         definition.prompt.clone(),
@@ -230,8 +280,43 @@ pub(super) fn dwg_insert(
         ));
     }
     for (definition, attribute) in definitions.into_iter().zip(&insert.attributes) {
-        let text = attribute_text(insert, block, definition, &attribute.value);
         let (_, horizontal, vertical) = alignment(definition.justify);
+        if definition.multiline {
+            let mtext = attribute_mtext(insert, block, definition, &attribute.value);
+            let coded = mtext_code(&attribute.value, None);
+            let mut dwg_attribute = AttributeEntity::new(attribute.tag.clone(), coded);
+            dwg_attribute.insertion_point = vector(mtext.position);
+            dwg_attribute.alignment_point = if definition.justify == Justify::Left {
+                Vector3::ZERO
+            } else {
+                vector(mtext.position)
+            };
+            dwg_attribute.height = mtext.height;
+            dwg_attribute.rotation = mtext.rotation.to_radians();
+            dwg_attribute.width_factor = definition.width_factor;
+            dwg_attribute.text_style.clone_from(&mtext.style);
+            dwg_attribute.horizontal_alignment = horizontal;
+            dwg_attribute.vertical_alignment = vertical;
+            dwg_attribute.flags = attribute_flags(definition);
+            dwg_attribute.lock_position = definition.lock_position;
+            dwg_attribute.is_multiline = true;
+            // On an ATTRIB, AutoCAD always uses MultiLine (2), never ConstantMultiLine (4).
+            dwg_attribute.mtext_flag = MTextFlag::MultiLine;
+            dwg_attribute.line_count = attribute.value.split('\n').count() as i16;
+            let emb_model = MText {
+                width_factor: None,
+                ..mtext.clone()
+            };
+            let mut emb = dwg_mtext(&emb_model);
+            emb.common.layer = mtext.layer.clone();
+            super::set_properties(&mut emb.common, &mtext.properties);
+            dwg_attribute.embedded_mtext = Some(Box::new(emb));
+            super::set_properties(&mut dwg_attribute.common, &mtext.properties);
+            dwg_attribute.common.layer = mtext.layer;
+            dwg.attributes.push(dwg_attribute);
+            continue;
+        }
+        let text = attribute_text(insert, block, definition, &attribute.value);
         let mut dwg_attribute =
             AttributeEntity::new(attribute.tag.clone(), text_code(&attribute.value));
         dwg_attribute.insertion_point = vector(start_of(&text));
@@ -268,27 +353,100 @@ fn alignment_point(text: &Text) -> Vector3 {
     }
 }
 
-/// An attribute definition the core can read back exactly: a single line
-/// of text, flat, upright and unslanted, at most invisible.
+/// An attribute definition the core can read back exactly: single-line or
+/// multi-line (#117), flat, upright and unslanted.
 pub(super) fn read_attribute_definition(
     dwg: &DwgAttributeDefinition,
     layer: String,
 ) -> Option<AttributeDefinition> {
-    let plain = dwg.normal == Vector3::UNIT_Z
+    let base_plain = dwg.normal == Vector3::UNIT_Z
         && dwg.oblique_angle == 0.0
         && dwg.thickness == 0.0
         && dwg.text_generation_flags == 0
-        && plain_flags(dwg.flags)
-        && single_line(
-            dwg.mtext_flag,
-            dwg.is_multiline,
-            dwg.embedded_mtext.is_some(),
-        );
-    if !plain {
+        && plain_flags(dwg.flags);
+    if !base_plain {
         return None;
     }
-    let justify = justification(dwg.horizontal_alignment, dwg.vertical_alignment)?;
-    let position = if justify == Justify::Left {
+    if single_line(
+        dwg.mtext_flag,
+        dwg.is_multiline,
+        dwg.embedded_mtext.is_some(),
+    ) {
+        let justify = justification(dwg.horizontal_alignment, dwg.vertical_alignment)?;
+        let position = if justify == Justify::Left {
+            dwg.insertion_point
+        } else {
+            dwg.alignment_point
+        };
+        return Some(AttributeDefinition {
+            tag: dwg.tag.clone(),
+            prompt: dwg.prompt.clone(),
+            default: text_contents(&dwg.default_value)?,
+            position: point(position),
+            height: dwg.height,
+            style: style_name(&dwg.text_style),
+            width_factor: dwg.width_factor,
+            rotation: normalize_degrees(dwg.rotation.to_degrees()),
+            justify,
+            invisible: dwg.flags.invisible,
+            constant: dwg.flags.constant,
+            verify: dwg.flags.verify,
+            preset: dwg.flags.preset,
+            lock_position: dwg.lock_position,
+            multiline: false,
+            width: 0.0,
+            layer,
+            properties: Default::default(),
+        });
+    }
+    // Multi-line attribute definition (#117).
+    if let Some(emb) = dwg.embedded_mtext.as_deref() {
+        if !plain_embedded_mtext(emb) {
+            return None;
+        }
+        let (default, wf, u, o) = mtext_styled_contents(&emb.value)?;
+        if u || o {
+            return None;
+        }
+        let justify = attachment_to_justify(attachment_of(emb.attachment_point)?);
+        let height = if emb.height > 0.0 {
+            emb.height
+        } else {
+            dwg.height
+        };
+        let style = if !emb.style.is_empty() {
+            style_name(&emb.style)
+        } else {
+            style_name(&dwg.text_style)
+        };
+        return Some(AttributeDefinition {
+            tag: dwg.tag.clone(),
+            prompt: dwg.prompt.clone(),
+            default,
+            position: point(emb.insertion_point),
+            height,
+            style,
+            width_factor: wf.unwrap_or(dwg.width_factor),
+            rotation: normalize_degrees(emb.rotation.to_degrees()),
+            justify,
+            invisible: dwg.flags.invisible,
+            constant: dwg.flags.constant,
+            verify: dwg.flags.verify,
+            preset: dwg.flags.preset,
+            lock_position: dwg.lock_position,
+            multiline: true,
+            width: emb.rectangle_width,
+            layer,
+            properties: Default::default(),
+        });
+    }
+    // Multi-line without an embedded MTEXT payload (e.g. older DWG/DXF).
+    let (default, wf, u, o) = mtext_styled_contents(&dwg.default_value)?;
+    if u || o {
+        return None;
+    }
+    let raw_justify = justification(dwg.horizontal_alignment, dwg.vertical_alignment)?;
+    let position = if raw_justify == Justify::Left {
         dwg.insertion_point
     } else {
         dwg.alignment_point
@@ -296,18 +454,20 @@ pub(super) fn read_attribute_definition(
     Some(AttributeDefinition {
         tag: dwg.tag.clone(),
         prompt: dwg.prompt.clone(),
-        default: text_contents(&dwg.default_value)?,
+        default,
         position: point(position),
         height: dwg.height,
         style: style_name(&dwg.text_style),
-        width_factor: dwg.width_factor,
+        width_factor: wf.unwrap_or(dwg.width_factor),
         rotation: normalize_degrees(dwg.rotation.to_degrees()),
-        justify,
+        justify: attachment_to_justify(justify_to_attachment(raw_justify)),
         invisible: dwg.flags.invisible,
         constant: dwg.flags.constant,
         verify: dwg.flags.verify,
         preset: dwg.flags.preset,
         lock_position: dwg.lock_position,
+        multiline: true,
+        width: 0.0,
         layer,
         properties: Default::default(),
     })
@@ -423,27 +583,93 @@ fn read_attribute(
     block: &Block,
     definition: &AttributeDefinition,
 ) -> Option<String> {
-    let value = text_contents(&dwg.value)?;
-    let expected = attribute_text(insert, block, definition, &value);
     let layer = if dwg.common.layer.is_empty() {
         LAYER_ZERO
     } else {
         dwg.common.layer.as_str()
     };
-    let position = if expected.justify == Justify::Left {
-        dwg.insertion_point
-    } else {
-        dwg.alignment_point
-    };
-    let same = !dwg.common.invisible
-        && super::read_properties(&dwg.common).as_ref() == Some(&expected.properties)
+    let common_same = !dwg.common.invisible
         && dwg.tag == definition.tag
         && dwg.normal == Vector3::UNIT_Z
         && dwg.oblique_angle == 0.0
         && dwg.thickness == 0.0
         && dwg.text_generation_flags == 0
         && dwg.flags == attribute_flags(definition)
-        && dwg.lock_position == definition.lock_position
+        && dwg.lock_position == definition.lock_position;
+    if !common_same {
+        return None;
+    }
+    if definition.multiline {
+        let is_ml = dwg.is_multiline
+            || dwg.mtext_flag != MTextFlag::SingleLine
+            || dwg.embedded_mtext.is_some();
+        if !is_ml {
+            return None;
+        }
+        if let Some(emb) = dwg.embedded_mtext.as_deref() {
+            if !plain_embedded_mtext(emb) {
+                return None;
+            }
+            let (value, wf, u, o) = mtext_styled_contents(&emb.value)?;
+            if u || o {
+                return None;
+            }
+            let expected = attribute_mtext(insert, block, definition, &value);
+            let emb_style = if !emb.style.is_empty() {
+                style_name(&emb.style)
+            } else {
+                style_name(&dwg.text_style)
+            };
+            let emb_height = if emb.height > 0.0 {
+                emb.height
+            } else {
+                dwg.height
+            };
+            let same = super::read_properties(&dwg.common).as_ref() == Some(&expected.properties)
+                && layer == expected.layer
+                && attachment_of(emb.attachment_point) == Some(expected.justify)
+                && emb_style == expected.style
+                && wf.unwrap_or(dwg.width_factor) == definition.width_factor
+                && close(emb_height, expected.height, expected.height)
+                && close(
+                    emb.rectangle_width,
+                    expected.width,
+                    expected.width.max(expected.height),
+                )
+                && same_angle(emb.rotation.to_degrees(), expected.rotation)
+                && same_point(point(emb.insertion_point), expected.position);
+            return same.then_some(value);
+        }
+        let (value, wf, u, o) = mtext_styled_contents(&dwg.value)?;
+        if u || o {
+            return None;
+        }
+        let expected = attribute_mtext(insert, block, definition, &value);
+        let raw_justify = justification(dwg.horizontal_alignment, dwg.vertical_alignment)?;
+        let position = if raw_justify == Justify::Left {
+            dwg.insertion_point
+        } else {
+            dwg.alignment_point
+        };
+        let same = super::read_properties(&dwg.common).as_ref() == Some(&expected.properties)
+            && layer == expected.layer
+            && justify_to_attachment(raw_justify) == expected.justify
+            && style_name(&dwg.text_style) == expected.style
+            && wf.unwrap_or(dwg.width_factor) == definition.width_factor
+            && close(dwg.height, expected.height, expected.height)
+            && close(0.0, expected.width, expected.height)
+            && same_angle(dwg.rotation.to_degrees(), expected.rotation)
+            && same_point(point(position), expected.position);
+        return same.then_some(value);
+    }
+    let value = text_contents(&dwg.value)?;
+    let expected = attribute_text(insert, block, definition, &value);
+    let position = if expected.justify == Justify::Left {
+        dwg.insertion_point
+    } else {
+        dwg.alignment_point
+    };
+    let same = super::read_properties(&dwg.common).as_ref() == Some(&expected.properties)
         && single_line(
             dwg.mtext_flag,
             dwg.is_multiline,
@@ -458,6 +684,20 @@ fn read_attribute(
         && same_angle(dwg.rotation.to_degrees(), expected.rotation)
         && same_point(point(position), expected.position);
     same.then_some(value)
+}
+
+/// Whether an embedded MTEXT payload on a multi-line attribute has only the
+/// layout properties the core models.
+fn plain_embedded_mtext(emb: &DwgMText) -> bool {
+    emb.normal == Vector3::UNIT_Z
+        && emb.line_spacing_style == LineSpacingStyle::AtLeast
+        && close(emb.line_spacing_factor, 1.0, 1.0)
+        && matches!(
+            emb.drawing_direction,
+            DrawingDirection::LeftToRight | DrawingDirection::ByStyle
+        )
+        && emb.background_fill_flags == 0
+        && emb.rectangle_width >= 0.0
 }
 
 /// Whether an attribute definition's modes are those the core models:
@@ -528,6 +768,8 @@ mod tests {
             properties: Default::default(),
             constant: false,
             lock_position: false,
+            multiline: false,
+            width: 0.0,
             preset: false,
             verify: false,
         }
@@ -735,6 +977,57 @@ mod tests {
                 ours
             );
         }
+    }
+
+    #[test]
+    fn a_multiline_attribute_definition_and_insert_read_back() {
+        let mut def = definition("NOTES", Justify::TopLeft);
+        def.multiline = true;
+        def.width = 40.0;
+        def.default = "LINE ONE\nLINE TWO".into();
+        let written_def = dwg_attribute_definition(&def, &|t| t.position);
+        assert!(written_def.is_multiline);
+        assert_eq!(written_def.mtext_flag, MTextFlag::MultiLine);
+        assert!(written_def.embedded_mtext.is_some());
+        let read_def = read_attribute_definition(&written_def, LAYER_ZERO.into()).unwrap();
+        assert_eq!(read_def, def);
+
+        let blk = Block {
+            name: "NOTEBLK".into(),
+            base_point: Point3::new(0.0, 0.0, 0.0),
+            objects: vec![crate::model::Object::AttributeDefinition(def)],
+            cells: Vec::new(),
+            parameters: Vec::new(),
+            annotative: false,
+        };
+        let ins = Insert {
+            block: "NOTEBLK".into(),
+            position: Point3::new(10.0, 20.0, 0.0),
+            scale: 2.0,
+            rotation: 0.0,
+            mirrored: false,
+            readable_attributes: false,
+            attributes: vec![Attribute {
+                tag: "NOTES".into(),
+                value: "FIRST\nSECOND\nTHIRD".into(),
+                field: None,
+            }],
+            state: std::collections::BTreeMap::new(),
+            evaluated_block: None,
+            name: None,
+            annotative: false,
+            annotation_scales: Vec::new(),
+            layer: "0".into(),
+            properties: Default::default(),
+        };
+        let written_ins = dwg_insert(&ins, &blk, &|t| t.position).unwrap();
+        assert!(written_ins.attributes[0].is_multiline);
+        assert_eq!(written_ins.attributes[0].mtext_flag, MTextFlag::MultiLine);
+        let emb = written_ins.attributes[0].embedded_mtext.as_ref().unwrap();
+        assert_eq!(emb.rectangle_width, 80.0); // 40.0 * scale 2.0
+        assert_eq!(emb.value, "FIRST\\PSECOND\\PTHIRD");
+        let read_ins = read_insert(&written_ins, "0".into(), &[blk]).unwrap();
+        assert_eq!(read_ins.attributes[0].value, "FIRST\nSECOND\nTHIRD");
     }
 
     #[test]

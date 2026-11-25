@@ -1234,7 +1234,29 @@ impl RevisionSession {
             ));
         }
         let mut record = MutationHandles::default();
-        let coded = text::text_code(value);
+        let is_multiline = match self.drawing.get_entity(handle) {
+            Some(EntityType::Insert(ins)) => {
+                let att = &ins.attributes[chosen];
+                att.is_multiline
+                    || att.mtext_flag != acadrust::entities::MTextFlag::SingleLine
+                    || att.embedded_mtext.is_some()
+            }
+            _ => unreachable!("checked above"),
+        };
+        if !is_multiline && value.contains(['\n', '\r']) {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "attribute `{tag}` on insert `{hex}` is single-line and cannot contain line \
+                     breaks"
+                ),
+            ));
+        }
+        let coded = if is_multiline {
+            text::mtext_code(value, None)
+        } else {
+            text::text_code(value)
+        };
         let ins = match self.drawing.get_entity_mut(handle) {
             Some(EntityType::Insert(ins)) => ins,
             _ => unreachable!("checked above"),
@@ -1242,11 +1264,14 @@ impl RevisionSession {
         ins.common.raw_record = None;
         let att = &mut ins.attributes[chosen];
         let old = att.value.clone();
-        att.value = coded;
+        att.value = coded.clone();
         att.common.raw_record = None;
         if let Some(mtext) = att.embedded_mtext.as_mut() {
-            mtext.value = text::mtext_code(value, None);
+            mtext.value = coded;
             mtext.common.raw_record = None;
+        }
+        if is_multiline {
+            att.line_count = value.split('\n').count() as i16;
         }
         let att_handle = att.common.handle;
         self.expected_touched.insert(handle.value());

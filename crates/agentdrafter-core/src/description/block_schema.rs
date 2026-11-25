@@ -99,14 +99,15 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
     defs.insert(
         "attribute_value".into(),
         optional_text(json!({
-            "description": "An attribute's value: one line of text, exactly as it shows, which \
-                            may be empty. No control characters, and no \\U+ with four \
-                            hexadecimal digits or \\M+ with five, which AutoCAD reads as a \
-                            character code.",
+            "description": "An attribute's value, exactly as it shows, which may be empty: one \
+                            line for a single-line attribute, or one or more lines (\\n starts a \
+                            new line) for a multiline attribute. No control characters other than \
+                            line breaks, and no \\U+ with four hexadecimal digits or \\M+ with \
+                            five, which AutoCAD reads as a character code.",
             "anyOf": [
                 {
                     "type": "string",
-                    "pattern": format!("^[^{CONTROL}]*$"),
+                    "pattern": "^[^\\x00-\\x09\\x0b\\x0c\\x0e-\\x1f\\x7f-\\x9f]*$",
                     "not": { "pattern": "\\\\[Uu]\\+[0-9A-Fa-f]{4}|\\\\[Mm]\\+[0-9A-Fa-f]{5}" },
                 },
                 { "type": ["number", "boolean"] },
@@ -296,6 +297,18 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                                     from its insert, as its Lock position mode keeps it. It \
                                     changes nothing that is drawn. Without it, false.",
                     "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
+                },
+                "multiline": {
+                    "description": "Whether the attribute is multi-line (AutoCAD's ATTDEF \
+                                    Multiple lines mode): its value draws as mtext, wrapped in \
+                                    `width`, with line breaks. Without it, false.",
+                    "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
+                },
+                "width": {
+                    "$ref": "#/$defs/length_not_negative",
+                    "description": "For a multi-line attribute (`multiline: true`), the width \
+                                    lines wrap in: a length of 0 or more. Without it, 0, and \
+                                    lines break only where the value breaks them.",
                 },
             }),
         ),

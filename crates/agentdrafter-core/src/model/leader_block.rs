@@ -750,6 +750,8 @@ mod tests {
             verify: false,
             preset: false,
             lock_position: false,
+            multiline: false,
+            width: 0.0,
             layer: "0".into(),
             properties: Properties::default(),
         })

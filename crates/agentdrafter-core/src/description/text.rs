@@ -548,7 +548,7 @@ pub(super) fn justify(fields: &Fields) -> Result<Justify, Error> {
         .map(|found| found.map_or(Justify::Left, |i| Justify::ALL[i]))
 }
 
-fn attachment(fields: &Fields) -> Result<Attachment, Error> {
+pub(super) fn attachment(fields: &Fields) -> Result<Attachment, Error> {
     let names = Attachment::ALL.map(Attachment::name);
     named_choice(fields, "multiline text", &names)
         .map(|found| found.map_or(Attachment::TopLeft, |i| Attachment::ALL[i]))

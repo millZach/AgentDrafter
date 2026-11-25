@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::dynamic_block::{DynamicParameter, DynamicValue};
 use super::{is_false, layer_zero, Layer, Linetype, Object, Point3, LAYER_ZERO};
 use crate::description::normalize_degrees;
-use crate::text::{Justify, Text, TextStyle, STANDARD};
+use crate::text::{Attachment, Justify, MText, Text, TextStyle, STANDARD};
 use crate::units::Unit;
 
 fn standard() -> String {
@@ -26,6 +26,11 @@ fn standard() -> String {
 
 fn one() -> f64 {
     1.0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
 
 /// A named group of objects defined once and inserted many times, as in
@@ -177,10 +182,58 @@ pub struct AttributeDefinition {
     /// is drawn.
     #[serde(default, skip_serializing_if = "is_false")]
     pub lock_position: bool,
+    /// Whether the attribute is multi-line (AutoCAD's ATTDEF Multiple lines
+    /// mode, #117): its value draws as multiline text, wrapped in `width`
+    /// with line breaks.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub multiline: bool,
+    /// For a multi-line attribute, the boundary width lines wrap in, in the
+    /// block's declared unit (0 for lines that break only at explicit line
+    /// breaks). Always 0 for a single-line attribute.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub width: f64,
     #[serde(default = "layer_zero")]
     pub layer: String,
     #[serde(flatten)]
     pub properties: crate::model::Properties,
+}
+
+impl AttributeDefinition {
+    /// The multiline text attachment corresponding to this definition's
+    /// justification.
+    pub fn attachment(&self) -> Attachment {
+        justify_to_attachment(self.justify)
+    }
+}
+
+/// Maps a [`Justify`] alignment to an mtext [`Attachment`].
+pub(crate) fn justify_to_attachment(justify: Justify) -> Attachment {
+    match justify {
+        Justify::Left | Justify::TopLeft => Attachment::TopLeft,
+        Justify::Center | Justify::TopCenter => Attachment::TopCenter,
+        Justify::Right | Justify::TopRight => Attachment::TopRight,
+        Justify::MiddleLeft => Attachment::MiddleLeft,
+        Justify::Middle | Justify::MiddleCenter => Attachment::MiddleCenter,
+        Justify::MiddleRight => Attachment::MiddleRight,
+        Justify::BottomLeft => Attachment::BottomLeft,
+        Justify::BottomCenter => Attachment::BottomCenter,
+        Justify::BottomRight => Attachment::BottomRight,
+    }
+}
+
+/// Maps an mtext [`Attachment`] to the matching [`Justify`] value.
+pub(crate) fn attachment_to_justify(attachment: Attachment) -> Justify {
+    match attachment {
+        Attachment::TopLeft => Justify::TopLeft,
+        Attachment::TopCenter => Justify::TopCenter,
+        Attachment::TopRight => Justify::TopRight,
+        Attachment::MiddleLeft => Justify::MiddleLeft,
+        Attachment::MiddleCenter => Justify::MiddleCenter,
+        Attachment::MiddleRight => Justify::MiddleRight,
+        Attachment::BottomLeft => Justify::BottomLeft,
+        Attachment::BottomCenter => Justify::BottomCenter,
+        Attachment::BottomRight => Justify::BottomRight,
+    }
 }
 
 /// One attribute an insert carries: the value of the block's attribute
@@ -308,6 +361,46 @@ pub fn attribute_text(
             normalize_degrees(definition.rotation + insert.rotation)
         },
         justify: definition.justify,
+        underline: false,
+        overline: false,
+        layer,
+        field: None,
+        properties: definition.properties.clone(),
+        annotative: false,
+        annotation_scales: Vec::new(),
+    }
+}
+
+/// The multiline text a multi-line attribute draws on an insert of `block`:
+/// its definition's geometry, moved, scaled (including its wrap `width`) and
+/// turned with the insert, saying `value` (#117).
+pub fn attribute_mtext(
+    insert: &Insert,
+    block: &Block,
+    definition: &AttributeDefinition,
+    value: &str,
+) -> MText {
+    let layer = if definition.layer == LAYER_ZERO {
+        insert.layer.clone()
+    } else {
+        definition.layer.clone()
+    };
+    MText {
+        contents: value.to_owned(),
+        runs: Vec::new(),
+        position: place(insert, block.base_point, definition.position),
+        height: definition.height * insert.scale,
+        width: definition.width * insert.scale,
+        style: definition.style.clone(),
+        width_factor: Some(definition.width_factor),
+        rotation: if insert.mirrored {
+            readable(insert.rotation + 180.0 - definition.rotation)
+        } else if insert.readable_attributes && !definition.constant {
+            readable(definition.rotation + insert.rotation)
+        } else {
+            normalize_degrees(definition.rotation + insert.rotation)
+        },
+        justify: definition.attachment(),
         underline: false,
         overline: false,
         layer,
@@ -452,6 +545,29 @@ pub(crate) fn definition_text(definition: &AttributeDefinition) -> Text {
     }
 }
 
+/// The multiline text a multi-line attribute definition draws in its block:
+/// showing its tag at its attachment point and boundary width (#117).
+pub(crate) fn definition_mtext(definition: &AttributeDefinition) -> MText {
+    MText {
+        contents: definition.tag.clone(),
+        runs: Vec::new(),
+        position: definition.position,
+        height: definition.height,
+        width: definition.width,
+        style: definition.style.clone(),
+        width_factor: Some(definition.width_factor),
+        rotation: definition.rotation,
+        justify: definition.attachment(),
+        underline: false,
+        overline: false,
+        layer: definition.layer.clone(),
+        field: None,
+        properties: definition.properties.clone(),
+        annotative: false,
+        annotation_scales: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +588,8 @@ mod tests {
             properties: Default::default(),
             constant: false,
             lock_position: false,
+            multiline: false,
+            width: 0.0,
             preset: false,
             verify: false,
         }

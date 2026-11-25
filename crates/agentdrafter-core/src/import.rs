@@ -243,23 +243,26 @@ pub(crate) fn carries(
     let style_known = |name: &str| name == STANDARD || styles.iter().any(|s| s.name == name);
     let one_line = |text: &str| !text.chars().any(char::is_control);
     let shows = |text: &str| !text.trim().is_empty();
+    let multi_line = |text: &str| !text.chars().any(|c| c.is_control() && c != '\n');
     layer_known
         && linetype_known
         && match object {
             Object::Text(t) => style_known(&t.style) && shows(&t.contents) && one_line(&t.contents),
             Object::MText(t) => {
-                style_known(&t.style)
-                    && shows(&t.contents)
-                    && !t.contents.chars().any(|c| c.is_control() && c != '\n')
+                style_known(&t.style) && shows(&t.contents) && multi_line(&t.contents)
             }
             Object::AttributeDefinition(d) => {
                 style_known(&d.style)
-                    && one_line(&d.default)
+                    && if d.multiline {
+                        multi_line(&d.default)
+                    } else {
+                        one_line(&d.default)
+                    }
                     && one_line(&d.prompt)
                     && !d.tag.is_empty()
                     && !d.tag.chars().any(|c| c.is_whitespace() || c.is_control())
             }
-            Object::Insert(insert) => insert.attributes.iter().all(|a| one_line(&a.value)),
+            Object::Insert(insert) => insert.attributes.iter().all(|a| multi_line(&a.value)),
             Object::Polyline(p) => p.points.len() >= if p.closed { 3 } else { 2 },
             _ => true,
         }
@@ -1770,8 +1773,19 @@ fn object_value(object: &Object, names: &Names) -> Value {
             if degrees(definition.rotation) != 0.0 {
                 put("rotation", json!(degrees(definition.rotation)));
             }
-            if definition.justify != Justify::Left {
+            let default_justify = if definition.multiline {
+                Justify::TopLeft
+            } else {
+                Justify::Left
+            };
+            if definition.justify != default_justify {
                 put("justify", json!(definition.justify.name()));
+            }
+            if definition.multiline {
+                put("multiline", json!(true));
+                if definition.width != 0.0 {
+                    put("width", json!(definition.width));
+                }
             }
             // A constant attribute asks nobody for its value, so AutoCAD's
             // ATTDEF gives it no Verify or Preset, and nor does a library.

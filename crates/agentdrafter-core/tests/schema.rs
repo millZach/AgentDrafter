@@ -520,13 +520,16 @@ fn cases() -> Vec<Case> {
         (&INSERT_SCALE, "-1", json!(-1), false),
         (&INSERT_SCALE, "'2 mm'", json!("2 mm"), false),
         (&INSERT_SCALE, "big", json!("big"), false),
-        // An attribute's value: one line of text, which may be empty.
+        // An attribute's value: text which may be empty. Line breaks are
+        // allowed by the schema (for multiline attributes, #117) and enforced
+        // per block definition by the reader; other control characters are
+        // refused by both.
         (&ATTRIBUTE_VALUE, "A-1", json!("A-1"), true),
         (&ATTRIBUTE_VALUE, "100", json!(100), true),
         (&ATTRIBUTE_VALUE, "'yes'", json!("yes"), true),
         (&ATTRIBUTE_VALUE, "''", json!(""), true),
         (&ATTRIBUTE_VALUE, "'50%'", json!("50%"), true),
-        (&ATTRIBUTE_VALUE, "\"A\\nB\"", json!("A\nB"), false),
+        (&ATTRIBUTE_VALUE, "\"A\\tB\"", json!("A\tB"), false),
         (&ATTRIBUTE_VALUE, "'\\U+00B0'", json!("\\U+00B0"), false),
         // A tag the block defines more than once takes a list of values,
         // as long as the times it defines it or shorter, null taking the
@@ -539,7 +542,7 @@ fn cases() -> Vec<Case> {
         (&ATTRIBUTE_LIST, "[]", json!([]), true),
         (&ATTRIBUTE_LIST, "[[A]]", json!([["A"]]), false),
         (&ATTRIBUTE_LIST, "[{a: b}]", json!([{"a": "b"}]), false),
-        (&ATTRIBUTE_LIST, "[\"A\\nB\"]", json!(["A\nB"]), false),
+        (&ATTRIBUTE_LIST, "[\"A\\tB\"]", json!(["A\tB"]), false),
         (&ATTRIBUTE_LIST, "['\\U+00B0']", json!(["\\U+00B0"]), false),
         // An attribute's tag, as a key: written in lowercase, it is taken
         // in capitals, as AutoCAD keeps it.

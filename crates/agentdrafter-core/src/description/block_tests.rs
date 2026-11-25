@@ -127,6 +127,8 @@ fn a_library_reads_its_blocks_with_their_attribute_definitions() {
             properties: Default::default(),
             constant: false,
             lock_position: false,
+            multiline: false,
+            width: 0.0,
             preset: false,
             verify: false,
         })
@@ -148,6 +150,8 @@ fn a_library_reads_its_blocks_with_their_attribute_definitions() {
             properties: Default::default(),
             constant: false,
             lock_position: false,
+            multiline: false,
+            width: 0.0,
             preset: false,
             verify: false,
         })
