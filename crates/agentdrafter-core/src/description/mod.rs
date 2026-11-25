@@ -752,20 +752,29 @@ pub(crate) fn normalize_degrees(degrees: f64) -> f64 {
     }
 }
 
-/// The sine and cosine of `degrees`: exact for a multiple of 90°, with no
-/// platform sine or cosine, so that a quarter turn writes the same bytes on
-/// every system (#243); the platform's elsewhere.
+/// The sine and cosine of `degrees`: exact for multiples of 45°, and
+/// computed portably with [`libm::sincos`] elsewhere, so that angled hatch
+/// patterns and rotated geometry write the same bytes on every system (#243).
 pub(crate) fn sin_cos_degrees(degrees: f64) -> (f64, f64) {
-    let quarter = degrees / 90.0;
-    if quarter.fract() == 0.0 && quarter.is_finite() {
-        return match quarter.rem_euclid(4.0) as u8 {
+    if !degrees.is_finite() {
+        return (f64::NAN, f64::NAN);
+    }
+    let turned = normalize_degrees(degrees);
+    let eighth = turned / 45.0;
+    if eighth.fract() == 0.0 {
+        use std::f64::consts::FRAC_1_SQRT_2 as H;
+        return match (eighth as u8) % 8 {
             0 => (0.0, 1.0),
-            1 => (1.0, 0.0),
-            2 => (0.0, -1.0),
-            _ => (-1.0, 0.0),
+            1 => (H, H),
+            2 => (1.0, 0.0),
+            3 => (H, -H),
+            4 => (0.0, -1.0),
+            5 => (-H, -H),
+            6 => (-1.0, 0.0),
+            _ => (-H, H),
         };
     }
-    degrees.to_radians().sin_cos()
+    libm::sincos(turned.to_radians())
 }
 
 fn boolean(node: &Node, path: &str) -> Result<bool, Error> {

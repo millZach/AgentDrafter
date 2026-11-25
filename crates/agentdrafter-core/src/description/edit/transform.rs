@@ -84,7 +84,7 @@ impl Transform {
         } else if dx == -dy {
             135.0
         } else {
-            dy.atan2(dx).to_degrees().rem_euclid(180.0)
+            libm::atan2(dy, dx).to_degrees().rem_euclid(180.0)
         };
         Some(Transform {
             about: a,
