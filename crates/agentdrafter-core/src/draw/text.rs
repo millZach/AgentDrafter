@@ -33,12 +33,12 @@ use crate::text::{Attachment, MText, MTextRun, Text};
 const LINE_SPACING: f64 = 5.0 / 3.0;
 
 /// What a piece of text draws: its shapes, any inline-coloured shapes
-/// (MTEXT `\C<n>;`, #61), and each line it draws as a run of characters along
-/// its baseline.
+/// (MTEXT `\C<n>;` / `\c<bgr>;`, #61, #106), and each line it draws as a run
+/// of characters along its baseline.
 #[derive(Default)]
 pub(super) struct Lettering {
     pub shapes: Vec<Shape>,
-    pub colored: Vec<(Color, Shape)>,
+    pub colored: Vec<(Color, Option<[u8; 3]>, Shape)>,
     pub runs: Vec<TextRun>,
 }
 
@@ -342,7 +342,7 @@ struct RichStyle<'a> {
     bold_stroke: bool,
     underline: bool,
     overline: bool,
-    color: Option<Color>,
+    color: Option<(Color, Option<[u8; 3]>)>,
 }
 
 /// One styled text segment inside a visual line of rich MTEXT.
@@ -391,7 +391,8 @@ fn resolve_run_style<'a>(
     let tracking = run.tracking.unwrap_or(1.0);
     let bold_stroke = run.bold && !has_bold_face;
     let color = match run.color {
-        Some(ObjectColor::Index(i)) => Some(Color(i)),
+        Some(ObjectColor::Index(i)) => Some((Color(i), None)),
+        Some(ObjectColor::Rgb(rgb)) => Some((Color(crate::model::WHITE), Some(rgb))),
         _ => None,
     };
     RichStyle {
@@ -601,7 +602,7 @@ fn draw_mtext_rich(text: &MText, fonts: &SheetFonts, lineweight: f64, tolerance:
     let origin = [text.position.x, text.position.y];
 
     let mut shapes: Vec<Shape> = Vec::new();
-    let mut colored: Vec<(Color, Shape)> = Vec::new();
+    let mut colored: Vec<(Color, Option<[u8; 3]>, Shape)> = Vec::new();
     let mut runs: Vec<TextRun> = Vec::new();
 
     for (line, &baseline) in laid.lines.iter().zip(&laid.baselines) {
@@ -715,7 +716,7 @@ fn draw_mtext_rich(text: &MText, fonts: &SheetFonts, lineweight: f64, tolerance:
                     runs: seg_strokes,
                 };
                 match st.color {
-                    Some(c) => colored.push((c, s)),
+                    Some((c, tc)) => colored.push((c, tc, s)),
                     None => shapes.push(s),
                 }
             }
@@ -725,7 +726,7 @@ fn draw_mtext_rich(text: &MText, fonts: &SheetFonts, lineweight: f64, tolerance:
                     contours: seg_fills,
                 };
                 match st.color {
-                    Some(c) => colored.push((c, s)),
+                    Some((c, tc)) => colored.push((c, tc, s)),
                     None => shapes.push(s),
                 }
             }
@@ -1100,7 +1101,7 @@ mod tests {
         // First run uses TrueType (`madeup.ttf`) + inline color 1 -> filled shape in `colored`.
         assert_eq!(drawn.colored.len(), 1);
         assert_eq!(drawn.colored[0].0, Color(1));
-        assert!(matches!(drawn.colored[0].1, Shape::Fill { .. }));
+        assert!(matches!(drawn.colored[0].2, Shape::Fill { .. }));
         // Third run uses Hershey with bold stroke (0.25 * 1.5 = 0.375) in default `shapes`.
         assert_eq!(drawn.shapes.len(), 1);
         match &drawn.shapes[0] {

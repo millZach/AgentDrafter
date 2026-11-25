@@ -551,6 +551,7 @@ mod tests {
             clip: None,
             clip_boundary: None,
             color: Color(7),
+            true_color: None,
             plot_style: None,
             transparency: 0,
             shape: Shape::Stroke {
@@ -571,6 +572,7 @@ mod tests {
             clip: None,
             clip_boundary: None,
             color: Color(1),
+            true_color: None,
             plot_style: None,
             transparency: 0,
             shape: Shape::Fill {

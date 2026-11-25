@@ -306,10 +306,22 @@ impl Mesh {
             } else {
                 255
             };
-            let mut color = rgba(item.color);
-            color[3] = alpha;
-            let mut screen = screen_rgba(item.color);
-            screen[3] = alpha;
+            let color = match item.true_color {
+                Some([r, g, b]) => [r, g, b, alpha],
+                None => {
+                    let mut c = rgba(item.color);
+                    c[3] = alpha;
+                    c
+                }
+            };
+            let screen = match item.true_color {
+                Some([r, g, b]) => [r, g, b, alpha],
+                None => {
+                    let mut c = screen_rgba(item.color);
+                    c[3] = alpha;
+                    c
+                }
+            };
             // Cut at a clipped viewport's boundary, by the stencil.
             let cut = item
                 .clip_boundary
@@ -742,6 +754,7 @@ mod tests {
             clip: None,
             clip_boundary: None,
             color: Color(color),
+            true_color: None,
             plot_style: None,
             transparency: 0,
             shape,
@@ -1091,5 +1104,31 @@ mod tests {
         assert!(mesh.has_transparency);
         assert_eq!(mesh.fill_colors[0][3], 128);
         assert_eq!(mesh.fill_screen_colors[0][3], 128);
+    }
+
+    #[test]
+    fn true_colour_draws_in_exact_rgb_on_paper_and_screen() {
+        let mut orange_stroke = item(
+            7,
+            Shape::Stroke {
+                lineweight: 0.25,
+                runs: vec![vec![[0.0, 0.0], [10.0, 0.0]]],
+            },
+        );
+        orange_stroke.true_color = Some([255, 128, 0]);
+        let mut pure_black_fill = item(
+            7,
+            Shape::Fill {
+                rule: FillRule::NonZero,
+                contours: vec![vec![[0.0, 0.0], [4.0, 0.0], [4.0, 2.0], [0.0, 2.0]]],
+            },
+        );
+        pure_black_fill.true_color = Some([0, 0, 0]);
+        let mesh = Mesh::of(&sheet(vec![orange_stroke, pure_black_fill], None));
+        assert_eq!(mesh.segment_colors[0], [255, 128, 0, 255]);
+        assert_eq!(mesh.segment_screen_colors[0], [255, 128, 0, 255]);
+        // True black [0, 0, 0] does not flip to white on dark screen (unlike ACI 7).
+        assert_eq!(mesh.fill_colors[0], [0, 0, 0, 255]);
+        assert_eq!(mesh.fill_screen_colors[0], [0, 0, 0, 255]);
     }
 }

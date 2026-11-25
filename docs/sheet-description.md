@@ -273,14 +273,14 @@ Every object, an insert and a block's objects and attribute definitions among th
 
 | Key | What it is |
 |---|---|
-| `color` | `ByLayer`, `ByBlock`, or an AutoCAD colour index as a layer takes it: 1 to 255, or `red` to `white`. Without it, `ByLayer`. |
+| `color` | `ByLayer`, `ByBlock`, an AutoCAD colour index (1 to 255, or `red` to `white`), or a 24-bit true colour `[r, g, b]` of three integers from 0 to 255 (such as `[255, 128, 0]`). Without it, `ByLayer`. |
 | `linetype` | `ByLayer`, `ByBlock`, `Continuous`, or a name under `linetypes`, written exactly as it is there. Without it, `ByLayer`. |
 | `lineweight` | `ByLayer`, `ByBlock`, `Default` (AutoCAD's default lineweight, 0.25 mm as installed), or a standard lineweight in millimetres as a layer takes it. Without it, `ByLayer`. |
 | `linetype_scale` | What the object's linetype is enlarged by, on top of the sheet's `ltscale`: a number more than 0, with no unit. Without it, 1. |
 | `plot_style` | `ByLayer`, `ByBlock`, or a named plot style from an STB table (such as `Normal` or `Heavy`). Without it, `ByLayer`. |
 | `transparency` | `ByLayer`, `ByBlock`, or a transparency percentage from `0` (opaque) to `90`. Without it, `ByLayer`. |
 
-`ByLayer`, `ByBlock` and `Default` are written as here, in that case. A true colour is not offered yet ([#106](https://github.com/millZach/AgentDrafter/issues/106)).
+`ByLayer`, `ByBlock` and `Default` are written as here, in that case. A true colour `[r, g, b]` draws in its exact RGB colour in the PNG and the viewer, bypasses CTB plot styles (including `monochrome.ctb`, keeping its own RGB colour and lineweight as AutoCAD does), and follows named plot style (STB) pens when plotting through an STB.
 
 `ByBlock` is for a block's objects: one drawn by an insert takes the insert's own colour, linetype or lineweight, or the insert's layer's where the insert's are `ByLayer`, so one block can draw red on one sheet and white on another. An object on the sheet itself that is `ByBlock` draws as AutoCAD draws it, white, continuous and at the default lineweight. A linetype a block's object names comes to the sheet from the block library with the block, as its layers do.
 
@@ -301,7 +301,7 @@ objects:
   - line: {from: [0, 10, 0], to: [100, 10, 0], layer: wiring, lineweight: 0.7}
 ```
 
-The DWG writes them as AutoCAD does, on each object and in the drawing's LTSCALE, and reading a DWG back gives them; an object with a true colour is not read yet. `change` sets them, and a bare null takes one away, so the object draws with its layer's again.
+The DWG writes them as AutoCAD does, on each object and in the drawing's LTSCALE, and reading a DWG back gives them, including 24-bit true colours. `change` sets them, and a bare null takes one away, so the object draws with its layer's again.
 
 ### Polylines
 

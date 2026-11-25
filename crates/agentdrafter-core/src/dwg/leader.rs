@@ -111,6 +111,7 @@ fn dwg_color(color: ObjectColor) -> Color {
         ObjectColor::ByLayer => Color::ByLayer,
         ObjectColor::ByBlock => Color::ByBlock,
         ObjectColor::Index(index) => Color::Index(index),
+        ObjectColor::Rgb([r, g, b]) => Color::Rgb { r, g, b },
     }
 }
 
@@ -128,6 +129,7 @@ fn object_color(color: Color) -> Option<ObjectColor> {
         Color::ByLayer => Some(ObjectColor::ByLayer),
         Color::ByBlock => Some(ObjectColor::ByBlock),
         Color::Index(index) => Some(ObjectColor::Index(index)),
+        Color::Rgb { r, g, b } => Some(ObjectColor::Rgb([r, g, b])),
         _ => None,
     }
 }

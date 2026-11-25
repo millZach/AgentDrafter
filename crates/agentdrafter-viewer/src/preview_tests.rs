@@ -13,6 +13,7 @@ fn stroke(object: usize, runs: Vec<Vec<[f64; 2]>>) -> Item {
         clip: None,
         clip_boundary: None,
         color: Color(7),
+        true_color: None,
         plot_style: None,
         transparency: 0,
         shape: Shape::Stroke {

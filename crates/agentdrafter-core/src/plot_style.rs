@@ -161,11 +161,28 @@ impl PlotStyle {
         matches!(self.table, Table::Stb { .. })
     }
 
-    /// The colour an object of colour index `color` (and optional named
-    /// plot style `style_name` for an STB) plots in, with screening applied.
-    pub(crate) fn color_for(&self, color: Color, style_name: Option<&str>) -> [u8; 3] {
+    /// The colour an object of colour index `color` (or 24-bit `true_color`,
+    /// #106) and optional named plot style `style_name` (for an STB) plots in,
+    /// with screening applied.
+    ///
+    /// As AutoCAD plots: a colour-dependent plot style (CTB, including
+    /// monochrome) maps ACI 1..=255 only, so a true-colour object bypasses CTB
+    /// completely and plots in its own `[r, g, b]` colour with no screening.
+    /// Under a named plot style (STB), the named style still applies, using
+    /// `[r, g, b]` when the style's colour is "Use object color".
+    pub(crate) fn color_for(
+        &self,
+        color: Color,
+        true_color: Option<[u8; 3]>,
+        style_name: Option<&str>,
+    ) -> [u8; 3] {
+        if let (Table::Ctb(_), Some(rgb)) = (&self.table, true_color) {
+            return rgb;
+        }
         let pen = self.pen_for(color, style_name);
-        let base = pen.color.unwrap_or_else(|| color.on_paper());
+        let base = pen
+            .color
+            .unwrap_or_else(|| true_color.unwrap_or_else(|| color.on_paper()));
         apply_screen(base, pen.screen)
     }
 
@@ -173,13 +190,25 @@ impl PlotStyle {
     /// `Normal`).
     #[cfg(test)]
     pub(crate) fn color(&self, color: Color) -> [u8; 3] {
-        self.color_for(color, None)
+        self.color_for(color, None, None)
     }
 
-    /// The lineweight in millimetres an object of colour index `color` (and
-    /// optional named plot style `style_name` for an STB) and lineweight
-    /// `own` plots with.
-    pub(crate) fn lineweight_for(&self, color: Color, style_name: Option<&str>, own: f64) -> f64 {
+    /// The lineweight in millimetres an object of colour index `color` (or
+    /// 24-bit `true_color`, #106), optional named plot style `style_name` (for
+    /// an STB), and lineweight `own` plots with.
+    ///
+    /// Under a CTB, a true-colour object bypasses CTB and keeps its own
+    /// lineweight; under an STB, the named style's lineweight still applies.
+    pub(crate) fn lineweight_for(
+        &self,
+        color: Color,
+        true_color: Option<[u8; 3]>,
+        style_name: Option<&str>,
+        own: f64,
+    ) -> f64 {
+        if matches!(self.table, Table::Ctb(_)) && true_color.is_some() {
+            return own;
+        }
         self.pen_for(color, style_name).lineweight.unwrap_or(own)
     }
 
@@ -187,7 +216,7 @@ impl PlotStyle {
     /// lineweight `own` plots with.
     #[cfg(test)]
     pub(crate) fn lineweight(&self, color: Color, own: f64) -> f64 {
-        self.lineweight_for(color, None, own)
+        self.lineweight_for(color, None, None, own)
     }
 
     fn pen_for(&self, color: Color, style_name: Option<&str>) -> Pen {
@@ -770,16 +799,76 @@ mod tests {
         let style = PlotStyle::parse_stb(&stb).unwrap();
         assert!(style.is_stb());
         assert_eq!(style.not_followed, Vec::new());
-        assert_eq!(style.color_for(Color(1), Some("Heavy")), [0, 0, 0]);
-        assert_eq!(style.lineweight_for(Color(1), Some("heavy"), 0.25), 1.0);
-        assert_eq!(style.color_for(Color(1), Some("Screened")), [128, 128, 255]);
-        assert_eq!(style.lineweight_for(Color(1), Some("Screened"), 0.25), 0.5);
+        assert_eq!(style.color_for(Color(1), None, Some("Heavy")), [0, 0, 0]);
+        assert_eq!(
+            style.lineweight_for(Color(1), None, Some("heavy"), 0.25),
+            1.0
+        );
+        assert_eq!(
+            style.color_for(Color(1), None, Some("Screened")),
+            [128, 128, 255]
+        );
+        assert_eq!(
+            style.lineweight_for(Color(1), None, Some("Screened"), 0.25),
+            0.5
+        );
         // Unknown or omitted style falls back to Normal (object colour & own lineweight).
         assert_eq!(
-            style.color_for(Color(1), Some("Unknown")),
+            style.color_for(Color(1), None, Some("Unknown")),
             Color(1).on_paper()
         );
-        assert_eq!(style.lineweight_for(Color(1), None, 0.35), 0.35);
+        assert_eq!(style.lineweight_for(Color(1), None, None, 0.35), 0.35);
+    }
+
+    #[test]
+    fn true_colour_bypasses_ctb_and_follows_stb() {
+        let orange = [255, 128, 0];
+        // Monochrome CTB converts indexed red to black, but leaves true colour untouched.
+        let mono = PlotStyle::monochrome();
+        assert_eq!(mono.color_for(Color(1), None, None), [0, 0, 0]);
+        assert_eq!(mono.color_for(Color(7), Some(orange), None), orange);
+        assert_eq!(mono.lineweight_for(Color(7), Some(orange), None, 0.5), 0.5);
+
+        // Custom CTB overriding colour, screening and lineweight on index 7 is still
+        // bypassed for a true-colour object.
+        let ctb_text =
+            made_up_ctb_text(&[(7, BLACK, 21)], "").replace("  screen=100\n", "  screen=50\n");
+        let ctb = PlotStyle::parse_ctb(&ctb_file(&ctb_text)).unwrap();
+        assert_eq!(ctb.color_for(Color(7), None, None), [128, 128, 128]);
+        assert_eq!(ctb.lineweight_for(Color(7), None, None, 0.35), 1.0);
+        assert_eq!(ctb.color_for(Color(7), Some(orange), None), orange);
+        assert_eq!(ctb.lineweight_for(Color(7), Some(orange), None, 0.35), 0.35);
+
+        // STB applies its named style to true-colour objects too:
+        // - Heavy overrides colour to black and lineweight to 1.0 mm.
+        // - ScreenedObject uses object colour at 50% screening and 0.5 mm.
+        // - Normal uses the exact true colour and own lineweight.
+        let stb = made_up_stb(&[
+            ("Heavy", BLACK, 21, 100),
+            ("ScreenedObject", OBJECT_COLOR, 14, 50),
+        ]);
+        let stb_style = PlotStyle::parse_stb(&stb).unwrap();
+        assert_eq!(
+            stb_style.color_for(Color(7), Some(orange), Some("Heavy")),
+            [0, 0, 0]
+        );
+        assert_eq!(
+            stb_style.lineweight_for(Color(7), Some(orange), Some("Heavy"), 0.25),
+            1.0
+        );
+        assert_eq!(
+            stb_style.color_for(Color(7), Some(orange), Some("ScreenedObject")),
+            apply_screen(orange, 50)
+        );
+        assert_eq!(
+            stb_style.lineweight_for(Color(7), Some(orange), Some("ScreenedObject"), 0.25),
+            0.5
+        );
+        assert_eq!(stb_style.color_for(Color(7), Some(orange), None), orange);
+        assert_eq!(
+            stb_style.lineweight_for(Color(7), Some(orange), None, 0.35),
+            0.35
+        );
     }
 
     #[test]

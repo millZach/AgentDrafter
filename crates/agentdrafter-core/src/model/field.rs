@@ -500,6 +500,7 @@ fn eval_object_property(object: &Object, prop: &str, fmt: &str) -> Option<String
                 ObjectColor::ByLayer => "ByLayer".to_owned(),
                 ObjectColor::ByBlock => "ByBlock".to_owned(),
                 ObjectColor::Index(i) => i.to_string(),
+                ObjectColor::Rgb([r, g, b]) => format!("{r},{g},{b}"),
             };
             return Some(apply_text_case(&text, fmt));
         }

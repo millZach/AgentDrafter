@@ -1381,6 +1381,7 @@ pub(super) fn set_properties(common: &mut EntityCommon, properties: &Properties)
         ObjectColor::ByLayer => {}
         ObjectColor::ByBlock => common.color = Color::ByBlock,
         ObjectColor::Index(index) => common.color = Color::Index(index),
+        ObjectColor::Rgb([r, g, b]) => common.color = Color::Rgb { r, g, b },
     }
     match &properties.linetype {
         ObjectLinetype::ByLayer => {}
@@ -1405,8 +1406,7 @@ pub(super) fn set_properties(common: &mut EntityCommon, properties: &Properties)
 
 /// An object's own colour, linetype, lineweight, linetype scale, named plot
 /// style and transparency as its DWG object holds them, if the core has a
-/// model for them: an index colour rather than a true colour, and a standard
-/// lineweight.
+/// model for them: an index or true colour (#106) and a standard lineweight.
 pub(super) fn read_properties(common: &EntityCommon) -> Option<Properties> {
     read_properties_in(common, false, &std::collections::HashMap::new())
 }
@@ -1420,6 +1420,9 @@ pub(super) fn read_properties_in(
         Color::ByLayer => ObjectColor::ByLayer,
         Color::ByBlock => ObjectColor::ByBlock,
         Color::Index(index) if index >= 1 => ObjectColor::Index(index),
+        Color::Rgb { r, g, b } if common.color_name.as_deref().is_none_or(str::is_empty) => {
+            ObjectColor::Rgb([r, g, b])
+        }
         _ => return None,
     };
     let linetype = if common.linetype.is_empty() || common.linetype.eq_ignore_ascii_case(BY_LAYER) {
@@ -5263,7 +5266,7 @@ mod tests {
     }
 
     #[test]
-    fn an_objects_own_properties_are_read_and_a_true_colour_is_not() {
+    fn an_objects_own_properties_including_true_colour_are_read() {
         let mut line = DwgLine::from_points(Vector3::ZERO, Vector3::UNIT_X);
         let read = read_object(None, &EntityType::Line(line.clone()), &[]).unwrap();
         assert!(read.properties().is_by_layer());
@@ -5290,6 +5293,10 @@ mod tests {
         assert_eq!(read.properties().linetype, ObjectLinetype::ByBlock);
         assert_eq!(read.properties().lineweight, ObjectLineweight::ByBlock);
         line.common.color = Color::Rgb { r: 1, g: 2, b: 3 };
+        let read = read_object(None, &EntityType::Line(line.clone()), &[]).unwrap();
+        assert_eq!(read.properties().color, ObjectColor::Rgb([1, 2, 3]));
+        // A colour-book colour carries a book name and stays unmodelled.
+        line.common.color_name = Some("BOOK$NAME".to_owned());
         assert!(read_object(None, &EntityType::Line(line), &[]).is_none());
     }
 

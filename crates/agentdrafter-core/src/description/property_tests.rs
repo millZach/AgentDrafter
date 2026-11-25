@@ -178,3 +178,50 @@ fn a_blocks_objects_take_properties_of_their_own() {
     };
     assert_eq!(definition.properties.color, ObjectColor::ByBlock);
 }
+
+#[test]
+fn true_colour_is_parsed_and_invalid_triplets_are_refused() {
+    let sheet = parse_sheet_description(
+        "units: mm\n\
+         objects:\n\
+           - line: {from: [0, 0, 0], to: [10, 0, 0], color: [255, 128, 0]}\n\
+           - line: {from: [0, 5, 0], to: [10, 5, 0], color: [0, 0, 0]}\n\
+           - line: {from: [0, 10, 0], to: [10, 10, 0], color: [255, 255, 255]}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        sheet.objects[0].properties().color,
+        ObjectColor::Rgb([255, 128, 0])
+    );
+    assert_eq!(
+        sheet.objects[1].properties().color,
+        ObjectColor::Rgb([0, 0, 0])
+    );
+    assert_eq!(
+        sheet.objects[2].properties().color,
+        ObjectColor::Rgb([255, 255, 255])
+    );
+
+    // JSON round-trip preserves `[r, g, b]`.
+    let json = serde_json::to_value(ObjectColor::Rgb([255, 128, 0])).unwrap();
+    assert_eq!(json, serde_json::json!([255, 128, 0]));
+    let parsed: ObjectColor = serde_json::from_value(json).unwrap();
+    assert_eq!(parsed, ObjectColor::Rgb([255, 128, 0]));
+
+    for bad in [
+        "[256, 0, 0]",
+        "[-1, 0, 0]",
+        "[255, 128]",
+        "[255, 128, 0, 255]",
+        "[255.5, 0, 0]",
+        "[red, 0, 0]",
+    ] {
+        let yaml = format!(
+            "units: mm\nobjects:\n  - line: {{from: [0, 0, 0], to: [10, 0, 0], color: {bad}}}\n"
+        );
+        assert!(
+            parse_sheet_description(&yaml).is_err(),
+            "expected `{bad}` to be refused"
+        );
+    }
+}

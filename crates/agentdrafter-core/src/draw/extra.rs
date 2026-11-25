@@ -7,13 +7,13 @@
 use std::f64::consts::PI;
 
 use super::{
-    add_stroke, curves, flat, linetype, text, Bounds, Color, DisplayList, Drawer, Drawn, FillRule,
-    Pen, Placed, Point2, Shape, Shown,
+    add_stroke, curves, flat, linetype, text, Bounds, DisplayList, Drawer, Drawn, FillRule, Pen,
+    Placed, Point2, Shape, Shown,
 };
 use crate::description::sin_cos_degrees;
 use crate::model::{
-    CenterLine, CenterMark, DimensionStyle, MLine, MLineStyle, ObjectColor, ObjectLinetype, Point,
-    Ray, ShxShape, Tolerance, XLine,
+    CenterLine, CenterMark, DimensionStyle, MLine, MLineStyle, ObjectLinetype, Point, Ray,
+    ShxShape, Tolerance, XLine,
 };
 use crate::text::{Justify, Text, STANDARD};
 
@@ -418,13 +418,11 @@ pub(super) fn draw_mline(
     // 1. Optional background fill between outermost chains.
     if let Some(fill_col) = style.fill_color {
         if min_idx != max_idx {
-            let fill_color = match fill_col {
-                ObjectColor::ByLayer => drawer.layer_pen(base_layer).color,
-                ObjectColor::ByBlock => pen.color,
-                ObjectColor::Index(i) => Color(i),
-            };
+            let (fill_color, fill_true_color) =
+                super::resolve_color(fill_col, drawer.layer_pen(base_layer), pen);
             let fill_pen = Pen {
                 color: fill_color,
+                true_color: fill_true_color,
                 ..pen
             };
             let mut contours = Vec::new();
@@ -452,11 +450,7 @@ pub(super) fn draw_mline(
     // 2. Parallel element lines, each in its own colour and linetype.
     let by_layer = drawer.layer_pen(base_layer);
     for (ei, elem) in style.elements.iter().enumerate() {
-        let elem_color = match elem.color {
-            ObjectColor::ByLayer => by_layer.color,
-            ObjectColor::ByBlock => pen.color,
-            ObjectColor::Index(i) => Color(i),
-        };
+        let (elem_color, elem_true_color) = super::resolve_color(elem.color, by_layer, pen);
         let elem_pattern = match &elem.linetype {
             ObjectLinetype::ByLayer => by_layer.pattern,
             ObjectLinetype::ByBlock => pen.pattern,
@@ -464,6 +458,7 @@ pub(super) fn draw_mline(
         };
         let elem_pen = Pen {
             color: elem_color,
+            true_color: elem_true_color,
             pattern: elem_pattern,
             ..pen
         };

@@ -581,12 +581,15 @@ pub(super) fn mtext_rich_code(text: &MText) -> String {
                 coded.push_str(&format!("\\T{t};"));
             }
             if let Some(color) = run.color {
-                let aci = match color {
-                    ObjectColor::ByBlock => 0u16,
-                    ObjectColor::Index(i) => u16::from(i),
-                    ObjectColor::ByLayer => 256u16,
-                };
-                coded.push_str(&format!("\\C{aci};"));
+                match color {
+                    ObjectColor::ByBlock => coded.push_str("\\C0;"),
+                    ObjectColor::Index(i) => coded.push_str(&format!("\\C{i};")),
+                    ObjectColor::ByLayer => coded.push_str("\\C256;"),
+                    ObjectColor::Rgb([r, g, b]) => {
+                        let bgr = u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16);
+                        coded.push_str(&format!("\\c{bgr};"));
+                    }
+                }
             }
             if run.underline && !text.underline {
                 coded.push_str("\\L");
@@ -631,10 +634,10 @@ struct MTextState {
 }
 
 /// Parses an AutoCAD MTEXT string with inline formatting codes (`\f`/`\F`,
-/// `\H`, `\W`, `\Q`, `\T`, `\L`/`\l`, `\O`/`\o`, `\C`, `\P`/`\N`, `\~`,
-/// `\U+XXXX`, `\A`, and `{...}` groups) (#61).
+/// `\H`, `\W`, `\Q`, `\T`, `\L`/`\l`, `\O`/`\o`, `\C`, `\c`, `\P`/`\N`, `\~`,
+/// `\U+XXXX`, `\A`, and `{...}` groups) (#61, #106).
 ///
-/// Returns `None` if an unmodelled code (`\S`, `\p`, `\c`, `\K`, unmatched
+/// Returns `None` if an unmodelled code (`\S`, `\p`, `\K`, unmatched
 /// braces, raw `%%`, or out-of-range numeric parameter) is encountered so
 /// originals with unsupported formatting are never silently flattened.
 pub(super) fn mtext_rich_contents(value: &str, base_height: f64) -> Option<ParsedMText> {
@@ -848,6 +851,20 @@ pub(super) fn mtext_rich_contents(value: &str, base_height: f64) -> Option<Parse
                         };
                         rest = tail;
                     }
+                    'c' => {
+                        // AutoCAD MTEXT inline true colour: 24-bit BGR integer
+                        // `r | (g << 8) | (b << 16)` (#106).
+                        let (arg, tail) = after_bs[1..].split_once(';')?;
+                        let bgr: u32 = arg.parse().ok()?;
+                        if bgr > 0x00FF_FFFF {
+                            return None;
+                        }
+                        let r = (bgr & 0xFF) as u8;
+                        let g = ((bgr >> 8) & 0xFF) as u8;
+                        let b = ((bgr >> 16) & 0xFF) as u8;
+                        state.color = Some(ObjectColor::Rgb([r, g, b]));
+                        rest = tail;
+                    }
                     'A' => {
                         // Baseline alignment (`\A0;`, `\A1;`, `\A2;`): accepted.
                         let (arg, tail) = after_bs[1..].split_once(';')?;
@@ -1030,11 +1047,23 @@ mod tests {
         assert_eq!(partial.runs.len(), 2);
         assert!(!partial.runs[0].underline && partial.runs[1].underline);
 
+        // Inline 24-bit true colour `\c<bgr>;` (#106): 255 | (128 << 8) | (0 << 16) = 33023.
+        let tc = mtext_rich_contents("{\\c33023;ORANGE}", 2.0).unwrap();
+        assert_eq!(tc.contents, "ORANGE");
+        assert_eq!(tc.runs.len(), 1);
+        assert_eq!(tc.runs[0].color, Some(ObjectColor::Rgb([255, 128, 0])));
+        let tc_mt = MText {
+            contents: tc.contents.clone(),
+            runs: tc.runs.clone(),
+            ..mt.clone()
+        };
+        assert_eq!(mtext_rich_code(&tc_mt), "{\\c33023;ORANGE}");
+
         // Unmodelled codes and malformed inputs still return None.
         for bad in [
             "\\S1/2;",
             "\\pqc;centered",
-            "\\c255;truecolor",
+            "\\c16777216;overflow-truecolor",
             "\\Kstrike\\k",
             "{\\fArial;unclosed",
             "\\H0;zero",

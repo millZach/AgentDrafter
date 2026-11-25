@@ -746,7 +746,10 @@ impl Viewer {
                     .find(|item| item.object == object as usize)
             })
             .map(|item| {
-                let [r, g, b, _] = screen_rgba(item.color);
+                let [r, g, b] = item.true_color.unwrap_or_else(|| {
+                    let [r, g, b, _] = screen_rgba(item.color);
+                    [r, g, b]
+                });
                 format!("#{r:02x}{g:02x}{b:02x}")
             })
             .unwrap_or_default()
