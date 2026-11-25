@@ -227,7 +227,7 @@ pub(crate) struct Resolved {
 
 /// The object types a transform takes: every type a sheet holds but a
 /// viewport, which is a window on the paper.
-const TRANSFORMED_TYPES: [&str; 28] = [
+const TRANSFORMED_TYPES: [&str; 29] = [
     "line",
     "polyline",
     "arc",
@@ -251,6 +251,7 @@ const TRANSFORMED_TYPES: [&str; 28] = [
     "center_mark",
     "center_line",
     "shape",
+    "solid3d",
     "insert",
     "table",
     "mleader",
@@ -403,6 +404,9 @@ impl At<'_> {
         let k = t.factor();
         let scaled = k != 1.0;
         let mut changed: Vec<String> = Vec::new();
+        if kind == "solid3d" {
+            return self.transform_solid3d(keys, path);
+        }
         let solid = hatch_is_solid(keys);
         if kind == "dimension" && self.clear_angular_location(keys, path) {
             changed.push("location".to_owned());
@@ -859,6 +863,42 @@ impl At<'_> {
     /// does, so it is laid out again by the usual rule, as a turn's is. An
     /// older leader with no annotation draws neither hook nor text, so
     /// either side will do.
+    fn transform_solid3d(&self, keys: &mut Vec<Entry>, path: &str) -> Result<Vec<String>, Error> {
+        let mut map = Map::new();
+        let mut preserved: Vec<Entry> = Vec::new();
+        for entry in keys.drain(..) {
+            if super::super::solid3d::SOLID_BODY_KEYS.contains(&entry.key.as_str()) {
+                map.insert(entry.key, node_to_json(&entry.value));
+            } else {
+                preserved.push(entry);
+            }
+        }
+        let body = super::super::solid3d::solid_body_from_json(&Value::Object(map), self.units)
+            .map_err(|e| e.at_field(path.to_owned()))?;
+        let transformed = match self.t.how {
+            How::Scale(factor) => {
+                let mut b = body;
+                let a = self.t.about;
+                b.scale_about(crate::model::Point3::new(a[0], a[1], a[2]), factor);
+                b
+            }
+            How::Rotate(_) | How::Mirror(_) => crate::geometry::solid3d::transform_solid_body(
+                &body,
+                |p: [f64; 3]| self.t.point(p),
+                self.t.mirrors(),
+            )
+            .map_err(|e| e.at_field(path.to_owned()))?,
+        };
+        let new_map = super::super::solid3d::solid_body_to_map(&transformed);
+        let mut changed = Vec::with_capacity(new_map.len());
+        for (k, v) in new_map {
+            changed.push(k.clone());
+            keys.push(new_entry(&k, node_of(&v)));
+        }
+        keys.extend(preserved);
+        Ok(changed)
+    }
+
     fn landing_mirrors(&self, kind: &str, keys: &[Entry]) -> Option<String> {
         let across = self.t.m[0][0];
         if across == 0.0 {

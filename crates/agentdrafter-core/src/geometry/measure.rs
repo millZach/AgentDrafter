@@ -36,9 +36,15 @@ pub struct Measures {
     pub length: Option<f64>,
     /// The area it encloses: a circle's, an ellipse's, a closed polyline's
     /// with its arcs, a closed spline's, a hatch's, a solid's and a
-    /// donut's, seen from above.
+    /// donut's, seen from above; or a 3D solid's total surface area.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub area: Option<f64>,
+    /// Volume of a 3D solid (`3DSOLID`), in cubic declared units.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f64>,
+    /// Total surface area of a 3D solid (`3DSOLID`), in square declared units.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surface_area: Option<f64>,
     /// The box round its geometry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extents: Option<Box3>,
@@ -375,6 +381,16 @@ impl Reader<'_> {
             Object::Solid(_) => {
                 m.extents = extents();
                 m.area = Some(enclosed(&curves));
+            }
+            Object::Solid3D(solid) => {
+                let metrics = super::solid3d::solid_metrics(&solid.body);
+                m.volume = Some(metrics.volume);
+                m.surface_area = Some(metrics.surface_area);
+                m.area = Some(metrics.surface_area);
+                m.extents = Some(Box3 {
+                    min: metrics.min,
+                    max: metrics.max,
+                });
             }
             Object::Hatch(hatch) => {
                 let loops: Vec<Vec<Curve>> = hatch.boundary.iter().map(hatch_loop).collect();

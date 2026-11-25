@@ -650,6 +650,10 @@ pub(crate) fn prefix_object(object: &mut Object, prefix: &str, block_renames: &[
             rewrite_layer(&mut o.layer);
             prefix_properties(&mut o.properties, prefix);
         }
+        Object::Solid3D(o) => {
+            rewrite_layer(&mut o.layer);
+            prefix_properties(&mut o.properties, prefix);
+        }
         Object::AttributeDefinition(o) => {
             rewrite_layer(&mut o.layer);
             rewrite_style(&mut o.style);

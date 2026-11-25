@@ -47,6 +47,7 @@ pub(crate) mod original_journal;
 mod proposals;
 mod recover;
 pub(crate) mod replace;
+pub(crate) mod solid3d;
 pub(crate) mod stretch;
 pub(crate) mod trim_extend;
 mod undo;

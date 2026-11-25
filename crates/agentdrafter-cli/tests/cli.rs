@@ -291,7 +291,7 @@ fn operations_are_listed_and_a_change_set_is_applied_from_a_file() {
     let (code, json) = agentdrafter(&["operations"], &dir);
     assert_eq!(code, 0, "{json}");
     let listed = json["result"]["operations"].as_array().unwrap();
-    assert_eq!(listed.len(), 102);
+    assert_eq!(listed.len(), 110);
     assert_eq!(listed[11]["name"], "add_revision_cloud");
     assert_eq!(listed[11]["alias"], "REVCLOUD");
     assert_eq!(listed[12]["name"], "add_wipeout");
@@ -320,100 +320,121 @@ fn operations_are_listed_and_a_change_set_is_applied_from_a_file() {
     assert_eq!(listed[21]["alias"], "CENTERLINE");
     assert_eq!(listed[22]["name"], "add_shape");
     assert_eq!(listed[22]["alias"], "SHAPE");
-    assert_eq!(listed[41]["name"], "move");
-    assert_eq!(listed[44]["name"], "array");
+    assert_eq!(listed[23]["name"], "add_solid3d");
+    assert_eq!(listed[23]["alias"], "3DSOLID");
+    assert_eq!(listed[42]["name"], "move");
+    assert_eq!(listed[45]["name"], "array");
     assert_eq!(
-        listed[44]["other_aliases"],
+        listed[45]["other_aliases"],
         serde_json::json!(["ARRAYRECT", "ARRAYPOLAR", "ARRAYPATH"])
     );
     for (i, name, alias, short) in [
-        (45, "rotate", "ROTATE", "RO"),
-        (46, "scale", "SCALE", "SC"),
-        (47, "mirror", "MIRROR", "MI"),
-        (48, "draw_order", "DRAWORDER", "DR"),
+        (46, "rotate", "ROTATE", "RO"),
+        (47, "scale", "SCALE", "SC"),
+        (48, "mirror", "MIRROR", "MI"),
+        (49, "draw_order", "DRAWORDER", "DR"),
     ] {
         assert_eq!(listed[i]["name"], name);
         assert_eq!(listed[i]["alias"], alias);
         assert_eq!(listed[i]["other_aliases"], serde_json::json!([short]));
     }
-    assert_eq!(listed[49]["name"], "text_to_front");
-    assert_eq!(listed[49]["alias"], "TEXTTOFRONT");
-    assert_eq!(listed[51]["name"], "set_block_state");
-    assert_eq!(listed[51]["alias"], "PROPERTIES");
-    assert_eq!(listed[52]["name"], "set_attributes");
-    assert_eq!(listed[52]["alias"], "GATTE");
-    assert_eq!(listed[53]["name"], "replace_text");
-    assert_eq!(listed[53]["alias"], "FIND");
-    assert_eq!(listed[54]["name"], "offset");
-    assert_eq!(listed[54]["alias"], "OFFSET");
-    assert_eq!(listed[54]["other_aliases"], serde_json::json!(["O"]));
-    assert_eq!(listed[55]["name"], "trim");
-    assert_eq!(listed[55]["alias"], "TRIM");
-    assert_eq!(listed[55]["other_aliases"], serde_json::json!(["TR"]));
-    assert_eq!(listed[56]["name"], "extend");
-    assert_eq!(listed[56]["alias"], "EXTEND");
-    assert_eq!(listed[56]["other_aliases"], serde_json::json!(["EX"]));
-    assert_eq!(listed[57]["name"], "fillet");
-    assert_eq!(listed[57]["alias"], "FILLET");
-    assert_eq!(listed[57]["other_aliases"], serde_json::json!(["F"]));
-    assert_eq!(listed[58]["name"], "chamfer");
-    assert_eq!(listed[58]["alias"], "CHAMFER");
-    assert_eq!(listed[58]["other_aliases"], serde_json::json!(["CHA"]));
-    assert_eq!(listed[59]["name"], "break");
-    assert_eq!(listed[59]["alias"], "BREAK");
+    assert_eq!(listed[50]["name"], "text_to_front");
+    assert_eq!(listed[50]["alias"], "TEXTTOFRONT");
+    assert_eq!(listed[52]["name"], "set_block_state");
+    assert_eq!(listed[52]["alias"], "PROPERTIES");
+    assert_eq!(listed[53]["name"], "set_attributes");
+    assert_eq!(listed[53]["alias"], "GATTE");
+    assert_eq!(listed[54]["name"], "replace_text");
+    assert_eq!(listed[54]["alias"], "FIND");
+    assert_eq!(listed[55]["name"], "offset");
+    assert_eq!(listed[55]["alias"], "OFFSET");
+    assert_eq!(listed[55]["other_aliases"], serde_json::json!(["O"]));
+    assert_eq!(listed[56]["name"], "trim");
+    assert_eq!(listed[56]["alias"], "TRIM");
+    assert_eq!(listed[56]["other_aliases"], serde_json::json!(["TR"]));
+    assert_eq!(listed[57]["name"], "extend");
+    assert_eq!(listed[57]["alias"], "EXTEND");
+    assert_eq!(listed[57]["other_aliases"], serde_json::json!(["EX"]));
+    assert_eq!(listed[58]["name"], "fillet");
+    assert_eq!(listed[58]["alias"], "FILLET");
+    assert_eq!(listed[58]["other_aliases"], serde_json::json!(["F"]));
+    assert_eq!(listed[59]["name"], "chamfer");
+    assert_eq!(listed[59]["alias"], "CHAMFER");
+    assert_eq!(listed[59]["other_aliases"], serde_json::json!(["CHA"]));
+    assert_eq!(listed[60]["name"], "break");
+    assert_eq!(listed[60]["alias"], "BREAK");
     assert_eq!(
-        listed[59]["other_aliases"],
+        listed[60]["other_aliases"],
         serde_json::json!(["BR", "BREAKATPOINT"])
     );
-    assert_eq!(listed[60]["name"], "join");
-    assert_eq!(listed[60]["alias"], "JOIN");
-    assert_eq!(listed[60]["other_aliases"], serde_json::json!(["J"]));
-    assert_eq!(listed[61]["name"], "stretch");
-    assert_eq!(listed[61]["alias"], "STRETCH");
-    assert_eq!(listed[61]["other_aliases"], serde_json::json!(["S"]));
-    assert_eq!(listed[62]["name"], "explode");
-    assert_eq!(listed[62]["alias"], "EXPLODE");
-    assert_eq!(listed[62]["other_aliases"], serde_json::json!(["X"]));
-    assert_eq!(listed[63]["name"], "set_field");
-    assert_eq!(listed[63]["alias"], "FIELD");
-    assert_eq!(listed[64]["name"], "set_page_setup");
-    assert_eq!(listed[64]["alias"], "PAGESETUP");
-    assert_eq!(listed[92]["name"], "attach_xref");
-    assert_eq!(listed[92]["alias"], "XATTACH");
-    assert_eq!(listed[92]["other_aliases"], serde_json::json!(["XREF"]));
-    assert_eq!(listed[93]["name"], "detach_xref");
-    assert_eq!(listed[93]["alias"], "XDETACH");
-    assert_eq!(listed[94]["name"], "bind_xref");
-    assert_eq!(listed[94]["alias"], "XBIND");
-    assert_eq!(listed[95]["name"], "add_group");
-    assert_eq!(listed[95]["alias"], "GROUP");
-    assert_eq!(listed[95]["other_aliases"], serde_json::json!(["G"]));
-    assert_eq!(listed[96]["name"], "ungroup");
-    assert_eq!(listed[96]["alias"], "UNGROUP");
-    assert_eq!(listed[97]["name"], "edit_group");
-    assert_eq!(listed[97]["alias"], "GROUPEDIT");
-    assert_eq!(listed[98]["name"], "set_annotation_scale");
-    assert_eq!(listed[98]["alias"], "CANNOSCALE");
-    assert_eq!(
-        listed[98]["other_aliases"],
-        serde_json::json!(["SCALELISTEDIT"])
-    );
-    assert_eq!(listed[99]["name"], "set_object_scales");
-    assert_eq!(listed[99]["alias"], "OBJECTSCALE");
+    assert_eq!(listed[61]["name"], "join");
+    assert_eq!(listed[61]["alias"], "JOIN");
+    assert_eq!(listed[61]["other_aliases"], serde_json::json!(["J"]));
+    assert_eq!(listed[62]["name"], "stretch");
+    assert_eq!(listed[62]["alias"], "STRETCH");
+    assert_eq!(listed[62]["other_aliases"], serde_json::json!(["S"]));
+    assert_eq!(listed[63]["name"], "explode");
+    assert_eq!(listed[63]["alias"], "EXPLODE");
+    assert_eq!(listed[63]["other_aliases"], serde_json::json!(["X"]));
+    assert_eq!(listed[64]["name"], "set_field");
+    assert_eq!(listed[64]["alias"], "FIELD");
+    assert_eq!(listed[65]["name"], "set_page_setup");
+    assert_eq!(listed[65]["alias"], "PAGESETUP");
+    assert_eq!(listed[93]["name"], "attach_xref");
+    assert_eq!(listed[93]["alias"], "XATTACH");
+    assert_eq!(listed[93]["other_aliases"], serde_json::json!(["XREF"]));
+    assert_eq!(listed[94]["name"], "detach_xref");
+    assert_eq!(listed[94]["alias"], "XDETACH");
+    assert_eq!(listed[95]["name"], "bind_xref");
+    assert_eq!(listed[95]["alias"], "XBIND");
+    assert_eq!(listed[96]["name"], "add_group");
+    assert_eq!(listed[96]["alias"], "GROUP");
+    assert_eq!(listed[96]["other_aliases"], serde_json::json!(["G"]));
+    assert_eq!(listed[97]["name"], "ungroup");
+    assert_eq!(listed[97]["alias"], "UNGROUP");
+    assert_eq!(listed[98]["name"], "edit_group");
+    assert_eq!(listed[98]["alias"], "GROUPEDIT");
+    assert_eq!(listed[99]["name"], "set_annotation_scale");
+    assert_eq!(listed[99]["alias"], "CANNOSCALE");
     assert_eq!(
         listed[99]["other_aliases"],
-        serde_json::json!(["ANNOUPDATE"])
+        serde_json::json!(["SCALELISTEDIT"])
     );
-    assert_eq!(listed[100]["name"], "set_point_style");
-    assert_eq!(listed[100]["alias"], "DDPTYPE");
+    assert_eq!(listed[100]["name"], "set_object_scales");
+    assert_eq!(listed[100]["alias"], "OBJECTSCALE");
     assert_eq!(
         listed[100]["other_aliases"],
+        serde_json::json!(["ANNOUPDATE"])
+    );
+    assert_eq!(listed[101]["name"], "set_point_style");
+    assert_eq!(listed[101]["alias"], "DDPTYPE");
+    assert_eq!(
+        listed[101]["other_aliases"],
         serde_json::json!(["PTYPE", "PDMODE", "PDSIZE"])
     );
-    assert_eq!(listed[101]["name"], "add_mline_style");
-    assert_eq!(listed[101]["alias"], "MLSTYLE");
-    assert_eq!(listed[41]["alias"], "MOVE");
-    assert!(listed[41]["schema"]["$defs"]["point"].is_object());
+    assert_eq!(listed[102]["name"], "add_mline_style");
+    assert_eq!(listed[102]["alias"], "MLSTYLE");
+    assert_eq!(listed[103]["name"], "add_box");
+    assert_eq!(listed[103]["alias"], "BOX");
+    assert_eq!(listed[104]["name"], "add_cylinder");
+    assert_eq!(listed[104]["alias"], "CYLINDER");
+    assert_eq!(listed[105]["name"], "extrude");
+    assert_eq!(listed[105]["alias"], "EXTRUDE");
+    assert_eq!(listed[105]["other_aliases"], serde_json::json!(["EXT"]));
+    assert_eq!(listed[106]["name"], "revolve");
+    assert_eq!(listed[106]["alias"], "REVOLVE");
+    assert_eq!(listed[106]["other_aliases"], serde_json::json!(["REV"]));
+    assert_eq!(listed[107]["name"], "union");
+    assert_eq!(listed[107]["alias"], "UNION");
+    assert_eq!(listed[107]["other_aliases"], serde_json::json!(["UNI"]));
+    assert_eq!(listed[108]["name"], "subtract");
+    assert_eq!(listed[108]["alias"], "SUBTRACT");
+    assert_eq!(listed[108]["other_aliases"], serde_json::json!(["SU"]));
+    assert_eq!(listed[109]["name"], "intersect");
+    assert_eq!(listed[109]["alias"], "INTERSECT");
+    assert_eq!(listed[109]["other_aliases"], serde_json::json!(["IN"]));
+    assert_eq!(listed[42]["alias"], "MOVE");
+    assert!(listed[42]["schema"]["$defs"]["point"].is_object());
     let (code, json) = agentdrafter(&["schema", "change-set"], &dir);
     assert_eq!(code, 0, "{json}");
     assert_eq!(json["result"]["title"], "AgentDrafter change set");

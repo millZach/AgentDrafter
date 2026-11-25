@@ -402,6 +402,18 @@ pub(crate) fn compute_stretch(
                 Ok(StretchAction::Untouched)
             }
         }
+        Object::Solid3D(solid) => {
+            let m = crate::geometry::solid3d::solid_metrics(&solid.body);
+            let c = Point3::new(
+                0.5 * (m.min[0] + m.max[0]),
+                0.5 * (m.min[1] + m.max[1]),
+                0.5 * (m.min[2] + m.max[2]),
+            );
+            if box_.contains(c) {
+                return Ok(StretchAction::MoveWhole);
+            }
+            Ok(StretchAction::Untouched)
+        }
         Object::RevisionCloud(rc) => match &rc.boundary {
             RevisionCloudBoundary::Rectangle { from, to } => {
                 let corners = [

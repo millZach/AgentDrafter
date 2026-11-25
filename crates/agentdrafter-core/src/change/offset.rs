@@ -105,6 +105,7 @@ fn object_kind_name(object: &Object) -> &'static str {
         Object::CenterMark(_) => "center_mark",
         Object::CenterLine(_) => "center_line",
         Object::Shape(_) => "shape",
+        Object::Solid3D(_) => "solid3d",
     }
 }
 
@@ -1871,6 +1872,13 @@ pub(crate) fn object_to_record_keys(
             }
             push_common_keys(&mut keys, &sh.layer, &sh.properties, id, name, space);
             ("shape", keys)
+        }
+        Object::Solid3D(solid) => {
+            for (k, v) in crate::description::solid3d::solid_body_to_map(&solid.body) {
+                keys.insert(k, v);
+            }
+            push_common_keys(&mut keys, &solid.layer, &solid.properties, id, name, space);
+            ("solid3d", keys)
         }
         _ => unreachable!("object_to_record_keys only produces drawn or insert objects"),
     }

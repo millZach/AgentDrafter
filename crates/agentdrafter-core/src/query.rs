@@ -2200,6 +2200,10 @@ fn points_of(object: &Object) -> Vec<(String, Point3)> {
         Object::CenterMark(cm) => one("center", cm.center),
         Object::CenterLine(cl) => vec![("from".to_owned(), cl.from), ("to".to_owned(), cl.to)],
         Object::Shape(sh) => one("position", sh.position),
+        Object::Solid3D(solid) => {
+            let (_, center) = crate::geometry::solid3d::solid_key_points(&solid.body);
+            one("center", center)
+        }
         Object::RevisionCloud(cloud) => match &cloud.boundary {
             crate::model::RevisionCloudBoundary::Rectangle { from, to } => {
                 vec![("from".to_owned(), *from), ("to".to_owned(), *to)]

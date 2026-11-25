@@ -41,12 +41,13 @@ pub(crate) const MODEL: &str = "model";
 pub(crate) const PAPER: &str = "paper";
 
 /// The keys a viewport takes.
-pub(crate) const VIEWPORT_KEYS: [&str; 16] = [
+pub(crate) const VIEWPORT_KEYS: [&str; 17] = [
     "center",
     "width",
     "height",
     "view_center",
     "scale",
+    "view_direction",
     super::annotation_scale::ANNOTATION_SCALE_KEY,
     "locked",
     "clip",
@@ -421,7 +422,19 @@ pub(super) fn viewport(
             positive(fields, "height", units, "a viewport's height")?,
         ),
     };
-    let view_center = flat_point(fields, "view_center", units)?;
+    let view_direction = match fields.get("view_direction") {
+        Some(node) => parse_view_direction(node, &fields.path_of("view_direction"), units)?,
+        None => None,
+    };
+    let view_center = if view_direction.is_some() {
+        point(
+            fields.require("view_center")?,
+            &fields.path_of("view_center"),
+            units,
+        )?
+    } else {
+        flat_point(fields, "view_center", units)?
+    };
     let scale_node = fields.require("scale")?;
     let scale_path = fields.path_of("scale");
     let scale = scale(scale_node, &scale_path)?;
@@ -447,6 +460,7 @@ pub(super) fn viewport(
         height,
         view_center,
         scale,
+        view_direction,
         annotation_scale,
         locked,
         clip,
@@ -462,6 +476,48 @@ pub(super) fn viewport(
         ));
     }
     Ok(viewport)
+}
+
+/// A viewport's optional 3D orthographic view direction: either a named
+/// standard AutoCAD view (`top`, `front`, `se_isometric`, etc.) or a non-zero
+/// 3D vector `[x, y, z]`. Top view (`[0, 0, +z]`) normalizes to `None`.
+pub(super) fn parse_view_direction(
+    node: &Node,
+    path: &str,
+    units: Unit,
+) -> Result<Option<Point3>, Error> {
+    if let super::strict_yaml::Kind::Scalar(text) = &node.kind {
+        let Some(v) = crate::model::preset_view_direction(text) else {
+            let names: Vec<&str> = crate::model::VIEW_DIRECTION_PRESETS
+                .iter()
+                .map(|(k, _)| *k)
+                .collect();
+            return Err(bad_value(
+                node,
+                path,
+                format!(
+                    "unknown `view_direction` `{text}`; expected a 3D vector `[x, y, z]` or one of {}",
+                    names.join(", ")
+                ),
+            ));
+        };
+        if v.x == 0.0 && v.y == 0.0 && v.z > 0.0 {
+            return Ok(None);
+        }
+        return Ok(Some(v));
+    }
+    let v = point(node, path, units)?;
+    if v.x * v.x + v.y * v.y + v.z * v.z <= 1e-18 {
+        return Err(bad_value(
+            node,
+            path,
+            "`view_direction` cannot be [0, 0, 0]",
+        ));
+    }
+    if v.x.abs() <= 1e-12 && v.y.abs() <= 1e-12 && v.z > 0.0 {
+        return Ok(None);
+    }
+    Ok(Some(v))
 }
 
 /// A viewport's clipping boundary: `{points: [...]}`, a closed polyline's
@@ -829,6 +885,22 @@ pub(crate) fn viewport_def() -> Value {
                 "anyOf": [
                     { "type": "number", "exclusiveMinimum": 0 },
                     { "type": "string", "pattern": ratio },
+                ],
+            },
+            "view_direction": {
+                "description": "Optional 3D orthographic view direction (AutoCAD `VIEWDIR`), \
+                                given as a non-zero 3D vector `[x, y, z]` or one of the standard \
+                                view names (`top`, `bottom`, `front`, `back`, `left`, `right`, \
+                                `sw_isometric`, `se_isometric`, `ne_isometric`, `nw_isometric`). \
+                                Without it, top/plan view (`[0, 0, 1]`).",
+                "anyOf": [
+                    { "$ref": "#/$defs/point" },
+                    {
+                        "enum": crate::model::VIEW_DIRECTION_PRESETS
+                            .iter()
+                            .map(|(k, _)| *k)
+                            .collect::<Vec<_>>(),
+                    },
                 ],
             },
             "annotation_scale": super::annotation_scale::viewport_annotation_scale_property(),

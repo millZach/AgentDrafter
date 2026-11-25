@@ -919,6 +919,7 @@ fn translate_object(obj: &mut Object, dv: Point3) {
             cl.to = add_pt(cl.to, dv);
         }
         Object::Shape(sh) => sh.position = add_pt(sh.position, dv),
+        Object::Solid3D(solid) => solid.body.translate(dv),
         Object::Table(_)
         | Object::MLeader(_)
         | Object::Leader(_)
@@ -1162,6 +1163,18 @@ fn stretch_object(obj: &mut Object, bmin: [f64; 2], bmax: [f64; 2], dv: Point3) 
                 moved = true;
             }
         }
+        Object::Solid3D(solid) => {
+            let m = crate::geometry::solid3d::solid_metrics(&solid.body);
+            let c = Point3::new(
+                0.5 * (m.min[0] + m.max[0]),
+                0.5 * (m.min[1] + m.max[1]),
+                0.5 * (m.min[2] + m.max[2]),
+            );
+            if in_box(c, bmin, bmax) {
+                solid.body.translate(dv);
+                moved = true;
+            }
+        }
         Object::Table(_)
         | Object::MLeader(_)
         | Object::Leader(_)
@@ -1380,6 +1393,18 @@ fn rotate_object(obj: &mut Object, pivot: Point3, degrees: f64) {
         Object::Shape(sh) => {
             sh.position = rotate_pt(sh.position, pivot, sin, cos);
             sh.rotation = normalize_degrees(sh.rotation + degrees);
+        }
+        Object::Solid3D(solid) => {
+            if let Ok(next) = crate::geometry::solid3d::transform_solid_body(
+                &solid.body,
+                |p: [f64; 3]| {
+                    let r = rotate_pt(Point3::new(p[0], p[1], p[2]), pivot, sin, cos);
+                    [r.x, r.y, r.z]
+                },
+                false,
+            ) {
+                solid.body = next;
+            }
         }
         Object::Table(_)
         | Object::MLeader(_)
@@ -1661,6 +1686,18 @@ fn mirror_object(obj: &mut Object, a: Point3, b: Point3) {
         Object::Shape(sh) => {
             sh.position = mirror_pt(sh.position, a, b);
             sh.rotation = normalize_degrees(2.0 * axis_deg - sh.rotation);
+        }
+        Object::Solid3D(solid) => {
+            if let Ok(next) = crate::geometry::solid3d::transform_solid_body(
+                &solid.body,
+                |p: [f64; 3]| {
+                    let m = mirror_pt(Point3::new(p[0], p[1], p[2]), a, b);
+                    [m.x, m.y, m.z]
+                },
+                true,
+            ) {
+                solid.body = next;
+            }
         }
         Object::Table(_)
         | Object::MLeader(_)

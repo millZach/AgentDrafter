@@ -35,6 +35,9 @@ use crate::change::operations::{
 };
 use crate::change::original_journal::OriginalJournal;
 use crate::change::replace::{TextMatcher, TextScope};
+use crate::change::solid3d::{
+    build_boolean_solid, build_extrude_solid, build_revolve_solid, extract_profile,
+};
 use crate::change::stretch::{compute_stretch, StretchAction, StretchBox};
 use crate::change::trim_extend::{compute_extend, compute_trim};
 use crate::change::{
@@ -51,7 +54,7 @@ use crate::dwg::{
 use crate::error::{Error, ErrorCode};
 use crate::geometry::curve::Curve;
 use crate::geometry::Reader;
-use crate::model::{DecodeReport, Object};
+use crate::model::{DecodeReport, Object, Point3, Solid3D};
 #[cfg(any(unix, windows))]
 use crate::original::regular_file_id_no_follow;
 use crate::original::{
@@ -2185,11 +2188,14 @@ fn apply_revision_op(
                             | "center_mark"
                             | "center_line"
                             | "shape"
+                            | "solid3d"
                             | "insert"
                     ) =>
                 {
                     object
                 }
+                crate::change::operations::Kind::AddBox
+                | crate::change::operations::Kind::AddCylinder => "solid3d",
                 _ => {
                     return Err(op_error(
                         index,
@@ -3810,6 +3816,313 @@ fn apply_revision_op(
                     "joined {} objects into {} `{kept_id}` (carries on; removed {})",
                     resolved.len(),
                     joined.type_name(),
+                    removed_text.join(", ")
+                ),
+                id: Some(kept_id),
+                handle: Some(new_hex),
+                handles_touched,
+                handles_added,
+                handles_deleted,
+                copies: Vec::new(),
+                snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
+                split_id: None,
+                deleted: deleted_ids,
+                transformed: Vec::new(),
+                created: Vec::new(),
+            })
+        }
+        Body::Extrude {
+            target,
+            height,
+            direction,
+            taper_angle,
+            erase_source,
+            layer,
+            id,
+            name,
+        } => {
+            let loaded = ensure_record(session, cached, source, sheet_name)?;
+            let found = resolve_target(session, loaded, target, sheet_name, op, "target")?;
+            if *erase_source {
+                check_unlocked(session, &found.handle, &found.id, op, "target")?;
+            }
+            let obj_idx = (0..loaded.record.sheet.objects.len())
+                .find(|&i| loaded.record.handle_of(i) == Some(found.handle.as_str()))
+                .ok_or_else(|| {
+                    op_error(
+                        index,
+                        op_name,
+                        ErrorCode::UnknownName,
+                        format!("could not read `{}` to extrude it", found.id),
+                        "target",
+                    )
+                })?;
+            let base = loaded.record.sheet.objects[obj_idx].clone();
+            let profile = extract_profile(&base, op_name)
+                .map_err(|e| op_error(index, op_name, e.code, e.message, "target"))?;
+            let solid = build_extrude_solid(
+                profile.points,
+                profile.bulges,
+                profile.exact_circle,
+                *height,
+                *direction,
+                *taper_angle,
+                layer.clone().unwrap_or(profile.layer),
+                profile.properties,
+            )
+            .map_err(|e| op_error(index, op_name, e.code, e.message, "height"))?;
+            let new_object = Object::Solid3D(solid);
+            let space = session.space_of_handle(&found.handle)?;
+            let fonts = SheetFonts::find(&loaded.record.sheet, settings);
+            let start_of = |t: &crate::text::Text| fonts.start(t);
+            let (hex, mut handles) = session.add_object(
+                &new_object,
+                &space,
+                sheet_name,
+                id.as_deref(),
+                name.as_deref(),
+                &start_of,
+            )?;
+            let mut deleted = Vec::new();
+            if *erase_source {
+                let del = session.delete_object(&found.handle)?;
+                handles.touched.extend(del.touched);
+                handles.deleted.extend(del.deleted);
+                deleted.push(found.id.clone());
+            }
+            let new_id = match id {
+                Some(explicit) => format!("{sheet_name}/{explicit}"),
+                None => handle_id(sheet_name, &hex),
+            };
+            let h_str = crate::description::number_text(*height);
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message: format!(
+                    "extruded `{}` by {h_str} to solid3d `{new_id}` (handle `{hex}`)",
+                    found.id
+                ),
+                id: Some(new_id),
+                handle: Some(hex),
+                handles_touched: handles.touched,
+                handles_added: handles.added,
+                handles_deleted: handles.deleted,
+                copies: Vec::new(),
+                snapped: Vec::new(),
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
+                split_id: None,
+                deleted,
+                transformed: Vec::new(),
+                created: Vec::new(),
+            })
+        }
+        Body::Revolve {
+            target,
+            axis_origin,
+            axis_direction,
+            angle,
+            erase_source,
+            layer,
+            id,
+            name,
+        } => {
+            let loaded = ensure_record(session, cached, source, sheet_name)?;
+            let found = resolve_target(session, loaded, target, sheet_name, op, "target")?;
+            if *erase_source {
+                check_unlocked(session, &found.handle, &found.id, op, "target")?;
+            }
+            let obj_idx = (0..loaded.record.sheet.objects.len())
+                .find(|&i| loaded.record.handle_of(i) == Some(found.handle.as_str()))
+                .ok_or_else(|| {
+                    op_error(
+                        index,
+                        op_name,
+                        ErrorCode::UnknownName,
+                        format!("could not read `{}` to revolve it", found.id),
+                        "target",
+                    )
+                })?;
+            let base = loaded.record.sheet.objects[obj_idx].clone();
+            let profile = extract_profile(&base, op_name)
+                .map_err(|e| op_error(index, op_name, e.code, e.message, "target"))?;
+            let mut snapped = Vec::new();
+            let origin_xyz = resolve_op_point(axis_origin, loaded, settings, op, &mut snapped)?;
+            let solid = build_revolve_solid(
+                profile.points,
+                profile.bulges,
+                Point3::new(origin_xyz[0], origin_xyz[1], origin_xyz[2]),
+                *axis_direction,
+                *angle,
+                layer.clone().unwrap_or(profile.layer),
+                profile.properties,
+            )
+            .map_err(|e| op_error(index, op_name, e.code, e.message, "angle"))?;
+            let new_object = Object::Solid3D(solid);
+            let space = session.space_of_handle(&found.handle)?;
+            let fonts = SheetFonts::find(&loaded.record.sheet, settings);
+            let start_of = |t: &crate::text::Text| fonts.start(t);
+            let (hex, mut handles) = session.add_object(
+                &new_object,
+                &space,
+                sheet_name,
+                id.as_deref(),
+                name.as_deref(),
+                &start_of,
+            )?;
+            let mut deleted = Vec::new();
+            if *erase_source {
+                let del = session.delete_object(&found.handle)?;
+                handles.touched.extend(del.touched);
+                handles.deleted.extend(del.deleted);
+                deleted.push(found.id.clone());
+            }
+            let new_id = match id {
+                Some(explicit) => format!("{sheet_name}/{explicit}"),
+                None => handle_id(sheet_name, &hex),
+            };
+            let ang_str = crate::description::number_text(*angle);
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message: format!(
+                    "revolved `{}` by {ang_str}° to solid3d `{new_id}` (handle `{hex}`)",
+                    found.id
+                ),
+                id: Some(new_id),
+                handle: Some(hex),
+                handles_touched: handles.touched,
+                handles_added: handles.added,
+                handles_deleted: handles.deleted,
+                copies: Vec::new(),
+                snapped,
+                replacements: Vec::new(),
+                attributes_set: Vec::new(),
+                split_id: None,
+                deleted,
+                transformed: Vec::new(),
+                created: Vec::new(),
+            })
+        }
+        Body::SolidBoolean {
+            op: bool_op,
+            targets,
+            layer,
+            id,
+            name,
+        } => {
+            let loaded = ensure_record(session, cached, source, sheet_name)?;
+            let mut resolved = Vec::with_capacity(targets.len());
+            let mut indices = Vec::with_capacity(targets.len());
+            for (i, (t, key)) in targets.iter().enumerate() {
+                let f = resolve_target(session, loaded, t, sheet_name, op, key)?;
+                check_unlocked(session, &f.handle, &f.id, op, key)?;
+                if resolved
+                    .iter()
+                    .any(|prev: &ResolvedTarget| prev.handle == f.handle)
+                {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::BadValue,
+                        format!("`{}` is named twice", f.id),
+                        key,
+                    ));
+                }
+                let obj_idx = (0..loaded.record.sheet.objects.len())
+                    .find(|&j| loaded.record.handle_of(j) == Some(f.handle.as_str()))
+                    .ok_or_else(|| {
+                        op_error(
+                            index,
+                            op_name,
+                            ErrorCode::UnknownName,
+                            format!("could not read `{}` for `{}`", f.id, bool_op.name()),
+                            key,
+                        )
+                    })?;
+                if i > 0 && !loaded.record.sheet.same_space(indices[0], obj_idx) {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{}` is in a different space from `{}`",
+                            f.id, resolved[0].id
+                        ),
+                        key,
+                    ));
+                }
+                resolved.push(f);
+                indices.push(obj_idx);
+            }
+            let mut solids: Vec<&Solid3D> = Vec::with_capacity(indices.len());
+            for (&obj_idx, (f, (_, key))) in indices.iter().zip(resolved.iter().zip(targets)) {
+                match &loaded.record.sheet.objects[obj_idx] {
+                    Object::Solid3D(s) => solids.push(s),
+                    other => {
+                        return Err(op_error(
+                            index,
+                            op_name,
+                            ErrorCode::BadValue,
+                            format!(
+                                "`{}` expects 3D solids (`solid3d`), but `{}` is a {}",
+                                bool_op.name(),
+                                f.id,
+                                other.type_name()
+                            ),
+                            key,
+                        ));
+                    }
+                }
+            }
+            let combined = Object::Solid3D(
+                build_boolean_solid(*bool_op, &solids, layer.clone())
+                    .map_err(|e| op_error(index, op_name, e.code, e.message, ""))?,
+            );
+            let space = session.space_of_handle(&resolved[0].handle)?;
+            let fonts = SheetFonts::find(&loaded.record.sheet, settings);
+            let start_of = |t: &crate::text::Text| fonts.start(t);
+            let local0 = id.as_deref().or_else(|| {
+                resolved[0]
+                    .id
+                    .split_once('/')
+                    .map(|(_, l)| l)
+                    .filter(|l| !l.starts_with(HANDLE_ID))
+            });
+            let eff_name = name
+                .as_deref()
+                .or(loaded.record.objects[indices[0]].name.as_deref());
+            let mut handles_touched = Vec::new();
+            let mut handles_added = Vec::new();
+            let mut handles_deleted = Vec::new();
+            for f in &resolved {
+                let del = session.delete_object(&f.handle)?;
+                handles_touched.extend(del.touched);
+                handles_deleted.extend(del.deleted);
+            }
+            let (new_hex, added) =
+                session.add_object(&combined, &space, sheet_name, local0, eff_name, &start_of)?;
+            handles_touched.extend(added.touched);
+            handles_added.extend(added.added);
+            let kept_id = match local0 {
+                Some(explicit) => format!("{sheet_name}/{explicit}"),
+                None => handle_id(sheet_name, &new_hex),
+            };
+            let deleted_ids: Vec<String> = resolved[1..].iter().map(|f| f.id.clone()).collect();
+            let removed_text: Vec<String> =
+                deleted_ids.iter().map(|id| format!("`{id}`")).collect();
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message: format!(
+                    "applied `{}` to {} solids into solid3d `{kept_id}` (removed {})",
+                    bool_op.name(),
+                    resolved.len(),
                     removed_text.join(", ")
                 ),
                 id: Some(kept_id),

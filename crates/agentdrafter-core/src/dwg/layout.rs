@@ -341,7 +341,17 @@ pub(super) fn dwg_viewport(
     dwg.center = Vector3::new(viewport.center.x, viewport.center.y, viewport.center.z);
     dwg.width = viewport.width;
     dwg.height = viewport.height;
-    dwg.view_center = Vector3::new(viewport.view_center.x, viewport.view_center.y, 0.0);
+    if let Some(vd) = viewport.view_direction {
+        dwg.view_direction = Vector3::new(vd.x, vd.y, vd.z);
+        dwg.view_target = Vector3::new(
+            viewport.view_center.x,
+            viewport.view_center.y,
+            viewport.view_center.z,
+        );
+        dwg.view_center = Vector3::ZERO;
+    } else {
+        dwg.view_center = Vector3::new(viewport.view_center.x, viewport.view_center.y, 0.0);
+    }
     dwg.view_height = viewport.view_height();
     dwg.custom_scale = viewport.scale;
     let mut status = ViewportStatusFlags::from_bits(if boundary.is_some() {
@@ -902,9 +912,10 @@ pub(super) fn read_viewport(
     frozen_layers: Vec<String>,
 ) -> Option<Viewport> {
     let status = &dwg.status;
-    let top = (dwg.view_direction.x.abs() <= TOLERANCE)
-        && (dwg.view_direction.y.abs() <= TOLERANCE)
-        && dwg.view_direction.z > 0.0;
+    let vd = dwg.view_direction;
+    let vd_len = (vd.x * vd.x + vd.y * vd.y + vd.z * vd.z).sqrt();
+    let valid_dir = vd_len.is_finite() && vd_len > TOLERANCE;
+    let top = (vd.x.abs() <= TOLERANCE) && (vd.y.abs() <= TOLERANCE) && vd.z > 0.0;
     let at_origin = [dwg.view_target.x, dwg.view_target.y, dwg.view_target.z]
         .iter()
         .all(|v| v.abs() <= TOLERANCE);
@@ -914,8 +925,8 @@ pub(super) fn read_viewport(
         && !status.back_clipping
         && status.non_rectangular_clipping == clip.is_some()
         && dwg.clip_boundary_handle.is_null() == clip.is_none()
-        && top
-        && at_origin
+        && valid_dir
+        && (at_origin || !top)
         && dwg.twist_angle == 0.0
         && dwg.render_mode == ViewportRenderMode::Wireframe2D
         && dwg.width > 0.0
@@ -926,12 +937,25 @@ pub(super) fn read_viewport(
         return None;
     }
     let scale = Viewport::scale_of(dwg.height, dwg.view_height);
+    let view_direction = (!top).then(|| Point3::new(vd.x, vd.y, vd.z));
+    let view_center = match view_direction {
+        Some(dir) => {
+            let ov = crate::geometry::solid3d::OrthoView::from_direction(dir);
+            Point3::new(
+                dwg.view_target.x + ov.right[0] * dwg.view_center.x + ov.up[0] * dwg.view_center.y,
+                dwg.view_target.y + ov.right[1] * dwg.view_center.x + ov.up[1] * dwg.view_center.y,
+                dwg.view_target.z + ov.right[2] * dwg.view_center.x + ov.up[2] * dwg.view_center.y,
+            )
+        }
+        None => Point3::new(dwg.view_center.x, dwg.view_center.y, 0.0),
+    };
     let viewport = Viewport {
         center: Point3::new(dwg.center.x, dwg.center.y, 0.0),
         width: dwg.width,
         height: dwg.height,
-        view_center: Point3::new(dwg.view_center.x, dwg.view_center.y, 0.0),
+        view_center,
         scale,
+        view_direction,
         annotation_scale: super::ids::read_viewport_annoscale(&dwg.common),
         locked: status.locked,
         clip,

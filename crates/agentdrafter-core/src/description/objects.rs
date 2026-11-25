@@ -22,6 +22,7 @@ use super::leader::{leader, mleader, LEADER_KEYS, MLEADER_KEYS};
 use super::media::{pdf_underlay, raster_image, IMAGE_KEYS, PDF_UNDERLAY_KEYS};
 use super::polyline;
 use super::revision_cloud::{revision_cloud, REVISION_CLOUD_KEYS};
+use super::solid3d::{read_solid3d, SOLID3D_KEYS};
 use super::strict_yaml::{index_path, key_path, Kind, Node};
 use super::table::{table, TABLE_KEYS};
 use super::text::{mtext, text, MTEXT_KEYS, TEXT_KEYS};
@@ -42,7 +43,7 @@ use crate::units::Unit;
 type ObjectType = (&'static str, &'static [&'static str]);
 
 /// The drawn objects both a sheet and a block hold, and the keys each takes.
-const DRAWN_OBJECT_TYPES: [ObjectType; 23] = [
+const DRAWN_OBJECT_TYPES: [ObjectType; 24] = [
     ("line", &LINE_KEYS),
     ("polyline", &POLYLINE_KEYS),
     ("arc", &ARC_KEYS),
@@ -66,11 +67,12 @@ const DRAWN_OBJECT_TYPES: [ObjectType; 23] = [
     ("center_mark", &CENTER_MARK_KEYS),
     ("center_line", &CENTER_LINE_KEYS),
     ("shape", &SHAPE_KEYS),
+    ("solid3d", &SOLID3D_KEYS),
 ];
 
 /// The drawn objects followed by one more object type.
-const fn drawn_and(last: ObjectType) -> [ObjectType; 24] {
-    let mut types = [last; 24];
+const fn drawn_and(last: ObjectType) -> [ObjectType; 25] {
+    let mut types = [last; 25];
     let mut i = 0;
     while i < DRAWN_OBJECT_TYPES.len() {
         types[i] = DRAWN_OBJECT_TYPES[i];
@@ -82,18 +84,18 @@ const fn drawn_and(last: ObjectType) -> [ObjectType; 24] {
 /// Every object type a sheet description can hold, and the keys each takes:
 /// the drawn objects, inserts, tables, multileaders, older leaders,
 /// dimensions and viewports.
-pub(crate) const OBJECT_TYPES: [ObjectType; 29] = {
+pub(crate) const OBJECT_TYPES: [ObjectType; 30] = {
     let drawn = drawn_and(("insert", &INSERT_KEYS));
-    let mut types = [("table", &TABLE_KEYS as &[&str]); 29];
+    let mut types = [("table", &TABLE_KEYS as &[&str]); 30];
     let mut i = 0;
     while i < drawn.len() {
         types[i] = drawn[i];
         i += 1;
     }
-    types[25] = ("mleader", &MLEADER_KEYS);
-    types[26] = ("leader", &LEADER_KEYS);
-    types[27] = ("dimension", &DIMENSION_KEYS);
-    types[28] = ("viewport", &VIEWPORT_KEYS);
+    types[26] = ("mleader", &MLEADER_KEYS);
+    types[27] = ("leader", &LEADER_KEYS);
+    types[28] = ("dimension", &DIMENSION_KEYS);
+    types[29] = ("viewport", &VIEWPORT_KEYS);
     types
 };
 
@@ -101,9 +103,9 @@ pub(crate) const OBJECT_TYPES: [ObjectType; 29] = {
 /// each takes: the drawn objects a sheet holds, attribute definitions, and
 /// inserts of the library's other blocks. A text in a block takes its cell
 /// as well.
-pub(crate) const BLOCK_OBJECT_TYPES: [ObjectType; 25] = {
+pub(crate) const BLOCK_OBJECT_TYPES: [ObjectType; 26] = {
     let drawn = drawn_and(("attdef", &ATTDEF_KEYS));
-    let mut types = [("insert", &INSERT_KEYS as &[&str]); 25];
+    let mut types = [("insert", &INSERT_KEYS as &[&str]); 26];
     let mut i = 0;
     while i < drawn.len() {
         types[i] = drawn[i];
@@ -410,6 +412,7 @@ pub(super) fn object(
         ("center_mark", _) => read_center_mark(&fields, units, layer).map(Object::CenterMark),
         ("center_line", _) => read_center_line(&fields, units, layer).map(Object::CenterLine),
         ("shape", _) => read_shape(&fields, units, layer).map(Object::Shape),
+        ("solid3d", _) => read_solid3d(&fields, units, layer).map(Object::Solid3D),
         ("arc", _) => arc(&fields, units, layer).map(Object::Arc),
         ("circle", _) => circle(&fields, units, layer).map(Object::Circle),
         ("ellipse", _) => ellipse(&fields, units, layer).map(Object::Ellipse),

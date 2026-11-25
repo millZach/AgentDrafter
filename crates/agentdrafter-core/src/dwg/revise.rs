@@ -4785,6 +4785,20 @@ fn translate_entity(object: &mut EntityType, delta: Vector3) -> Result<(), Error
             }
             Ok(())
         }
+        EntityType::Solid3D(s) => {
+            let mut solid =
+                super::solid3d::read_solid3d(s, s.common.layer.clone()).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::BadValue,
+                        "move is not supported on this unsupported ACIS 3DSOLID in an original DWG",
+                    )
+                })?;
+            solid.body.translate(Point3::new(delta.x, delta.y, delta.z));
+            let rebuilt = super::solid3d::dwg_solid3d(&solid)?;
+            s.acis_data = rebuilt.acis_data;
+            s.point_of_reference = rebuilt.point_of_reference;
+            Ok(())
+        }
         other => Err(Error::new(
             ErrorCode::BadValue,
             format!(
@@ -4858,6 +4872,7 @@ fn rotate_entity(object: &mut EntityType, about: [f64; 3], degrees: f64) -> Resu
             | EntityType::MLine(_)
             | EntityType::Tolerance(_)
             | EntityType::Shape(_)
+            | EntityType::Solid3D(_)
     ) {
         return Err(Error::new(
             ErrorCode::BadValue,
@@ -5032,6 +5047,27 @@ fn rotate_entity(object: &mut EntityType, about: [f64; 3], degrees: f64) -> Resu
             s.insertion_point = rot_pt(s.insertion_point, about, sin, cos);
             s.rotation = normalize_degrees(s.rotation.to_degrees() + degrees).to_radians();
         }
+        EntityType::Solid3D(s) => {
+            let mut solid = super::solid3d::read_solid3d(s, s.common.layer.clone()).ok_or_else(
+                || {
+                    Error::new(
+                        ErrorCode::BadValue,
+                        "rotate is not supported on this unsupported ACIS 3DSOLID in an original DWG",
+                    )
+                },
+            )?;
+            solid.body = crate::geometry::solid3d::transform_solid_body(
+                &solid.body,
+                |p: [f64; 3]| {
+                    let r = rot_pt(Vector3::new(p[0], p[1], p[2]), about, sin, cos);
+                    [r.x, r.y, r.z]
+                },
+                false,
+            )?;
+            let rebuilt = super::solid3d::dwg_solid3d(&solid)?;
+            s.acis_data = rebuilt.acis_data;
+            s.point_of_reference = rebuilt.point_of_reference;
+        }
         other => {
             return Err(Error::new(
                 ErrorCode::BadValue,
@@ -5100,6 +5136,7 @@ fn scale_entity(object: &mut EntityType, about: [f64; 3], factor: f64) -> Result
             | EntityType::MLine(_)
             | EntityType::Tolerance(_)
             | EntityType::Shape(_)
+            | EntityType::Solid3D(_)
     ) {
         return Err(Error::new(
             ErrorCode::BadValue,
@@ -5303,6 +5340,22 @@ fn scale_entity(object: &mut EntityType, about: [f64; 3], factor: f64) -> Result
             s.insertion_point = scale_pt(s.insertion_point, about, factor);
             s.size *= factor;
         }
+        EntityType::Solid3D(s) => {
+            let mut solid = super::solid3d::read_solid3d(s, s.common.layer.clone()).ok_or_else(
+                || {
+                    Error::new(
+                        ErrorCode::BadValue,
+                        "scale is not supported on this unsupported ACIS 3DSOLID in an original DWG",
+                    )
+                },
+            )?;
+            solid
+                .body
+                .scale_about(Point3::new(about[0], about[1], about[2]), factor);
+            let rebuilt = super::solid3d::dwg_solid3d(&solid)?;
+            s.acis_data = rebuilt.acis_data;
+            s.point_of_reference = rebuilt.point_of_reference;
+        }
         other => {
             return Err(Error::new(
                 ErrorCode::BadValue,
@@ -5355,6 +5408,7 @@ fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> 
             | EntityType::MLine(_)
             | EntityType::Tolerance(_)
             | EntityType::Shape(_)
+            | EntityType::Solid3D(_)
     ) {
         return Err(Error::new(
             ErrorCode::BadValue,
@@ -5601,6 +5655,27 @@ fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> 
         EntityType::Shape(s) => {
             s.insertion_point = mp(s.insertion_point);
             s.rotation = mdeg(s.rotation.to_degrees()).to_radians();
+        }
+        EntityType::Solid3D(s) => {
+            let mut solid = super::solid3d::read_solid3d(s, s.common.layer.clone()).ok_or_else(
+                || {
+                    Error::new(
+                        ErrorCode::BadValue,
+                        "mirror is not supported on this unsupported ACIS 3DSOLID in an original DWG",
+                    )
+                },
+            )?;
+            solid.body = crate::geometry::solid3d::transform_solid_body(
+                &solid.body,
+                |p: [f64; 3]| {
+                    let q = mp(Vector3::new(p[0], p[1], p[2]));
+                    [q.x, q.y, q.z]
+                },
+                true,
+            )?;
+            let rebuilt = super::solid3d::dwg_solid3d(&solid)?;
+            s.acis_data = rebuilt.acis_data;
+            s.point_of_reference = rebuilt.point_of_reference;
         }
         other => {
             return Err(Error::new(

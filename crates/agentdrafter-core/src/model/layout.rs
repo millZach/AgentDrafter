@@ -252,6 +252,11 @@ pub struct Viewport {
     /// How long a length of model space draws on the paper, per unit:
     /// 0.25 for 1:4. More than 0.
     pub scale: f64,
+    /// Optional 3D orthographic view direction vector (AutoCAD `VIEWDIR`, e.g.
+    /// `[1, -1, 1]` for SE isometric, `[0, -1, 0]` for front). When `None`,
+    /// looks straight down along `[0, 0, 1]` (plan/top view).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_direction: Option<Point3>,
     /// Optional annotation scale name for this viewport (such as `"1:50"`).
     /// When `None`, the viewport uses its `scale`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -299,32 +304,45 @@ impl Viewport {
         ]
     }
 
+    /// The 2D coordinates of `view_center` in the viewport's orthographic view
+    /// plane (`[x, y]` for top/plan view, or projected along `view_direction`).
+    pub fn projected_view_center(&self) -> [f64; 2] {
+        match self.view_direction {
+            Some(dir) => crate::geometry::solid3d::OrthoView::from_direction(dir).project([
+                self.view_center.x,
+                self.view_center.y,
+                self.view_center.z,
+            ]),
+            None => [self.view_center.x, self.view_center.y],
+        }
+    }
+
     /// The part of model space the window shows: its lower left and upper
-    /// right corners in model space.
+    /// right corners in the viewport's view plane.
     pub fn view(&self) -> [[f64; 2]; 2] {
+        let vc = self.projected_view_center();
         let (w, h) = (
             self.width / 2.0 / self.scale,
             self.height / 2.0 / self.scale,
         );
-        [
-            [self.view_center.x - w, self.view_center.y - h],
-            [self.view_center.x + w, self.view_center.y + h],
-        ]
+        [[vc[0] - w, vc[1] - h], [vc[0] + w, vc[1] + h]]
     }
 
-    /// Where the model point `p` shows on the paper.
+    /// Where the model-plane point `p` shows on the paper.
     pub fn to_paper(&self, p: [f64; 2]) -> [f64; 2] {
+        let vc = self.projected_view_center();
         [
-            self.center.x + (p[0] - self.view_center.x) * self.scale,
-            self.center.y + (p[1] - self.view_center.y) * self.scale,
+            self.center.x + (p[0] - vc[0]) * self.scale,
+            self.center.y + (p[1] - vc[1]) * self.scale,
         ]
     }
 
-    /// The model point that shows at the paper point `p`.
+    /// The model-plane point that shows at the paper point `p`.
     pub fn to_model(&self, p: [f64; 2]) -> [f64; 2] {
+        let vc = self.projected_view_center();
         [
-            self.view_center.x + (p[0] - self.center.x) / self.scale,
-            self.view_center.y + (p[1] - self.center.y) / self.scale,
+            vc[0] + (p[0] - self.center.x) / self.scale,
+            vc[1] + (p[1] - self.center.y) / self.scale,
         ]
     }
 
@@ -465,6 +483,7 @@ mod tests {
             height: 140.0,
             view_center: Point3::new(400.0, 300.0, 0.0),
             scale: 0.25,
+            view_direction: None,
             locked: false,
             clip: None,
             frozen_layers: Vec::new(),
@@ -488,6 +507,7 @@ mod tests {
             height: 200.0,
             view_center: Point3::new(400.0, 300.0, 0.0),
             scale: 0.25,
+            view_direction: None,
             locked: false,
             clip: None,
             frozen_layers: Vec::new(),

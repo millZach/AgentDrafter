@@ -183,6 +183,7 @@ pub use model::{
     is_valid_pdmode, CenterLine, CenterMark, MLine, MLineElement, MLineJustification, MLineStyle,
     Point, Ray, ResolvedShape, ShxShape, Tolerance, XLine, STANDARD_MLINE_STYLE,
 };
+pub use model::{preset_view_direction, BooleanOp, Solid3D, SolidBody, VIEW_DIRECTION_PRESETS};
 pub use model::{
     AngularUnit, DecimalSeparator, Dimension, DimensionKind, DimensionPart, DimensionStyle,
     FractionFormat, LaidDimension, Measured, OrdinateAxis, TextPlacement, UnitFormat, DEGREE_SIGN,
