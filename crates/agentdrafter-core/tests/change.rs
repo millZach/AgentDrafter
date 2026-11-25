@@ -352,6 +352,7 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("add_center_mark", "CENTERMARK"),
             ("add_center_line", "CENTERLINE"),
             ("add_shape", "SHAPE"),
+            ("add_solid3d", "3DSOLID"),
             ("insert_block", "INSERT"),
             ("add_table", "TABLE"),
             ("add_mleader", "MLEADER"),
@@ -431,6 +432,13 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("set_object_scales", "OBJECTSCALE"),
             ("set_point_style", "DDPTYPE"),
             ("add_mline_style", "MLSTYLE"),
+            ("add_box", "BOX"),
+            ("add_cylinder", "CYLINDER"),
+            ("extrude", "EXTRUDE"),
+            ("revolve", "REVOLVE"),
+            ("union", "UNION"),
+            ("subtract", "SUBTRACT"),
+            ("intersect", "INTERSECT"),
         ]
     );
     let samples = [
@@ -457,6 +465,7 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "CENTERMARK", "sheet": "S", "center": [20, 20, 0], "radius": 10}),
         json!({"op": "CENTERLINE", "sheet": "S", "from": [0, 5, 0], "to": [20, 5, 0], "start_extension": 2, "end_extension": 2}),
         json!({"op": "SHAPE", "sheet": "S", "file": "custom.shx", "shape": "MARKER", "position": [30, 30, 0], "size": 5}),
+        json!({"op": "3DSOLID", "sheet": "S", "kind": "box", "origin": [0, 0, 0], "size": [10, 20, 30]}),
         json!({"op": "INSERT", "sheet": "S", "block": "B", "position": [0, 0, 0], "attributes": {"TAG": "X", "NOTE": ["a", null]}}),
         json!({"op": "TABLE", "sheet": "S", "position": [0, 10, 0], "columns": [5, 5], "rows": [2], "cells": [["A", {"text": "B", "height": 1}]]}),
         json!({"op": "MLEADER", "sheet": "S", "leaders": [[[0, 0, 0], [10, 5, 0]], [[0, 8, 0], [10, 5, 0]]], "content": {"text": "TB-1", "attachment": "middle_of_text"}, "arrowhead": "dot"}),
@@ -536,6 +545,13 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "OBJECTSCALE", "target": {"id": "S/note"}, "annotative": true, "add": ["1:50", "1:100"]}),
         json!({"op": "DDPTYPE", "sheet": "S", "pdmode": 35, "pdsize": 2.5}),
         json!({"op": "MLSTYLE", "sheet": "S", "name": "WALL", "elements": [{"offset": 0.5}, {"offset": -0.5}], "start_square_cap": true, "end_square_cap": true}),
+        json!({"op": "BOX", "sheet": "S", "origin": [0, 0, 0], "size": [10, 20, 30]}),
+        json!({"op": "CYLINDER", "sheet": "S", "base": [0, 0, 0], "radius": 5, "height": 20}),
+        json!({"op": "EXTRUDE", "target": {"id": "S/prof"}, "height": 15}),
+        json!({"op": "REVOLVE", "target": {"id": "S/prof"}, "axis_origin": [0, 0, 0], "axis_direction": [0, 0, 1], "angle": 180}),
+        json!({"op": "UNION", "targets": [{"id": "S/a"}, {"id": "S/b"}]}),
+        json!({"op": "SUBTRACT", "target": {"id": "S/a"}, "subtract": {"id": "S/b"}}),
+        json!({"op": "INTERSECT", "targets": [{"id": "S/a"}, {"id": "S/b"}]}),
     ];
     for (info, sample) in listed.operations.iter().zip(&samples) {
         assert!(info.does.contains(&info.alias), "{}", info.does);

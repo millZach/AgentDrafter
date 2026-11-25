@@ -170,7 +170,7 @@ fn an_unknown_object_type_is_named() {
     assert_eq!(e.field.as_deref(), Some("objects[0].hexagon"));
     assert_eq!(
         e.message,
-        "unknown object type `hexagon`; known types: line, polyline, arc, circle, ellipse, spline, hatch, text, mtext, donut, solid, revision_cloud, wipeout, image, pdf_underlay, point, xline, ray, mline, tolerance, center_mark, center_line, shape, insert, table, mleader, leader, dimension, viewport"
+        "unknown object type `hexagon`; known types: line, polyline, arc, circle, ellipse, spline, hatch, text, mtext, donut, solid, revision_cloud, wipeout, image, pdf_underlay, point, xline, ray, mline, tolerance, center_mark, center_line, shape, solid3d, insert, table, mleader, leader, dimension, viewport"
     );
 }
 
