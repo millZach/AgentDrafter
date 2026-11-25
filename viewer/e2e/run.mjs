@@ -2572,8 +2572,9 @@ const checks = {
       shots.push(name);
     };
     // Waits for the journal to hold one more entry than `before`, a change
-    // set that landed on `sheet`, and for the page to draw what it added.
-    const landed = async (page, before, what, sheet = 'DP-LD-101') => {
+    // set that landed on `sheet`, and (when `waitDrawn` is true) for the page
+    // to draw what it added.
+    const landed = async (page, before, what, sheet = 'DP-LD-101', waitDrawn = true) => {
       const until = Date.now() + 30000;
       let entries = journal();
       while (!grownAndDone(entries, before)) {
@@ -2584,9 +2585,11 @@ const checks = {
       assert(entries.length === before + 1, `${what}: one journal entry, not ${entries.length - before}`);
       const entry = entries.at(-1);
       assert(entry.kind === 'change_set' && entry.landed_on?.includes(sheet), `${what} landed: ${JSON.stringify(entry)}`);
-      const added = (entry.objects ?? []).filter((o) => o.how === 'added' && o.id.startsWith(`${sheet}/`)).map((o) => o.id);
-      for (const id of added) {
-        await page.waitForFunction((wanted) => window.agentdrafterViewer.summary.objects.some((o) => o.id === wanted), id, { timeout: 15000 });
+      if (waitDrawn) {
+        const added = (entry.objects ?? []).filter((o) => o.how === 'added' && o.id.startsWith(`${sheet}/`)).map((o) => o.id);
+        for (const id of added) {
+          await page.waitForFunction((wanted) => window.agentdrafterViewer.summary.objects.some((o) => o.id === wanted), id, { timeout: 15000 });
+        }
       }
       return entry;
     };
@@ -2770,13 +2773,16 @@ const checks = {
         assert((await bar(page)).includes('1 copy placed'), `a copy is placed: ${await bar(page)}`);
         await sideTab(page, 'journal');
         await page.click(`[data-entry="${seen.laptop.enter}"] .je-head`);
-        entry = await landed(page, before, 'Copy, journal entry opened');
+        entry = await landed(page, before, 'Copy, journal entry opened', 'DP-LD-101', false);
         op = copyOp(entry);
         assert(JSON.stringify(op.from) === '[2,6.5,0]' && JSON.stringify(op.to) === '[2,3.5,0]', `journal entry open lands the placed copy: ${JSON.stringify(op)}`);
         await page.waitForFunction(() => document.querySelector('.cmdbar')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
         assert(!(await bar(page)).includes('COPY'), `the copy landed and the tool ended: ${await bar(page)}`);
         await page.click('.opt[data-opt="live"]');
         await page.waitForFunction(() => !document.querySelector('.cmdbar')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
+        for (const id of (entry.objects ?? []).filter((o) => o.how === 'added' && o.id.startsWith('DP-LD-101/')).map((o) => o.id)) {
+          await page.waitForFunction((wanted) => window.agentdrafterViewer.summary.objects.some((o) => o.id === wanted), id, { timeout: 15000 });
+        }
         await sideTab(page, 'chat');
         // A copy placed, then another sheet clicked (#246): the copy lands on DP-LD-101, then DP-LD-102 opens.
         before = journal().length;
@@ -2787,13 +2793,16 @@ const checks = {
         await typeIn(page, '', '2,6.5', '@0,-2.5');
         assert((await bar(page)).includes('1 copy placed'), `a copy is placed before sheet switch: ${await bar(page)}`);
         await page.click('.tab:has-text("DP-LD-102")');
-        entry = await landed(page, before, 'Copy, sheet switched');
+        entry = await landed(page, before, 'Copy, sheet switched', 'DP-LD-101', false);
         op = copyOp(entry);
         assert(JSON.stringify(op.from) === '[2,6.5,0]' && JSON.stringify(op.to) === '[2,4,0]', `sheet switch lands the placed copy: ${JSON.stringify(op)}`);
         await page.waitForFunction(() => window.agentdrafterViewer.summary?.sheet === 'DP-LD-102', null, { timeout: 15000 });
         assert(!(await bar(page)).includes('COPY'), `sheet switch ends the tool: ${await bar(page)}`);
         await page.click('.tab:has-text("DP-LD-101")');
         await page.waitForFunction(() => window.agentdrafterViewer.summary?.sheet === 'DP-LD-101', null, { timeout: 15000 });
+        for (const id of (entry.objects ?? []).filter((o) => o.how === 'added' && o.id.startsWith('DP-LD-101/')).map((o) => o.id)) {
+          await page.waitForFunction((wanted) => window.agentdrafterViewer.summary.objects.some((o) => o.id === wanted), id, { timeout: 15000 });
+        }
         // A template object's copy placed, then another sheet clicked (#246):
         // stays on DP-LD-101 and shows the Change all band first.
         before = journal().length;
