@@ -1623,12 +1623,12 @@ function DrawingWorkspace({
       setPropsReset((n) => n + 1);
       log(`${preview.send.what}: cancelled, nothing changed`);
     }
+    // Placed copies (and drawn lines/text) land first; a template's asks in Change all and stays (#246).
+    if (leaveTool()) return;
     setAt(asItWas ? number : null);
     setFocused(number);
     setPulseSince(null);
     setPicked(null);
-    // Copies placed on the sheet shown are dropped, with nothing sent.
-    leaveTool();
     setSide('journal');
     setWanted(target);
     // Another sheet may not have the layout shown: it opens on its first.
@@ -1823,7 +1823,8 @@ function DrawingWorkspace({
   // what the drafter does and shows what they say.
   // What came of a tool's step: its lines in the history, and its change
   // set sent, or asked about first when it edits a template's object.
-  const toolDid = (text: string) => {
+  const toolDid = (text: string): boolean => {
+    let asking = false;
     if (text) {
       const o = JSON.parse(text) as ToolOutcome & { guide?: RendererNote };
       for (const line of o.log) log(line);
@@ -1840,11 +1841,16 @@ function DrawingWorkspace({
       }
       // Each in order: one to a template's object is asked about first.
       for (const s of o.sends ?? []) {
-        if (s.template) startPreview(s);
-        else void sendGuided(s);
+        if (s.template) {
+          startPreview(s);
+          asking = true;
+        } else {
+          void sendGuided(s);
+        }
       }
     }
     refreshTool();
+    return asking;
   };
   // Sends a tool's change set through `change`, as an agent would, and
   // asks for the sheets it landed on as soon as `change` replies, without
@@ -2008,18 +2014,14 @@ function DrawingWorkspace({
     if (arrayStale()) leaveTool();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wanted, wantedLayout]);
-  // A tab clicked drops it at once, in the renderer, which holds the tool,
-  // so an Array or Enter pressed before the page draws again sends nothing.
-  const dropArrayFor = (sheet: string, layout: string | null) => {
-    const v = renderer();
+  // A tab clicked ends the running tool at once, in the renderer: Copy's
+  // copies placed (and Line/Text) land as Esc lands them, Array drops with
+  // nothing sent (#246). Returns true when a template edit opens the
+  // Change all band, so the page stays on the sheet shown.
+  const leaveToolFor = (sheet: string, layout: string | null): boolean => {
     const shown = summary ? { sheet: summary.sheet, layout: summary.layout ?? null } : null;
-    if (v && toolRead.current?.array && switchingAway(sheet, layout, shown)) {
-      toolDid(v.tool_leave());
-      // What was typed for it goes with it, at once: Enter on the next
-      // sheet must not send it to the assistant (#66, review 2).
-      if (field.current) field.current.value = '';
-      setTyped('');
-    }
+    if (!switchingAway(sheet, layout, shown)) return false;
+    return leaveTool();
   };
   const arrayAct = (a: string) => {
     if (arrayStale()) {
@@ -2049,12 +2051,18 @@ function DrawingWorkspace({
   // Outside a tool, Ctrl+Z does nothing: Undo last stays a button, since there is no Redo.
   const toolCanUndo = canToolUndo(toolState);
   const undoTool = () => toolDid(renderer()?.tool_option('undo') ?? '');
-  // The page leaves what the tool works on: an entry, or a proposal opened.
-  // Copy's copies placed are dropped, with nothing sent; only Enter, Done,
-  // a right-click or Esc lands them. Any other tool ends as Esc ends it.
-  const leaveTool = () => {
+  // The page leaves what the tool works on: another sheet or layout, an
+  // entry of the journal, or a proposal opened (#246). Placed copies (and
+  // drawn lines/text) land as Esc lands them; Array drops with nothing sent.
+  // Returns true if landing opened a template preview ("Change all N sheets"),
+  // so the caller stays on the sheet shown.
+  const leaveTool = (): boolean => {
     const v = renderer();
-    if (v && toolState?.tool) toolDid(v.tool_leave());
+    if (!v || !toolRead.current?.tool) return false;
+    const askingTemplate = toolDid(v.tool_leave());
+    if (field.current) field.current.value = '';
+    setTyped('');
+    return askingTemplate;
   };
   const endTool = () => {
     const v = renderer();
@@ -2263,11 +2271,11 @@ function DrawingWorkspace({
   // shown as it would leave it, on the sheet it was opened on when it
   // reaches it, or its first.
   function openProposal(p: Proposal, on?: string) {
+    // Placed copies (and drawn lines/text) land first; a template's asks in Change all and stays (#246).
+    if (leaveTool()) return;
     // From the set as it was, as from a toast's Show: back to live first,
     // since a proposal is drawn on the set as it is.
     if (at !== null) backToLive();
-    // Copies placed are dropped, with nothing sent, not asked about.
-    if (toolState?.tool) leaveTool();
     setPreviewRefusal(null);
     setChipOpen(null);
     setToast(null);
@@ -2346,9 +2354,8 @@ function DrawingWorkspace({
     const g = guides.find((x) => x.guide === n);
     if (!g) return;
     if (preview) cancelPreview();
+    if (leaveTool()) return;
     if (at !== null) backToLive();
-    const v = renderer();
-    if (v && toolState?.tool) toolDid(v.tool_leave());
     setPicked(null);
     // Its own Start goes; another guide's, given with it, stays.
     setToast((t) => toastAfterStart(t, n));
@@ -2453,8 +2460,7 @@ function DrawingWorkspace({
       refreshTool();
       log(took ? `Guide: the ${act.what} taken back, as you asked` : `Guide: the ${act.what} was no longer the last taken, so nothing was taken back`);
     } else {
-      const v = renderer();
-      if (v && toolState?.tool) toolDid(v.tool_leave());
+      leaveTool();
     }
   }
   /** The change sets an undo can take now, read from the journal as it is. */
@@ -3202,7 +3208,7 @@ function DrawingWorkspace({
             className={`tab${l === summary?.layout ? ' on' : ''}`}
             aria-current={l === summary?.layout ? 'page' : undefined}
             onClick={() => {
-              dropArrayFor(summary?.sheet ?? '', l);
+              if (leaveToolFor(summary?.sheet ?? '', l)) return;
               setPicked(null);
               setWantedLayout(l);
             }}
@@ -3478,7 +3484,7 @@ function DrawingWorkspace({
               title={reaches ? undefined : 'The change does not reach this sheet'}
               onClick={() => {
                 if (!reaches) return;
-                dropArrayFor(s, null);
+                if (leaveToolFor(s, null)) return;
                 setPicked(null);
                 setWanted(s);
                 setWantedLayout(null);
@@ -3531,6 +3537,7 @@ function DrawingWorkspace({
                 onStop={stopGuide}
                 onNoteAct={guideNoteAct}
                 onBack={() => {
+                  if (leaveToolFor(runningGuide.sheet, null)) return;
                   setWanted(runningGuide.sheet);
                   setWantedLayout(null);
                 }}

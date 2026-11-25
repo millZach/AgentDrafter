@@ -1396,9 +1396,10 @@ impl Viewer {
         to_json(&self.tools.escape())
     }
 
-    /// The page leaves what the tool works on, for an entry of the journal
-    /// or a proposal opened: Copy's copies placed are dropped, with nothing
-    /// sent; any other tool ends as Esc ends it.
+    /// The page leaves what the tool works on (another sheet or layout, an
+    /// entry of the journal, or a proposal opened): ends the tool as Esc ends
+    /// it (#246), landing Copy's copies placed and dropping Array with nothing
+    /// sent.
     pub fn tool_leave(&mut self) -> String {
         to_json(&self.tools.leave())
     }

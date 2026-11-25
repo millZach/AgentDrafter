@@ -1012,36 +1012,14 @@ impl Tools {
         self.end(true)
     }
 
-    /// The page leaves what the tool works on: an entry of the journal, or
-    /// a proposal opened over the sheet. Copy's copies placed are dropped,
-    /// with nothing sent, as another sheet drops them: only Enter, Done, a
-    /// right-click or Esc lands them. Any other tool ends as Esc ends it.
+    /// The page leaves what the tool works on: another sheet or layout, an
+    /// entry of the journal, or a proposal opened over the sheet. Ends the
+    /// tool as Esc ends it (#246): Copy's copies placed (and Line's segments
+    /// or Text's lines) land, and Array drops with nothing sent. When a
+    /// template object's copies land, the returned send carries `template` so
+    /// the page stays on the sheet and shows the Change all band first.
     pub fn leave(&mut self) -> Outcome {
-        let Some(Running {
-            kind: ToolKind::Copy,
-            step,
-        }) = &self.running
-        else {
-            return self.escape();
-        };
-        let placed = match step {
-            Step::CopySecond { placed, .. } => placed.len(),
-            _ => 0,
-        };
-        self.running = None;
-        self.error = None;
-        let line = if placed == 0 {
-            "COPY: cancelled, nothing changed".to_owned()
-        } else {
-            format!(
-                "COPY: {} placed dropped, nothing changed",
-                plural(placed, "copy", "copies")
-            )
-        };
-        Outcome {
-            log: vec![line],
-            sends: Vec::new(),
-        }
+        self.escape()
     }
 
     /// Clears what went wrong, as its OK does.

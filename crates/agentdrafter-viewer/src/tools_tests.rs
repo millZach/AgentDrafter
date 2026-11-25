@@ -993,20 +993,34 @@ fn another_tool_waits_while_the_copies_it_ended_are_asked_about() {
 }
 
 #[test]
-fn leaving_drops_the_copies_placed_with_nothing_sent() {
+fn leaving_lands_the_copies_placed_and_asks_for_a_templates_object() {
+    // Row object's copies placed: leaving lands them as Esc does (#246).
     let mut t = tools();
     t.start(ToolKind::Copy, &[2]);
     t.input("0,0", None);
     t.input("@1,0", None);
     t.input("@2,0", None);
     let outcome = t.leave();
-    assert!(outcome.sends.is_empty(), "nothing is sent");
-    assert_eq!(
-        outcome.log,
-        ["COPY: 2 copies placed dropped, nothing changed"]
-    );
+    assert_eq!(outcome.sends.len(), 1, "placed copies land on leave");
+    assert!(outcome.sends[0].template.is_none());
+    let op = &operations(&outcome)[0];
+    assert_eq!(op["op"], "copy");
+    assert_eq!(op["offsets"].as_array().unwrap().len(), 2);
     assert_eq!(t.running(), None);
-    // With none placed, it ends.
+    // Template object's copies placed: leaving returns a template send so
+    // the page stays on the sheet and shows the Change all band first (#246).
+    t.start(ToolKind::Copy, &[0]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    let outcome = t.leave();
+    assert_eq!(outcome.sends.len(), 1);
+    assert!(
+        outcome.sends[0].template.is_some(),
+        "template copies ask in Change all before leaving"
+    );
+    assert_eq!(operations(&outcome)[0]["op"], "copy");
+    assert_eq!(t.running(), None);
+    // With none placed, it ends with nothing sent.
     t.start(ToolKind::Copy, &[2]);
     let outcome = t.leave();
     assert!(outcome.sends.is_empty());
