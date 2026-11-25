@@ -4,14 +4,13 @@
 //!
 //! What JSON Schema cannot see is left to the reader, as everywhere in the
 //! schema: whether the block an insert names is in the library, which tags
-//! its block defines, a scale above 0 when it is written as a string, and
-//! whether a name or a tag is given twice.
+//! its block defines, and whether a name or a tag is given twice.
 
 use serde_json::{json, Map, Value};
 
 use super::blocks::{BLOCK_KEYS, CELL_KEY, FORBIDDEN_IN_PATHS, LONGEST_TAG};
 use super::ids::LONGEST_NAME;
-use super::schema::{object_def, optional_text, NUMBER, TEXT_TYPES};
+use super::schema::{object_def, optional_text, POSITIVE_NUMBER, TEXT_TYPES};
 use crate::model::LAYER_ZERO;
 use crate::text::Justify;
 
@@ -157,7 +156,7 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                                     number more than 0, with no unit. Without it, 1.",
                     "anyOf": [
                         { "type": "number", "exclusiveMinimum": 0 },
-                        { "type": "string", "pattern": format!("^{NUMBER}$") },
+                        { "type": "string", "pattern": format!("^{POSITIVE_NUMBER}$") },
                     ],
                 },
                 "rotation": {

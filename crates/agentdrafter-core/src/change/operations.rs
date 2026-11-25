@@ -2510,7 +2510,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                     "description": "Positive offset distance in the set's declared unit, or a \
                                     length carrying its own unit such as \"12 mm\". Give with \
                                     `side` (instead of `through`).",
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_more_than_0",
                 },
                 "side": {
                     "description": "Which side to offset to: `left` or `right` (looking from \
@@ -2660,7 +2660,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                                     length carrying its own unit such as \"5 mm\". Use 0 to bring \
                                     two lines to a sharp corner or square up arc corners on a \
                                     polyline.",
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_not_negative",
                 },
                 "trim": {
                     "description": "Whether `first` and `second` are trimmed or extended to the \
@@ -2773,22 +2773,22 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                     "description": "Equal non-negative chamfer distance along both legs (0 brings \
                                     two lines to a sharp corner). Give `distance`, `distance1` + \
                                     `distance2`, or `length` + `angle`.",
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_not_negative",
                 },
                 "distance1": {
                     "description": "Non-negative chamfer distance along `first` (or each incoming \
                                     polyline segment). Give with `distance2`.",
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_not_negative",
                 },
                 "distance2": {
                     "description": "Non-negative chamfer distance along `second` (or each outgoing \
                                     polyline segment). Give with `distance1`.",
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_not_negative",
                 },
                 "length": {
                     "description": "Non-negative chamfer length along `first` (or each incoming \
                                     polyline segment). Give with `angle`.",
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_not_negative",
                 },
                 "angle": {
                     "description": "Chamfer angle in degrees, strictly between 0 and 180, measured \
@@ -2861,7 +2861,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                 "gap": {
                     "description": "Optional positive arc-length gap centered at `at` (for \
                                     example breaking a wire around a crossing wire).",
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_more_than_0",
                 },
                 "from": {
                     "description": "First break point (or snapped point) for two-point BREAK. \
@@ -2898,7 +2898,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                 "tolerance": {
                     "description": "Optional non-negative endpoint-matching fuzz distance in the \
                                     declared unit (or carrying its own unit). Defaults to 0.0001.",
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_not_negative",
                 },
             },
         }),

@@ -832,7 +832,7 @@ pub(crate) fn clip_def() -> Value {
                         "center": { "$ref": "#/$defs/point" },
                         "radius": {
                             "description": "A length more than 0.",
-                            "$ref": "#/$defs/length",
+                            "$ref": "#/$defs/length_more_than_0",
                         },
                     },
                 },
@@ -859,12 +859,12 @@ pub(crate) fn viewport_def() -> Value {
             "width": {
                 "description": "How wide the window is on the paper, a length more than 0. Not \
                                 on a clipped viewport.",
-                "$ref": "#/$defs/length",
+                "$ref": "#/$defs/length_more_than_0",
             },
             "height": {
                 "description": "How tall the window is on the paper, a length more than 0. Not \
                                 on a clipped viewport.",
-                "$ref": "#/$defs/length",
+                "$ref": "#/$defs/length_more_than_0",
             },
             "view_center": {
                 "description": "The point of model space at the middle of the window, with 0 \

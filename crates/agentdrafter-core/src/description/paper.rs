@@ -151,12 +151,7 @@ pub(crate) fn paper_property() -> Value {
         "anyOf": [
             {
                 "type": "array",
-                "items": {
-                    "anyOf": [
-                        { "type": "number", "exclusiveMinimum": 0 },
-                        { "$ref": "#/$defs/length", "type": "string" },
-                    ],
-                },
+                "items": { "$ref": "#/$defs/length_more_than_0" },
                 "minItems": 2,
                 "maxItems": 2,
             },

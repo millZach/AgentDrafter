@@ -13,8 +13,8 @@
 //! as `'42'` for a colour or `'true'` for `closed`, the schema takes as a
 //! string; `tests/schema.rs` feeds the same values to both. What JSON Schema
 //! cannot see it leaves to the reader: a type-guessing reader turns `+5` and
-//! `5` into one number, and a radius above 0 or a degree below the number of
-//! control points compares one value with another. The rules of the strict
+//! `5` into one number, and a degree below the number of control points
+//! compares one value with another. The rules of the strict
 //! YAML subset (no anchors, tags or directives, every key once) are not JSON
 //! Schema either; the top-level description states them.
 
@@ -939,7 +939,7 @@ fn defs() -> Map<String, Value> {
             &["center", "radius", "start_angle", "end_angle"],
             json!({
                 "center": { "$ref": "#/$defs/point" },
-                "radius": { "$ref": "#/$defs/length", "description": "A length more than 0." },
+                "radius": { "$ref": "#/$defs/length_more_than_0", "description": "A length more than 0." },
                 "start_angle": {
                     "$ref": "#/$defs/angle",
                     "description": "Where the arc starts: degrees anticlockwise from the X axis.",
@@ -959,7 +959,7 @@ fn defs() -> Map<String, Value> {
             &["center", "radius"],
             json!({
                 "center": { "$ref": "#/$defs/point" },
-                "radius": { "$ref": "#/$defs/length", "description": "A length more than 0." },
+                "radius": { "$ref": "#/$defs/length_more_than_0", "description": "A length more than 0." },
             }),
         ),
     );
@@ -980,7 +980,7 @@ fn defs() -> Map<String, Value> {
                     "description": "The minor axis over the major axis: more than 0 and at most 1.",
                     "anyOf": [
                         { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
-                        { "type": "string", "pattern": format!("^{NUMBER}$") },
+                        { "type": "string", "pattern": format!("^{POSITIVE_NUMBER}$") },
                     ],
                 },
                 "start_angle": {
@@ -1079,7 +1079,7 @@ fn text_defs(defs: &mut Map<String, Value>) {
             ),
             "anyOf": [
                 { "type": "number", "minimum": narrowest, "maximum": widest },
-                { "type": "string", "pattern": format!("^{NUMBER}$") },
+                { "type": "string", "pattern": format!("^{POSITIVE_NUMBER}$") },
             ],
         }),
     );
@@ -1117,7 +1117,7 @@ fn text_defs(defs: &mut Map<String, Value>) {
     defs.insert(
         "height".into(),
         json!({
-            "$ref": "#/$defs/length",
+            "$ref": "#/$defs/length_more_than_0",
             "description": "The height of the capitals: a length more than 0.",
         }),
     );
@@ -1264,7 +1264,7 @@ fn text_defs(defs: &mut Map<String, Value>) {
                 },
                 "height": { "$ref": "#/$defs/height" },
                 "width": {
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_not_negative",
                     "description": "The width lines wrap in: a length of 0 or more. Without it, \
                                     0, and lines break only where the contents break them.",
                 },
