@@ -1093,6 +1093,15 @@ export function placeBeside(
   return [x, y];
 }
 
+/**
+ * Whether Ctrl+Z (or ⌘Z on a Mac) takes back the running tool's last point
+ * or copy (#245): inside tools that offer Undo only, never while typing text,
+ * and never outside a tool (Undo last stays a button, since there is no Redo).
+ */
+export function canToolUndo(t: ToolState | null | undefined): boolean {
+  return Boolean(t?.tool && !t.typing_text && t.options.some((o) => o.act === 'undo'));
+}
+
 /** The note at the command bar's right: the keys that do something now. */
 export function barNote(t: ToolState | null | undefined): string {
   if (t?.typing_text) return 'Enter: next line · Enter again or Esc: done';
@@ -1100,11 +1109,12 @@ export function barNote(t: ToolState | null | undefined): string {
   if (t?.tool === 'copy' && t.placed > 0) return 'Enter or Esc: the copies land · Ctrl+Z: one back';
   // An array's copies are only shown until Enter or Array lands them (#66).
   if (t?.array) return 'Enter: it lands · Esc: nothing is sent';
+  if (canToolUndo(t)) return 'Enter or right-click: done · Ctrl+Z: one back · Esc: end · F8: Ortho';
   if (t?.tool) return 'Enter or right-click: done · Esc: end · F8: Ortho';
   return 'F3: snaps · F8: Ortho · Tab: the next snap here';
 }
 
-/** Whether a key is Ctrl+Z, or ⌘Z on a Mac: with copies placed, it takes the last one back, as U does. */
+/** Whether a key is Ctrl+Z, or ⌘Z on a Mac: inside a tool with a point or copy placed, it takes the last one back, as U does (#245). */
 export function isUndoKey(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }): boolean {
   return (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'z';
 }

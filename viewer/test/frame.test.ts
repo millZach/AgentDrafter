@@ -5,6 +5,7 @@ import {
   barNote,
   barWarning,
   letGoOnOptionPress,
+  canToolUndo,
   isUndoKey,
   CORE_ORDER,
   editsHere,
@@ -623,6 +624,10 @@ test('quick properties edit only while the drawing loaded is the view asked for 
 test('the command bar\'s note says what the keys do: with copies placed, Enter or Esc lands them and Ctrl+Z takes one back', () => {
   assert.equal(barNote(null), 'F3: snaps · F8: Ortho · Tab: the next snap here');
   assert.equal(barNote(toolState({ tool: 'line', takes_points: true })), 'Enter or right-click: done · Esc: end · F8: Ortho');
+  assert.equal(
+    barNote(toolState({ tool: 'line', takes_points: true, points: [[1, 1]], options: [{ label: 'Undo', act: 'undo', main: false }] })),
+    'Enter or right-click: done · Ctrl+Z: one back · Esc: end · F8: Ortho',
+  );
   assert.equal(barNote(toolState({ tool: 'text', typing_text: true })), 'Enter: next line · Enter again or Esc: done');
   // Copy before a copy is placed ends as any tool does.
   assert.equal(barNote(toolState({ tool: 'copy', takes_points: true, points: [[1, 1]] })), 'Enter or right-click: done · Esc: end · F8: Ortho');
@@ -699,6 +704,19 @@ test('Ctrl+Z, or ⌘Z, is the undo key, in either case, but not with Shift or Al
   assert.ok(!isUndoKey(key({ ctrlKey: true, shiftKey: true })), 'Ctrl+Shift+Z is redo elsewhere');
   assert.ok(!isUndoKey(key({ ctrlKey: true, altKey: true })));
   assert.ok(!isUndoKey(key({ ctrlKey: true, key: 'y' })));
+});
+
+test('Ctrl+Z acts only inside a running tool that offers Undo, never while typing text or outside a tool (#245)', () => {
+  const undoOpt = [{ label: 'Undo', act: 'undo', main: false }];
+  assert.equal(canToolUndo(null), false);
+  assert.equal(canToolUndo(toolState({})), false);
+  assert.equal(canToolUndo(toolState({ tool: 'line', takes_points: true })), false);
+  assert.equal(canToolUndo(toolState({ tool: 'line', takes_points: true, options: undoOpt })), true);
+  assert.equal(canToolUndo(toolState({ tool: 'circle', takes_points: true, options: undoOpt })), true);
+  assert.equal(canToolUndo(toolState({ tool: 'rectangle', takes_points: true, options: undoOpt })), true);
+  assert.equal(canToolUndo(toolState({ tool: 'move', takes_points: true, options: undoOpt })), true);
+  assert.equal(canToolUndo(toolState({ tool: 'copy', takes_points: true, placed: 1, options: undoOpt })), true);
+  assert.equal(canToolUndo(toolState({ tool: 'text', typing_text: true, options: undoOpt })), false);
 });
 
 test('Copy\'s template warning shows above its prompt in the renderer\'s words, but not while the band asks', () => {

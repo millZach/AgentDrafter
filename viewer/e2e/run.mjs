@@ -2224,19 +2224,28 @@ const checks = {
         // The current layer: new objects go on it.
         await page.waitForFunction(() => document.querySelectorAll('select[data-layer] option').length > 2);
         await page.selectOption('select[data-layer]', 'wire');
-        // Line, by its alias and typed coordinates.
+        // Line, by its alias and typed coordinates; Ctrl+Z takes back a placed point (#245).
         let before = journal().length;
         let built = dwg('DP-LD-101');
-        await typeIn(page, 'L', '1,1', '@2,0');
+        await typeIn(page, 'L', '1,1', '@2,0', '@0,5');
         assert((await bar(page)).includes('LINEon wire Click the next point'), `Line prompts on the current layer: ${await bar(page)}`);
+        const lineNote = await page.textContent('.cmdnote');
+        assert(lineNote.includes('Ctrl+Z: one back'), `Line note names Ctrl+Z: ${lineNote}`);
+        await page.keyboard.press('Control+z');
+        await frames(page);
         await typeIn(page, '@1<90', '');
         let entry = await landed(page, before, 'Line, typed');
         const segments = entry.change_set.operations.map((o) => `${o.op} ${o.sheet} ${o.layer} ${JSON.stringify(o.from)} ${JSON.stringify(o.to)}`);
         assert(
           JSON.stringify(segments) === JSON.stringify(['add_line DP-LD-101 wire [1,1,0] [3,1,0]', 'add_line DP-LD-101 wire [3,1,0] [3,2,0]']),
-          `Line sends one add_line a segment on the current layer, where typed: ${JSON.stringify(segments)}`,
+          `Line sends one add_line a segment on the current layer, where typed (Ctrl+Z took @0,5 back): ${JSON.stringify(segments)}`,
         );
         assert(dwg('DP-LD-101') !== built, 'the DWG is built again');
+        // Outside a tool, Ctrl+Z does nothing: Undo last stays a button (#245).
+        const afterLine = journal().length;
+        await page.keyboard.press('Control+z');
+        await frames(page);
+        assert(journal().length === afterLine, 'Ctrl+Z outside a tool does not run Undo last');
         seen.laptop.line_typed = entry.entry;
         // Line by mouse: from FT-101's endpoint, a snap, then level with it, by Ortho.
         const end = snapOf('DP-LD-101/device', 'endpoint', 'objects[3].from');
@@ -2267,9 +2276,13 @@ const checks = {
         // Fit again, for the clicks to come, in the empty part of the
         // control room under the cabinet.
         await fitAll(page);
-        // Circle, by its alias, a typed centre and a typed radius.
+        // Circle, by its alias, a typed centre (taken back once with Ctrl+Z) and a typed radius.
         before = journal().length;
-        await typeIn(page, 'c', '13,3.6', '0.25');
+        await typeIn(page, 'c', '10,10');
+        await page.keyboard.press('Control+z');
+        await frames(page);
+        assert((await bar(page)).includes('Click the centre'), `Ctrl+Z in Circle takes the centre back: ${await bar(page)}`);
+        await typeIn(page, '13,3.6', '0.25');
         entry = await landed(page, before, 'Circle');
         assert(
           entry.change_set.operations[0].op === 'add_circle' && entry.change_set.operations[0].radius === 0.25 && JSON.stringify(entry.change_set.operations[0].center) === '[13,3.6,0]',

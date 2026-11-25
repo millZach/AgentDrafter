@@ -404,7 +404,7 @@ export function CommandBar({
               onTyped?.('');
               onEnter(text);
             } else if (onUndoKey && isUndoKey(e) && !e.currentTarget.value) {
-              // Ctrl+Z with nothing typed takes back Copy's last copy placed.
+              // Ctrl+Z with nothing typed takes back the running tool's last point or copy (#245).
               e.preventDefault();
               e.stopPropagation();
               onUndoKey();
