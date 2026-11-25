@@ -31,9 +31,9 @@ use std::process::ExitCode;
 
 use agentdrafter_core::{commands, find_command, Error, ErrorCode, Interface, Reply, Settings};
 use agentdrafter_core::{
-    AcceptRequest, CheckRequest, DisplayListRequest, DrawingFormat, ImportBlocksRequest,
-    JournalRequest, MeasureTextRequest, ReadRequest, RenderRequest, StaleRequest, UndoRequest,
-    Unit, FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SYSTEM_FONTS_VARIABLE,
+    AcceptRequest, CheckRequest, ConvertRequest, DisplayListRequest, DrawingFormat, DwgVersion,
+    ImportBlocksRequest, JournalRequest, MeasureTextRequest, ReadRequest, RenderRequest,
+    StaleRequest, UndoRequest, Unit, FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SYSTEM_FONTS_VARIABLE,
 };
 use agentdrafter_core::{
     End, Matching, Measure, ObjectRef, Query, QueryRequest, Selection, SelectionBox, SnapKind,
@@ -43,7 +43,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 const BUILD_USAGE: &str =
-    "agentdrafter build <sheet-description | drawing-set-folder> [--output <dwg-or-dxf>] [--format <dwg | dxf | dxf_binary>] [--overwrite] [--clean | --no-clean] [--fonts <folder>]... [--no-system-fonts]";
+    "agentdrafter build <sheet-description | drawing-set-folder> [--output <dwg-or-dxf>] [--format <dwg | dxf | dxf_binary>] [--dwg-version <version>] [--overwrite] [--clean | --no-clean] [--fonts <folder>]... [--no-system-fonts]";
 const SCHEMA_USAGE: &str =
     "agentdrafter schema [sheet-description | block-library | template | set | rows | change-set]";
 const OPERATIONS_USAGE: &str = "agentdrafter operations";
@@ -71,6 +71,7 @@ const STALE_USAGE: &str =
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description | dwg> [--sheet <sheet>]... [--fonts <folder>]... [--no-system-fonts]";
 const IMPORT_BLOCKS_USAGE: &str = "agentdrafter import-blocks <dwg | dxf> --library <block-library> [--block <name>]... [--replace] [--units <unit>] [--dry-run]";
 const READ_USAGE: &str = "agentdrafter read <dwg> [--mirror <path> | --no-mirror]";
+const CONVERT_USAGE: &str = "agentdrafter convert <dwg | dxf | folder | drawing-set-folder> --version <version> [--output <path-or-folder>] [--format <dwg | dxf | dxf_binary>] [--overwrite] [--allow-loss] [--dry-run]";
 const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry | layout | groups | annotation-scales> <drawing-set-folder | sheet-description | dwg> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --group <group> --space <space> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...] [--no-system-fonts]";
 
 /// Runs the `agentdrafter` command on `args`, the arguments after its own
@@ -126,6 +127,7 @@ fn cli_form(command: &str) -> Option<(&'static str, Parse)> {
         "check" => (CHECK_USAGE, parse_check),
         "import-blocks" => (IMPORT_BLOCKS_USAGE, parse_import_blocks),
         "read" => (READ_USAGE, parse_read),
+        "convert" => (CONVERT_USAGE, parse_convert),
         _ => return None,
     })
 }
@@ -496,6 +498,8 @@ struct SourceArgs {
     output: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<DrawingFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dwg_version: Option<DwgVersion>,
     overwrite: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     clean: Option<bool>,
@@ -573,6 +577,7 @@ fn parse_plot(mut args: Args) -> Result<Value, Error> {
         source,
         output,
         format: None,
+        dwg_version: None,
         overwrite,
         clean,
         plot_style,
@@ -1444,10 +1449,99 @@ fn parse_read(mut args: Args) -> Result<Value, Error> {
     )
 }
 
+fn parse_convert(mut args: Args) -> Result<Value, Error> {
+    let usage = |message: String| Error::usage(format!("{message}; usage: {CONVERT_USAGE}"));
+    let mut source: Option<PathBuf> = None;
+    let mut version: Option<DwgVersion> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut format: Option<DrawingFormat> = None;
+    let mut overwrite = false;
+    let mut allow_loss = false;
+    let mut dry_run = false;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some(flag @ ("--version" | "--to")) => {
+                let raw = args
+                    .next()
+                    .ok_or_else(|| usage(format!("{flag} needs a DWG version")))?
+                    .into_string()
+                    .map_err(|_| usage("the DWG version is not valid text".to_owned()))?;
+                let parsed = DwgVersion::parse(&raw).ok_or_else(|| {
+                    usage(format!(
+                        "unknown DWG version `{raw}`; choose one of {}",
+                        DwgVersion::list_choices()
+                    ))
+                })?;
+                if version.replace(parsed).is_some() {
+                    return Err(usage("--version is given twice".to_owned()));
+                }
+            }
+            Some("--output" | "-o") => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| usage("--output needs a path".to_owned()))?;
+                if output.replace(path.into()).is_some() {
+                    return Err(usage("--output is given twice".to_owned()));
+                }
+            }
+            Some("--format") => {
+                let raw = args
+                    .next()
+                    .ok_or_else(|| usage("--format needs a value".to_owned()))?
+                    .into_string()
+                    .map_err(|_| usage("the format is not valid text".to_owned()))?;
+                let parsed = DrawingFormat::from_name(&raw).ok_or_else(|| {
+                    usage(format!(
+                        "unknown --format `{raw}`; choose `dwg`, `dxf` or `dxf_binary`"
+                    ))
+                })?;
+                if format.replace(parsed).is_some() {
+                    return Err(usage("--format is given twice".to_owned()));
+                }
+            }
+            Some("--overwrite") => overwrite = true,
+            Some("--allow-loss") => allow_loss = true,
+            Some("--dry-run") => dry_run = true,
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(usage(format!("convert takes no option `{flag}`")))
+            }
+            _ => {
+                if source.replace(arg.into()).is_some() {
+                    return Err(usage(
+                        "convert takes one drawing, folder or drawing set".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    let source = source.ok_or_else(|| {
+        usage("convert needs the drawing, folder or drawing set to convert".to_owned())
+    })?;
+    let version = version.ok_or_else(|| {
+        usage(
+            "convert needs the target DWG version under --version (such as 2010 or AC1024)"
+                .to_owned(),
+        )
+    })?;
+    input_of(
+        ConvertRequest {
+            source,
+            version,
+            output,
+            format,
+            overwrite,
+            allow_loss,
+            dry_run,
+        },
+        FontOptions::default(),
+    )
+}
+
 fn parse_build(mut args: Args) -> Result<Value, Error> {
     let mut description: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut format: Option<DrawingFormat> = None;
+    let mut dwg_version: Option<DwgVersion> = None;
     let mut overwrite = false;
     let mut clean: Option<bool> = None;
     let mut fonts = FontOptions::default();
@@ -1487,6 +1581,24 @@ fn parse_build(mut args: Args) -> Result<Value, Error> {
                     return Err(Error::usage("--format is given twice"));
                 }
             }
+            Some("--dwg-version") => {
+                let raw = args
+                    .next()
+                    .ok_or_else(|| {
+                        Error::usage(format!("--dwg-version needs a value; usage: {BUILD_USAGE}"))
+                    })?
+                    .into_string()
+                    .map_err(|_| Error::usage("the DWG version is not valid text"))?;
+                let parsed = DwgVersion::parse(&raw).ok_or_else(|| {
+                    Error::usage(format!(
+                        "unknown --dwg-version `{raw}`; choose one of {}; usage: {BUILD_USAGE}",
+                        DwgVersion::list_choices()
+                    ))
+                })?;
+                if dwg_version.replace(parsed).is_some() {
+                    return Err(Error::usage("--dwg-version is given twice"));
+                }
+            }
             Some("--overwrite") => overwrite = true,
             Some(flag @ ("--clean" | "--no-clean")) => set_clean(&mut clean, flag)?,
             Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
@@ -1512,6 +1624,7 @@ fn parse_build(mut args: Args) -> Result<Value, Error> {
         source,
         output,
         format,
+        dwg_version,
         overwrite,
         clean,
         plot_style: None,

@@ -20,13 +20,21 @@ use super::{
 };
 use crate::build::{is_same_file, DrawingFormat};
 use crate::change::relative_to;
+use crate::convert::DwgVersion;
 use crate::error::{Error, ErrorCode};
 use crate::set::SET_SETTINGS_FILE;
 use crate::units::Unit;
 
 /// The keys of a drawing set's settings.
-pub(crate) const SETTINGS_KEYS: [&str; 6] =
-    ["units", "output", "rows", "clean", "plot_style", "format"];
+pub(crate) const SETTINGS_KEYS: [&str; 7] = [
+    "units",
+    "output",
+    "rows",
+    "clean",
+    "plot_style",
+    "format",
+    "dwg_version",
+];
 
 /// The keys at the top of a set's rows file.
 pub(crate) const ROWS_FILE_KEYS: [&str; 1] = ["rows"];
@@ -87,6 +95,10 @@ pub(crate) struct SetSettings {
     /// The drawing format the set builds (`dwg`, ASCII `dxf`, or `dxf_binary`),
     /// unless a build asks for another. `dwg` when the settings leave it out.
     pub format: DrawingFormat,
+    /// The DWG version the set builds (`AC1009`..`AC1032`, or release names
+    /// `R12`..`2018`), unless a build asks for another. `AC1032` (2018) when
+    /// the settings leave it out.
+    pub dwg_version: DwgVersion,
 }
 
 /// A path the settings' `rows` names: a rows file or a folder of them.
@@ -310,6 +322,33 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
         }
         None => DrawingFormat::Dwg,
     };
+    let dwg_version = match fields.get("dwg_version") {
+        Some(node) => {
+            if node.is_bare_null() {
+                return Err(wrong_type(
+                    node,
+                    "dwg_version",
+                    "a DWG version code or release name, such as `AC1032` or `2010`",
+                ));
+            }
+            let text = scalar(
+                node,
+                "dwg_version",
+                "a DWG version code or release name, such as `AC1032` or `2010`",
+            )?;
+            DwgVersion::parse_strict(text).ok_or_else(|| {
+                bad_value(
+                    node,
+                    "dwg_version",
+                    format!(
+                        "unknown DWG version `{text}`; choose one of {}",
+                        DwgVersion::list_choices()
+                    ),
+                )
+            })?
+        }
+        None => DwgVersion::default(),
+    };
     Ok(SetSettings {
         units,
         output: output.to_owned(),
@@ -318,6 +357,7 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
         clean,
         plot_style,
         format,
+        dwg_version,
     })
 }
 

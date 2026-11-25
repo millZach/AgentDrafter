@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 
-use crate::build::{build_with_format, BuildRequest, DrawingFormat};
+use crate::build::{build_with_options, BuildRequest, DrawingFormat};
 use crate::change::{accept_with, recover, AcceptRequest, JournalRequest, UndoRequest};
 use crate::change::{
     change_set_schema, change_with, journal, operations, original_change_set_schema, undo,
@@ -48,6 +48,7 @@ use crate::change::{
     LONGEST_LABEL, LONGEST_SAY, LONGEST_TITLE, MOST_STEPS,
 };
 use crate::check::{check_with, CheckRequest};
+use crate::convert::{convert_reply, ConvertRequest, DwgVersion};
 use crate::display_list::{display_list_with, DisplayListRequest, NOT_AT_AN_ENTRY};
 use crate::error::{Error, ErrorCode};
 use crate::import::{import_blocks, ImportBlocksRequest};
@@ -60,7 +61,7 @@ use crate::plot::{plot_set_with, plot_with, PlotRequest, PlotSetRequest, BUILT_I
 use crate::query::{query_with, QueryRequest};
 use crate::render::{render_with, RenderRequest};
 use crate::reply::Reply;
-use crate::set::{build_set_with_format, set_of_dwg, SetBuildRequest, SET_SETTINGS_FILE};
+use crate::set::{build_set_with_options, set_of_dwg, SetBuildRequest, SET_SETTINGS_FILE};
 use crate::settings::{Settings, FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SYSTEM_FONTS_VARIABLE};
 use crate::stamp::{check_stale, SourceKind, StaleRequest};
 use crate::text::measure::{measure_text_with, MeasureTextRequest};
@@ -144,7 +145,7 @@ impl Command {
         // not in them; `read` reads a DWG on its own, and `query` and `check`
         // on a DWG are strictly read-only without touching any set: none of
         // them probes a set, rolls back, or waits on an unfinished commit.
-        let dwg_source = matches!(self.name, "query" | "check")
+        let dwg_source = matches!(self.name, "query" | "check" | "convert")
             && input
                 .get("source")
                 .and_then(Value::as_str)
@@ -390,6 +391,13 @@ const COMMANDS: &[Command] = &[
         run: run_read,
         access: Access::Writes,
     },
+    Command {
+        name: "convert",
+        does: convert_does,
+        input: convert_input,
+        run: run_convert,
+        access: Access::Writes,
+    },
 ];
 
 // build
@@ -402,6 +410,8 @@ struct BuildInput {
     output: Option<PathBuf>,
     #[serde(default)]
     format: Option<DrawingFormat>,
+    #[serde(default)]
+    dwg_version: Option<DwgVersion>,
     #[serde(default)]
     overwrite: bool,
     #[serde(default)]
@@ -444,15 +454,33 @@ fn clean() -> Value {
     })
 }
 
+fn dwg_version_schema(description: &str) -> Value {
+    let mut choices: Vec<Value> = DwgVersion::ACCEPTED_STRINGS
+        .into_iter()
+        .map(|s| Value::String(s.to_owned()))
+        .collect();
+    choices.extend(DwgVersion::ACCEPTED_YEARS.into_iter().map(Value::from));
+    json!({
+        "description": description,
+        "enum": choices,
+    })
+}
+
 fn build_input() -> Value {
     input(
         json!({
             "source": text("The sheet description to build, or a drawing set's folder."),
             "output": text("Where to write the DWG or DXF of one sheet description. Without it, beside the sheet description. A path ending .dxf writes ASCII DXF unless `format` asks otherwise."),
             "format": {
-                "description": "Drawing format to write: `dwg` (2018 DWG, the default), `dxf` (ASCII DXF), or `dxf_binary` (binary DXF). Overrides a drawing set's `format` setting.",
+                "description": "Drawing format to write: `dwg` (DWG, the default), `dxf` (ASCII DXF), or `dxf_binary` (binary DXF). Overrides a drawing set's `format` setting.",
                 "enum": DrawingFormat::ALL.map(DrawingFormat::name),
             },
+            "dwg_version": dwg_version_schema(
+                "Target DWG version: `AC1032` (`2018`, the default), `AC1027` (`2013`), \
+                 `AC1024` (`2010`), `AC1021` (`2007`), `AC1018` (`2004`), `AC1015` (`2000`), \
+                 `AC1014` (`R14`), `AC1012` (`R13`), or `AC1009` (`R12`). Overrides a drawing \
+                 set's `dwg_version` setting."
+            ),
             "overwrite": flag("Replace a drawing already there, which is allowed only when AgentDrafter built it."),
             "clean": clean(),
             "fonts": fonts(),
@@ -472,6 +500,7 @@ fn run_build(
         source,
         output,
         format,
+        dwg_version,
         overwrite,
         clean,
     } = parse("build", input)?;
@@ -481,8 +510,11 @@ fn run_build(
             overwrite,
             clean,
         };
-        return Ok(sent_warned(build_set_with_format(
-            &request, format, &settings,
+        return Ok(sent_warned(build_set_with_options(
+            &request,
+            format,
+            dwg_version,
+            &settings,
         )));
     }
     no_clean(clean, "build", "one sheet description")?;
@@ -491,7 +523,12 @@ fn run_build(
         output,
         overwrite,
     };
-    Ok(done_warned(build_with_format(&request, format, &settings)))
+    Ok(done_warned(build_with_options(
+        &request,
+        format,
+        dwg_version,
+        &settings,
+    )))
 }
 
 // schema
@@ -1906,6 +1943,50 @@ fn read_input() -> Value {
 fn run_read(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<JsonReply, Error> {
     let request: ReadRequest = parse("read", input)?;
     Ok(done_warned(read_original(&request)))
+}
+
+// convert
+
+fn convert_does() -> String {
+    "Converts a drawing (.dwg or .dxf), a folder of drawings, or a drawing set's built drawings \
+     to another AutoCAD DWG version (SAVEAS to a version): AC1009 (R12), AC1012 (R13), AC1014 \
+     (R14), AC1015 (2000), AC1018 (2004), AC1021 (2007), AC1024 (2010), AC1027 (2013), or AC1032 \
+     (2018). Converting is always explicit and never a side effect of a revision, and an original \
+     is never overwritten: without `output`, one drawing writes beside the source as \
+     `<stem>.<release>.<ext>` (such as `panel.2010.dwg`) and a folder or drawing set writes into \
+     `<folder>/converted-<release>/`. Reports per-drawing conversion losses (features downgraded \
+     by the target version, or objects, layers, blocks or decode fidelity lost when the written \
+     file is re-read) alongside object counts and decode reports. Refuses a source drawing that \
+     did not decode cleanly unless `allow_loss` is set. With `dry_run`, runs the full conversion \
+     and loss check in memory without writing any file."
+        .to_owned()
+}
+
+fn convert_input() -> Value {
+    input(
+        json!({
+            "source": text("The drawing (.dwg or .dxf), folder of drawings, or drawing set folder (with set.yaml) to convert."),
+            "version": dwg_version_schema(
+                "Target DWG version: `AC1032` (`2018`), `AC1027` (`2013`), `AC1024` (`2010`), \
+                 `AC1021` (`2007`), `AC1018` (`2004`), `AC1015` (`2000`), `AC1014` (`R14`), \
+                 `AC1012` (`R13`), or `AC1009` (`R12`)."
+            ),
+            "output": text("Output file path (for one drawing) or output folder (for a folder or drawing set). Must not be the source itself. Without it, writes beside the source."),
+            "format": {
+                "description": "Output drawing format: `dwg`, `dxf` (ASCII DXF), or `dxf_binary` (binary DXF). Without it, inferred from `output`'s extension or kept from the source.",
+                "enum": DrawingFormat::ALL.map(DrawingFormat::name),
+            },
+            "overwrite": flag("Replace an existing file at `output` (still refused if `output` resolves to `source`)."),
+            "allow_loss": flag("Convert even when the DWG library could not decode every record of the source drawing."),
+            "dry_run": flag("Run the full conversion and loss check in memory without writing any file."),
+        }),
+        &["source", "version"],
+    )
+}
+
+fn run_convert(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<JsonReply, Error> {
+    let request: ConvertRequest = parse("convert", input)?;
+    Ok(sent(convert_reply(&request)))
 }
 
 /// The drawing set a command's input reads, if it names one: the folder its

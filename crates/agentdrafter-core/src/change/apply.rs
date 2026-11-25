@@ -47,7 +47,8 @@ use super::{
     ChangeReport, ChangeRequest, Copied, Fill, OperationOutcome, RowValueSet, SheetChange,
     SnapResolved, TextReplaced,
 };
-use crate::build::{is_same_file, prepare_sheet_as, DrawingFormat, PreparedSheet};
+use crate::build::{is_same_file, prepare_sheet_with_version, DrawingFormat, PreparedSheet};
+use crate::convert::DwgVersion;
 use crate::description::blocks::tag_in_capitals;
 use crate::description::parts::{self, Unsplit};
 use crate::description::SheetRecord;
@@ -78,6 +79,7 @@ struct SetFiles {
     units: Unit,
     output: PathBuf,
     format: DrawingFormat,
+    dwg_version: DwgVersion,
     /// The set as the build marks of its DWGs name it, as `build` names it
     /// names it.
     marked: Option<String>,
@@ -196,6 +198,7 @@ impl SetFiles {
             units: settings.units,
             output: folder.join(&settings.output),
             format: settings.format,
+            dwg_version: settings.dwg_version,
             marked: set_in_mark(folder, &settings.output),
             rows_files,
             rows,
@@ -11865,13 +11868,14 @@ fn validate(
     let record = sheet_record(at, rows, k, notices)?;
     let dwg = files.dwg(k);
     writable(&dwg)?;
-    prepare_sheet_as(
+    prepare_sheet_with_version(
         &record,
         &files.templates[t].path,
         &dwg,
         &files.mark(k),
         true,
         files.format,
+        files.dwg_version,
         settings,
     )
 }
@@ -12693,13 +12697,14 @@ fn before_change(files: &SetFiles, k: usize, settings: &Settings) -> Result<Resu
     .and_then(|(record, _)| {
         let dwg = files.dwg(k);
         writable(&dwg)?;
-        prepare_sheet_as(
+        prepare_sheet_with_version(
             &record,
             &template.path,
             &dwg,
             &files.mark(k),
             true,
             files.format,
+            files.dwg_version,
             settings,
         )
         .map(|_| ())

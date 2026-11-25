@@ -45,6 +45,7 @@ use crate::units::Unit;
 
 mod annotation_scale;
 mod block;
+mod convert;
 mod dimension;
 mod dynamic_block;
 mod extra;
@@ -62,6 +63,7 @@ mod table;
 mod text;
 mod wipeout;
 
+pub(crate) use convert::convert_drawing_bytes;
 pub(crate) use import::read_blocks;
 pub(crate) use layout::{PageSetup, PLOTTER, PLOT_STYLE};
 #[cfg(test)]
@@ -128,11 +130,6 @@ const CHORD_KNOTS: i32 = 0;
 /// belongs and still be read as there.
 const TOLERANCE: f64 = 1e-12;
 
-/// The DWG version a new sheet is written in, as the DWG names it.
-pub(crate) fn new_sheet_version() -> String {
-    NEW_SHEET_VERSION.to_string()
-}
-
 /// The sentinel bytes at the start of every AutoCAD Binary DXF file.
 const BINARY_DXF_SENTINEL: &[u8] = b"AutoCAD Binary DXF";
 
@@ -168,12 +165,8 @@ pub(crate) fn write_new_sheet(
 }
 
 /// Writes a new sheet as the bytes of a DWG, ASCII DXF or binary DXF in the
-/// 2018 format (`AC1032`), carrying the build mark `mark`. `record` holds the
-/// sheet with the record of each of its objects, and each object is written
-/// with its ID and name from its record. `start_of` gives where each single
-/// line of text starts, which the drawing records beside the point it is
-/// justified at, and `measure` the box multiline text lays out in, which
-/// places a multileader's text.
+/// 2018 format (`AC1032`), carrying the build mark `mark`.
+#[cfg(test)]
 pub(crate) fn write_new_sheet_as(
     record: &SheetRecord,
     start_of: &dyn Fn(&TextObject) -> Point3,
@@ -181,6 +174,33 @@ pub(crate) fn write_new_sheet_as(
     mark: &BuildMark,
     format: DrawingFormat,
 ) -> Result<Vec<u8>, Error> {
+    write_new_sheet_in_version(
+        record,
+        start_of,
+        measure,
+        mark,
+        format,
+        crate::convert::DwgVersion::R2018,
+    )
+    .map(|(bytes, _)| bytes)
+}
+
+/// Writes a new sheet as the bytes of a DWG, ASCII DXF or binary DXF in
+/// `version`, carrying the build mark `mark`, and returns any version
+/// conversion losses when `version` is older than 2018 (`AC1032`). `record`
+/// holds the sheet with the record of each of its objects, and each object is
+/// written with its ID and name from its record. `start_of` gives where each
+/// single line of text starts, which the drawing records beside the point it is
+/// justified at, and `measure` the box multiline text lays out in, which
+/// places a multileader's text.
+pub(crate) fn write_new_sheet_in_version(
+    record: &SheetRecord,
+    start_of: &dyn Fn(&TextObject) -> Point3,
+    measure: &dyn Fn(&MTextObject) -> MTextBox,
+    mark: &BuildMark,
+    format: DrawingFormat,
+    version: crate::convert::DwgVersion,
+) -> Result<(Vec<u8>, Vec<crate::convert::ConversionLoss>), Error> {
     let sheet = &record.sheet;
     if record.objects.len() != sheet.objects.len() {
         return Err(Error::new(
@@ -1075,7 +1095,7 @@ pub(crate) fn write_new_sheet_as(
             .collect();
         group::write_groups(&mut drawing, &sheet.groups, &index_to_handle)?;
     }
-    write_document(&drawing, format)
+    convert::finish_new_sheet_in_version(drawing, version, format, &mark_value(mark))
 }
 
 /// Serializes `drawing` as a DWG, ASCII DXF or binary DXF.
@@ -3164,7 +3184,12 @@ fn read_spline(spline: &DwgSpline, layer: String) -> Option<Spline> {
 /// so `build --overwrite` on an existing AgentDrafter DWG is never refused
 /// for non-fatal reader diagnostics.
 pub(crate) fn carries_build_mark(path: &Path) -> Result<bool, Error> {
-    read_drawing(path).map(|drawing| mark_in(&drawing.summary_info.custom_properties).is_some())
+    read_drawing(path).map(|drawing| {
+        mark_in(&drawing.summary_info.custom_properties).is_some()
+            || convert::read_nod_build_mark(&drawing)
+                .and_then(|val| mark_in(&[(BUILD_MARK.to_owned(), val)]))
+                .is_some()
+    })
 }
 
 /// What the build mark of the DWG at `path` says, read from its drawing
@@ -3903,6 +3928,7 @@ fn strip_build_metadata(drawing: &mut CadDocument) {
         .summary_info
         .custom_properties
         .retain(|(name, _)| name != BUILD_MARK);
+    convert::strip_nod_build_mark(drawing);
     for object in drawing.entities_mut() {
         let common = object.common_mut();
         common.extended_data = Default::default();

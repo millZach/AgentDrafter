@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
+use crate::convert::{ConversionLoss, DwgVersion};
 use crate::description::{read_sheet_record_noting, SheetRecord};
 use crate::dwg::{self, BuildMark};
 use crate::error::{Error, ErrorCode};
@@ -142,6 +143,10 @@ pub struct BuildReport {
     /// drawing set gives its notices beside its result.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<crate::set::Notice>,
+    /// Version-conversion losses reported when building directly into a DWG
+    /// version older than 2018 (`AC1032`). Left out when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversion_losses: Vec<ConversionLoss>,
 }
 
 /// Builds a sheet description into a DWG (or ASCII DXF when `output` ends
@@ -169,8 +174,20 @@ pub fn build_with_format(
     format: Option<DrawingFormat>,
     settings: &Settings,
 ) -> Result<BuildReport, Error> {
+    build_with_options(request, format, None, settings)
+}
+
+/// Builds a sheet description into `format` (`dwg`, ASCII `dxf`, or
+/// `dxf_binary`) and `dwg_version` (defaults to `AC1032` / 2018 when `None`).
+pub fn build_with_options(
+    request: &BuildRequest,
+    format: Option<DrawingFormat>,
+    dwg_version: Option<DwgVersion>,
+    settings: &Settings,
+) -> Result<BuildReport, Error> {
     let description = request.description.as_path();
     let effective = resolve_build_format(format, request.output.as_deref())?;
+    let version = dwg_version.unwrap_or_default();
     let mut notices = Vec::new();
     let record = read_sheet_record_noting(description, &mut notices)?;
     let output = request
@@ -181,13 +198,14 @@ pub fn build_with_format(
         set: None,
         rows: None,
     };
-    let mut report = build_sheet_as(
+    let mut report = build_sheet_with_version(
         &record,
         description,
         &output,
         &alone,
         request.overwrite,
         effective,
+        version,
         settings,
     )?;
     report.notices = notices;
@@ -229,22 +247,25 @@ fn resolve_build_format(
 /// a set, and no set for a sheet built on its own. An existing file there
 /// is replaced only when `overwrite` is asked for and it carries
 /// AgentDrafter's build mark.
-pub(crate) fn build_sheet_as(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_sheet_with_version(
     record: &SheetRecord,
     description: &Path,
     output: &Path,
     mark: &BuildMark,
     overwrite: bool,
     format: DrawingFormat,
+    version: DwgVersion,
     settings: &Settings,
 ) -> Result<BuildReport, Error> {
-    let prepared = prepare_sheet_as(
+    let prepared = prepare_sheet_with_version(
         record,
         description,
         output,
         mark,
         overwrite,
         format,
+        version,
         settings,
     )?;
     write_whole(output, &prepared.bytes)?;
@@ -259,15 +280,17 @@ pub(crate) struct PreparedSheet {
 }
 
 /// Builds the sheet `record` holds into the bytes of a DWG or DXF for
-/// `output`, as [`build_sheet_as`] does, and refuses as it does, but writes
-/// nothing.
-pub(crate) fn prepare_sheet_as(
+/// `output`, as [`build_sheet_with_version`] does, and refuses as it does, but
+/// writes nothing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_sheet_with_version(
     record: &SheetRecord,
     description: &Path,
     output: &Path,
     mark: &BuildMark,
     overwrite: bool,
     format: DrawingFormat,
+    version: DwgVersion,
     settings: &Settings,
 ) -> Result<PreparedSheet, Error> {
     if fs::symlink_metadata(output).is_ok() {
@@ -309,12 +332,13 @@ pub(crate) fn prepare_sheet_as(
     };
     let sheet = &effective_record.sheet;
     let fonts = SheetFonts::find(sheet, settings);
-    let bytes = dwg::write_new_sheet_as(
+    let (bytes, conversion_losses) = dwg::write_new_sheet_in_version(
         effective_record,
         &|text| fonts.start(text),
         &|text| crate::draw::mtext_box(text, &fonts),
         mark,
         format,
+        version,
     )
     .map_err(|e| e.in_file(output))?;
 
@@ -336,7 +360,7 @@ pub(crate) fn prepare_sheet_as(
         dwg: written_path.clone(),
         dxf: format.is_dxf().then_some(written_path),
         format,
-        dwg_version: dwg::new_sheet_version(),
+        dwg_version: version.code().to_owned(),
         units: sheet.units,
         block_library,
         blocks: sheet.blocks.iter().map(|b| b.name.clone()).collect(),
@@ -344,6 +368,7 @@ pub(crate) fn prepare_sheet_as(
         bytes: bytes.len(),
         font_substitutions: fonts.substitutions(),
         notices: Vec::new(),
+        conversion_losses,
     };
     Ok(PreparedSheet { report, bytes })
 }
@@ -548,7 +573,7 @@ pub(crate) fn is_same_file(a: &Path, b: &Path) -> bool {
 /// The temporary file's name is short and does not hold the DWG's own, so
 /// a DWG whose name is as long as the system allows can still be written.
 /// It holds the process ID and a count, so no two writes share one.
-fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+pub(crate) fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let temporary = write_beside(path, bytes, "the DWG")?;
     fs::rename(&temporary, path).map_err(|e| {
         let _ = fs::remove_file(&temporary);
