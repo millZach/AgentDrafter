@@ -36,7 +36,7 @@ An object the core has no model for is left out of its block, and the reply coun
 - an object in a true colour ([#106](https://github.com/millZach/AgentDrafter/issues/106)) or with a lineweight that is not standard;
 - an object off the XY plane, such as a circle on a tilted plane, and a 3D polyline that is a mesh or spline-fitted;
 - a spline that is not fitted through points by AutoCAD's default, or not a plain clamped B-spline;
-- an annotative or multiline attribute, and text that is slanted, upside down or backwards;
+- an annotative attribute, and text that is slanted, upside down or backwards;
 - an insert that is stretched or an array, mirrored other than as AutoCAD's MIRROR leaves one, or whose attributes are not where its block puts them;
 - an object on a layer, or in a linetype or text style, the core cannot read, such as a complex linetype that draws text;
 - text that would show nothing.

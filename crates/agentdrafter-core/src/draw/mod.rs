@@ -1254,6 +1254,54 @@ impl<'a> Drawer<'a> {
             let value = block
                 .attribute_value(insert, p)
                 .unwrap_or(definition.default.as_str());
+            let scale = outer
+                .map_or(1.0, Placed::scale)
+                .abs()
+                .max(f64::MIN_POSITIVE);
+            if definition.multiline {
+                let mut mtext = crate::model::attribute_mtext(insert, block, definition, value);
+                if definition.layer == LAYER_ZERO {
+                    insert_layer.clone_into(&mut mtext.layer);
+                }
+                let pen = self.pen(&mtext.layer, &mtext.properties, Some(insert_pen));
+                let shown = self.shown(&mtext.layer);
+                if definition.constant && insert.mirrored {
+                    let in_block = crate::text::MText {
+                        contents: value.to_owned(),
+                        layer: mtext.layer.clone(),
+                        ..crate::model::block::definition_mtext(definition)
+                    };
+                    let drawn = self.object(&Object::MText(in_block), pen, within, Some(&placed));
+                    list.add_shown(shown, index, &[path, &[p]].concat(), pen, drawn);
+                    continue;
+                }
+                let lettering =
+                    text::draw_mtext(&mtext, self.fonts, pen.lineweight, tolerance / scale);
+                let drawn = match outer {
+                    Some(outer) => Drawn {
+                        shapes: lettering
+                            .shapes
+                            .into_iter()
+                            .map(|s| outer.shape(s))
+                            .collect(),
+                        colored: lettering
+                            .colored
+                            .into_iter()
+                            .map(|(c, tc, s)| (c, tc, outer.shape(s)))
+                            .collect(),
+                        runs: lettering.runs.into_iter().map(|r| outer.run(r)).collect(),
+                        ..Drawn::default()
+                    },
+                    None => Drawn {
+                        shapes: lettering.shapes,
+                        colored: lettering.colored,
+                        runs: lettering.runs,
+                        ..Drawn::default()
+                    },
+                };
+                list.add_shown(shown, index, &[path, &[p]].concat(), pen, drawn);
+                continue;
+            }
             // The attribute where the insert puts it: on the sheet, or in
             // the enclosing block, which `outer` then places.
             let mut text = attribute_text(insert, block, definition, value);
@@ -1276,10 +1324,6 @@ impl<'a> Drawer<'a> {
                 list.add_shown(shown, index, &[path, &[p]].concat(), pen, drawn);
                 continue;
             }
-            let scale = outer
-                .map_or(1.0, Placed::scale)
-                .abs()
-                .max(f64::MIN_POSITIVE);
             let lettering = text::draw_text(&text, self.fonts, pen.lineweight, tolerance / scale);
             let drawn = match outer {
                 Some(outer) => Drawn {
@@ -1617,12 +1661,23 @@ impl<'a> Drawer<'a> {
             }
             // An attribute definition outside a block shows its tag, as
             // AutoCAD shows it.
-            Object::AttributeDefinition(d) => lettering(text::draw_text(
-                &definition_text(d),
-                self.fonts,
-                pen.lineweight,
-                tolerance,
-            )),
+            Object::AttributeDefinition(d) => {
+                if d.multiline {
+                    lettering(text::draw_mtext(
+                        &crate::model::block::definition_mtext(d),
+                        self.fonts,
+                        pen.lineweight,
+                        tolerance,
+                    ))
+                } else {
+                    lettering(text::draw_text(
+                        &definition_text(d),
+                        self.fonts,
+                        pen.lineweight,
+                        tolerance,
+                    ))
+                }
+            }
             Object::Point(pt) => {
                 let vh = self.effective_view_bounds().height();
                 extra::draw_point(

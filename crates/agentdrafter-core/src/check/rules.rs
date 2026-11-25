@@ -1004,18 +1004,27 @@ impl Sheet<'_> {
             };
         };
         match inner.object {
-            Object::AttributeDefinition(d) if inner.nested_in.is_none() => format!(
-                "the attribute {} of {words} saying `{}`",
-                d.tag,
-                inner.says().unwrap_or_default()
-            ),
-            Object::AttributeDefinition(d) => format!(
-                "the attribute {} of the block {} saying `{}`, {}",
-                d.tag,
-                inner.block.name,
-                inner.says().unwrap_or_default(),
-                inner.inserted_by(&words)
-            ),
+            Object::AttributeDefinition(d) => {
+                let says = inner.says().unwrap_or_default().replace('\n', " ");
+                let attr_line = if line.is_empty() || line == says {
+                    String::new()
+                } else {
+                    on_line
+                };
+                if inner.nested_in.is_none() {
+                    format!(
+                        "the attribute {} of {words} saying `{says}`{attr_line}",
+                        d.tag,
+                    )
+                } else {
+                    format!(
+                        "the attribute {} of the block {} saying `{says}`{attr_line}, {}",
+                        d.tag,
+                        inner.block.name,
+                        inner.inserted_by(&words)
+                    )
+                }
+            }
             Object::Text(t) => format!(
                 "the text `{}` of the block {} {}",
                 t.contents,

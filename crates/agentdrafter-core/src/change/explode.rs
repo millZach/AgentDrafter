@@ -196,7 +196,8 @@ fn explode_insert(insert: &Insert, sheet: &Sheet) -> Result<Vec<Object>, Error> 
         }
     }
 
-    // Visible attributes turned into single-line Text with their carried/constant values.
+    // Visible attributes turned into Text (or MText for multiline attributes, #117)
+    // with their carried/constant values.
     for (p, child) in block.objects.iter().enumerate() {
         let Object::AttributeDefinition(def) = child else {
             continue;
@@ -210,9 +211,15 @@ fn explode_insert(insert: &Insert, sheet: &Sheet) -> Result<Vec<Object>, Error> 
         if value.trim().is_empty() {
             continue;
         }
-        let mut text = attribute_text(insert, block, def, value);
-        text.properties = resolve_by_block(&text.properties, &insert.properties);
-        out.push(Object::Text(text));
+        if def.multiline {
+            let mut mtext = crate::model::attribute_mtext(insert, block, def, value);
+            mtext.properties = resolve_by_block(&mtext.properties, &insert.properties);
+            out.push(Object::MText(mtext));
+        } else {
+            let mut text = attribute_text(insert, block, def, value);
+            text.properties = resolve_by_block(&text.properties, &insert.properties);
+            out.push(Object::Text(text));
+        }
     }
 
     Ok(out)
@@ -1542,6 +1549,8 @@ mod tests {
                     verify: false,
                     preset: false,
                     lock_position: false,
+                    multiline: false,
+                    width: 0.0,
                     layer: LAYER_ZERO.to_owned(),
                     properties: Properties {
                         color: ObjectColor::ByBlock,
@@ -1563,6 +1572,8 @@ mod tests {
                     verify: false,
                     preset: false,
                     lock_position: false,
+                    multiline: false,
+                    width: 0.0,
                     layer: LAYER_ZERO.to_owned(),
                     properties: Properties::default(),
                 }),

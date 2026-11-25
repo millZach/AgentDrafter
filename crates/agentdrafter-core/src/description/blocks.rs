@@ -17,10 +17,13 @@
 use super::layers::{layers, linetypes, named_entries};
 use super::objects::{object, Place, Tables};
 use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
-use super::text::{character_code, height, justify, rotation, style_name, style_of, width_factor};
+use super::text::{
+    attachment, character_code, height, justify, rotation, shown_mtext, style_name, style_of,
+    width_factor,
+};
 use super::{
-    angle, at, bad_value, boolean, choice, hatch, plain_number, point, scalar, sequence, text,
-    unit, wrong_type, Fields,
+    angle, at, bad_value, boolean, choice, hatch, length, plain_number, point, scalar, sequence,
+    text, unit, wrong_type, Fields,
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::{
@@ -84,7 +87,7 @@ pub(crate) const BLOCK_KEYS: [&str; 4] = [
 pub(crate) const CELL_KEY: &str = "cell";
 
 /// The keys an attribute definition takes.
-pub(crate) const ATTDEF_KEYS: [&str; 22] = [
+pub(crate) const ATTDEF_KEYS: [&str; 24] = [
     "tag",
     "prompt",
     "default",
@@ -99,6 +102,8 @@ pub(crate) const ATTDEF_KEYS: [&str; 22] = [
     "verify",
     "preset",
     "lock_position",
+    "multiline",
+    "width",
     "layer",
     "color",
     "linetype",
@@ -576,15 +581,6 @@ pub(super) fn attribute_definition(
         }
         None => String::new(),
     };
-    let default = match fields.text("default") {
-        Some(node) => value(node, &fields.path_of("default"))?,
-        None => String::new(),
-    };
-    let style = style_name(fields, tables.styles)?;
-    let width_factor = match fields.get("width_factor") {
-        Some(node) => width_factor(node, &fields.path_of("width_factor"))?,
-        None => style_of(&style, tables.styles).map_or(1.0, |s| s.width_factor),
-    };
     let mode = |key: &str| match fields.get(key) {
         Some(node) => boolean(node, &fields.path_of(key)),
         None => Ok(false),
@@ -594,6 +590,40 @@ pub(super) fn attribute_definition(
     let verify = mode("verify")?;
     let preset = mode("preset")?;
     let lock_position = mode("lock_position")?;
+    let multiline = mode("multiline")?;
+    let width = match fields.get("width") {
+        Some(node) if !multiline => {
+            return Err(bad_value(
+                node,
+                &fields.path_of("width"),
+                "`width` is only for a multiline attribute (`multiline: true`)",
+            ));
+        }
+        Some(node) => {
+            let path = fields.path_of("width");
+            let w = length(node, &path, tables.units)?;
+            if w < 0.0 {
+                return Err(bad_value(
+                    node,
+                    &path,
+                    "a width is 0 or more: the width lines wrap in, or 0 for lines that break \
+                     only where the value breaks them",
+                ));
+            }
+            w + 0.0
+        }
+        None => 0.0,
+    };
+    let default = match fields.text("default") {
+        Some(node) if multiline => multiline_value(node, &fields.path_of("default"))?,
+        Some(node) => value(node, &fields.path_of("default"))?,
+        None => String::new(),
+    };
+    let style = style_name(fields, tables.styles)?;
+    let width_factor = match fields.get("width_factor") {
+        Some(node) => width_factor(node, &fields.path_of("width_factor"))?,
+        None => style_of(&style, tables.styles).map_or(1.0, |s| s.width_factor),
+    };
     // A constant attribute asks nobody for its value, so Verify and Preset,
     // which change how AutoCAD asks, do not go with it: AutoCAD's ATTDEF
     // turns them off for a constant attribute.
@@ -612,6 +642,11 @@ pub(super) fn attribute_definition(
             }
         }
     }
+    let justify = if multiline {
+        crate::model::block::attachment_to_justify(attachment(fields)?)
+    } else {
+        justify(fields)?
+    };
     Ok(AttributeDefinition {
         tag,
         prompt,
@@ -625,12 +660,14 @@ pub(super) fn attribute_definition(
         style,
         width_factor,
         rotation: rotation(fields)?,
-        justify: justify(fields)?,
+        justify,
         invisible,
         constant,
         verify,
         preset,
         lock_position,
+        multiline,
+        width,
         layer,
         properties: Default::default(),
     })
@@ -965,7 +1002,14 @@ pub(super) fn attributes(
                         ),
                     ));
                 }
-                (_, [i]) => values[*i] = Some(value(&entry.value, &entry_path)?),
+                (_, [i]) => {
+                    let parsed = if definitions[*i].multiline {
+                        multiline_value(&entry.value, &entry_path)?
+                    } else {
+                        value(&entry.value, &entry_path)?
+                    };
+                    values[*i] = Some(parsed);
+                }
                 (Kind::Sequence(items), _) => {
                     if items.len() > places.len() {
                         return Err(bad_value(
@@ -984,7 +1028,14 @@ pub(super) fn attributes(
                     }
                     for (j, item) in items.iter().enumerate() {
                         if !item.is_bare_null() {
-                            values[places[j]] = Some(value(item, &index_path(&entry_path, j))?);
+                            let idx = places[j];
+                            let item_path = index_path(&entry_path, j);
+                            let parsed = if definitions[idx].multiline {
+                                multiline_value(item, &item_path)?
+                            } else {
+                                value(item, &item_path)?
+                            };
+                            values[idx] = Some(parsed);
                         }
                     }
                 }
@@ -1104,6 +1155,31 @@ fn value(node: &Node, path: &str) -> Result<String, Error> {
         Some(problem) => Err(bad_value(node, path, problem)),
         None => Ok(text.to_owned()),
     }
+}
+
+/// A multi-line attribute's value (#117): one or more lines of text, which may
+/// be empty; trailing line breaks are dropped and CR LF is normalized to LF.
+fn multiline_value(node: &Node, path: &str) -> Result<String, Error> {
+    let text = scalar(
+        node,
+        path,
+        "the attribute's value, one or more lines of text",
+    )?;
+    let shown = shown_mtext(text);
+    if let Some(c) = shown.chars().find(|c| c.is_control() && *c != '\n') {
+        return Err(bad_value(
+            node,
+            path,
+            format!(
+                "an attribute's value cannot hold the control character `{}`",
+                c.escape_default()
+            ),
+        ));
+    }
+    if let Some(problem) = character_code(&shown) {
+        return Err(bad_value(node, path, problem));
+    }
+    Ok(shown)
 }
 
 /// What is wrong with text that is one line, if anything: a line break or

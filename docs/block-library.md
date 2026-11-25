@@ -87,6 +87,8 @@ An `attdef` is AutoCAD's ATTDEF: a labelled text field each insert of the block 
 | `verify` | no | `true` to have AutoCAD ask a person to confirm the value they type when they insert the block, as its Verify mode does. Without it, `false`. |
 | `preset` | no | `true` to have AutoCAD take the default without asking a person who inserts the block, as its Preset mode does. Without it, `false`. |
 | `lock_position` | no | `true` to stop a person in AutoCAD moving the attribute apart from its insert, as its Lock position mode does. Without it, `false`, so every DWG built before stays the same (Zach decided on 2026-11-13). |
+| `multiline` | no | `true` for AutoCAD's Multiple lines mode: the attribute's `default` and each insert's value may span multiple lines (`\n`) and draw as `mtext`, wrapped in `width`. Without it, `false`. |
+| `width` | no | For a `multiline: true` attribute, the boundary width lines wrap in (a length of `0` or more; `0` breaks only at explicit line breaks). Scaled by each insert's `scale`. Not allowed on a single-line attribute. Without it, `0`. |
 | `layer` | no | The layer, as for every object. An attribute defined on layer `0` sits on the layer of each insert; one defined on any other layer sits on that layer. |
 | `color`, `linetype`, `lineweight`, `linetype_scale` | no | The attribute's own, as for every object; each insert's attribute is written with them. `ByBlock` takes the insert's. |
 | `cell` | no | The box the attribute draws within on each insert, such as its title-block cell. See [Cells](#cells). |
@@ -161,6 +163,6 @@ A change set adds a block to a drawing set's library with `add_block` (AutoCAD's
 - Dynamic blocks, which come in a later ticket.
 - Cells in a nested block: the checker holds only the cells of the block a sheet inserts.
 - Annotative blocks and attributes.
-- Multiline attributes ([#117](https://github.com/millZach/AgentDrafter/issues/117)), and attributes whose place an insert changes.
+- Attributes whose place an insert changes.
 - Stretched inserts: an insert's scale is the same along every axis and more than 0. A mirrored insert, `mirrored: true`, nests as one on a sheet does ([Inserts](sheet-description.md#inserts)).
 - Arrays of inserts (AutoCAD's MINSERT).
