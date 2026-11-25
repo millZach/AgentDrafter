@@ -22,7 +22,7 @@
 //!   the baseline AutoCAD's `textbox` drops the gap below them to start at
 //!   the baseline (#59).
 
-use super::fonts::{find, Font, FontSubstitution, FontUsed};
+use super::fonts::{find, find_inline, Font, FontSubstitution, FontUsed};
 use super::{Justify, Text, TextStyle, STANDARD};
 use crate::model::{Object, Point3, Sheet};
 use crate::settings::Settings;
@@ -62,9 +62,21 @@ fn parts(justify: Justify) -> (Across, Up) {
     }
 }
 
-/// The fonts of a sheet's text styles, each found or replaced once.
+/// Key identifying one inline MTEXT font resolution (`style`, optional inline
+/// `font`, `bold`, `italic`) (#61).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InlineFontKey {
+    style: String,
+    font: Option<String>,
+    bold: bool,
+    italic: bool,
+}
+
+/// The fonts of a sheet's text styles (and any inline MTEXT runs), each found
+/// or replaced once.
 pub(crate) struct SheetFonts {
     styles: Vec<(TextStyle, Font, FontUsed)>,
+    inline: Vec<(InlineFontKey, Font, FontUsed, bool, bool)>,
 }
 
 impl SheetFonts {
@@ -117,19 +129,57 @@ impl SheetFonts {
         if standard_used && !styles.iter().any(|s| s.name == STANDARD) {
             styles.insert(0, TextStyle::standard());
         }
-        let styles = styles
+        let styles: Vec<(TextStyle, Font, FontUsed)> = styles
             .into_iter()
             .map(|style| {
                 let (font, used) = find(&style.font, settings);
                 (style, font, used)
             })
             .collect();
-        Self { styles }
+        // Resolve inline MTEXT run fonts once so `draw/` stays pure (WASM-safe).
+        let mut inline: Vec<(InlineFontKey, Font, FontUsed, bool, bool)> = Vec::new();
+        let all_objects = sheet
+            .objects
+            .iter()
+            .chain(sheet.blocks.iter().flat_map(|b| &b.objects));
+        for object in all_objects {
+            let Object::MText(mtext) = object else {
+                continue;
+            };
+            let base_font = styles
+                .iter()
+                .find(|(s, _, _)| s.name == mtext.style)
+                .map_or(super::STANDARD_FONT, |(s, _, _)| s.font.as_str());
+            for run in &mtext.runs {
+                if run.font.is_none() && !run.bold && !run.italic {
+                    continue;
+                }
+                let key = InlineFontKey {
+                    style: mtext.style.clone(),
+                    font: run.font.clone(),
+                    bold: run.bold,
+                    italic: run.italic,
+                };
+                if inline.iter().any(|(k, ..)| *k == key) {
+                    continue;
+                }
+                let (font, used, has_bold, has_italic) = find_inline(
+                    run.font.as_deref(),
+                    base_font,
+                    run.bold,
+                    run.italic,
+                    settings,
+                );
+                inline.push((key, font, used, has_bold, has_italic));
+            }
+        }
+        Self { styles, inline }
     }
 
-    /// The styles whose fonts were replaced, and by what.
+    /// The styles (and inline MTEXT fonts) whose fonts were replaced, and by what.
     pub(crate) fn substitutions(&self) -> Vec<FontSubstitution> {
-        self.styles
+        let mut out: Vec<FontSubstitution> = self
+            .styles
             .iter()
             .filter(|(_, _, used)| used.substituted)
             .map(|(style, _, used)| FontSubstitution {
@@ -139,7 +189,26 @@ impl SheetFonts {
                 why: used.why.clone().unwrap_or_default(),
                 source: used.source,
             })
-            .collect()
+            .collect();
+        for (key, _, used, _, _) in &self.inline {
+            if !used.substituted {
+                continue;
+            }
+            let sub = FontSubstitution {
+                style: key.style.clone(),
+                font: used.requested.clone(),
+                used: used.used.clone(),
+                why: used.why.clone().unwrap_or_default(),
+                source: used.source,
+            };
+            if !out
+                .iter()
+                .any(|s| s.style == sub.style && s.font.eq_ignore_ascii_case(&sub.font))
+            {
+                out.push(sub);
+            }
+        }
+        out
     }
 
     /// The font text in `style` draws with, and the style's width factor:
@@ -150,6 +219,30 @@ impl SheetFonts {
             .iter()
             .find(|(s, _, _)| s.name == style)
             .map_or((&Font::Hershey, 1.0), |(s, font, _)| (font, s.width_factor))
+    }
+
+    /// The font an inline MTEXT run draws with, plus `(has_bold_face, has_italic_face)`.
+    pub(crate) fn inline_font(
+        &self,
+        style: &str,
+        font: Option<&str>,
+        bold: bool,
+        italic: bool,
+    ) -> (&Font, bool, bool) {
+        if font.is_none() && !bold && !italic {
+            return (self.style(style).0, false, false);
+        }
+        self.inline
+            .iter()
+            .find(|(k, ..)| {
+                k.style == style
+                    && k.font.as_deref() == font
+                    && k.bold == bold
+                    && k.italic == italic
+            })
+            .map_or((self.style(style).0, false, false), |(_, f, _, b, i)| {
+                (f, *b, *i)
+            })
     }
 
     /// Where `text`'s baseline starts: its position when it is
@@ -228,6 +321,7 @@ mod tests {
                     source: None,
                 }
             })],
+            inline: Vec::new(),
         }
     }
 
@@ -340,6 +434,7 @@ mod tests {
                     used("probe.shx"),
                 ),
             ],
+            inline: Vec::new(),
         };
 
         let make =

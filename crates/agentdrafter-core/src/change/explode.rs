@@ -628,6 +628,17 @@ fn place_object(
             };
             Some(Object::MText(MText {
                 contents: t.contents.clone(),
+                runs: t
+                    .runs
+                    .iter()
+                    .map(|r| {
+                        let mut r = r.clone();
+                        if let Some(h) = &mut r.height {
+                            *h *= scale;
+                        }
+                        r
+                    })
+                    .collect(),
                 position: placement.point(t.position),
                 height: t.height * scale,
                 width: t.width * scale,

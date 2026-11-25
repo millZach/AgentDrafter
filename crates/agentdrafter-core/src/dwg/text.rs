@@ -26,8 +26,11 @@ use acadrust::CadDocument;
 use super::{point, vector};
 use crate::description::normalize_degrees;
 use crate::error::{Error, ErrorCode};
-use crate::model::Point3;
-use crate::text::{Attachment, Justify, MText, Text, TextStyle, STANDARD, WIDTH_FACTORS};
+use crate::model::{ObjectColor, Point3};
+use crate::text::{
+    Attachment, FontKind, Justify, MText, MTextRun, Text, TextStyle, OBLIQUE_ANGLES, STANDARD,
+    TRACKING_FACTORS, WIDTH_FACTORS,
+};
 
 /// Each justification of a single line of text, with AutoCAD's horizontal
 /// and vertical alignment for it.
@@ -132,15 +135,7 @@ pub(super) fn dwg_text(text: &Text, start: Point3) -> DwgText {
 }
 
 pub(super) fn dwg_mtext(text: &MText) -> DwgMText {
-    let mut dwg_text = DwgMText::with_value(
-        mtext_styled_code(
-            &text.contents,
-            text.width_factor,
-            text.underline,
-            text.overline,
-        ),
-        vector(text.position),
-    );
+    let mut dwg_text = DwgMText::with_value(mtext_rich_code(text), vector(text.position));
     dwg_text.height = text.height;
     dwg_text.rectangle_width = text.width;
     dwg_text.rotation = text.rotation.to_radians();
@@ -251,21 +246,22 @@ pub(super) fn read_mtext(dwg_text: &DwgMText, layer: String) -> Option<MText> {
     if !plain {
         return None;
     }
-    let (contents, width_factor, underline, overline) = mtext_styled_contents(&dwg_text.value)?;
+    let parsed = mtext_rich_contents(&dwg_text.value, dwg_text.height)?;
     let (justify, _) = ATTACHMENTS
         .into_iter()
         .find(|(_, a)| *a == dwg_text.attachment_point)?;
     Some(MText {
-        contents,
+        contents: parsed.contents,
+        runs: parsed.runs,
         position: point(dwg_text.insertion_point),
         height: dwg_text.height,
         width: dwg_text.rectangle_width,
         style: style_name(&dwg_text.style),
-        width_factor,
+        width_factor: parsed.width_factor,
         rotation: normalize_degrees(dwg_text.rotation.to_degrees()),
         justify,
-        underline,
-        overline,
+        underline: parsed.underline,
+        overline: parsed.overline,
         layer,
         field: None,
         annotative: dwg_text.is_annotative,
@@ -508,6 +504,392 @@ pub(super) fn mtext_styled_contents(value: &str) -> Option<(String, Option<f64>,
     Some((contents, width_factor, underline, overline))
 }
 
+/// Decoded multiline text, with optional inline-formatted runs (#61).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ParsedMText {
+    pub contents: String,
+    pub width_factor: Option<f64>,
+    pub underline: bool,
+    pub overline: bool,
+    pub runs: Vec<MTextRun>,
+}
+
+/// Escapes plain text for an AutoCAD MTEXT body (`\`, `{`, `}`, `\n`, `%%`).
+fn mtext_escape_body(text: &str) -> String {
+    let escaped: String = text
+        .chars()
+        .map(|c| match c {
+            '\\' => "\\\\".to_owned(),
+            '{' => "\\{".to_owned(),
+            '}' => "\\}".to_owned(),
+            '\n' => "\\P".to_owned(),
+            c => c.to_string(),
+        })
+        .collect();
+    code_percent_runs(&escaped, PERCENT_CODE)
+}
+
+/// Codes a rich multiline text for DWG/DXF: delegates to [`mtext_styled_code`]
+/// when `runs` is empty, otherwise emits AutoCAD inline formatting groups
+/// (`\f`/`\F`, `\H`, `\W`, `\Q`, `\T`, `\C`, `\L`/`\l`, `\O`/`\o`) (#61).
+pub(super) fn mtext_rich_code(text: &MText) -> String {
+    if text.runs.is_empty() {
+        return mtext_styled_code(
+            &text.contents,
+            text.width_factor,
+            text.underline,
+            text.overline,
+        );
+    }
+    let mut coded = String::new();
+    if let Some(factor) = text.width_factor {
+        coded.push_str(&format!("\\W{factor};"));
+    }
+    if text.underline {
+        coded.push_str("\\L");
+    }
+    if text.overline {
+        coded.push_str("\\O");
+    }
+    for run in &text.runs {
+        let has_override = !run.is_plain();
+        if has_override {
+            coded.push('{');
+            if let Some(font) = &run.font {
+                if FontKind::of(font) == Some(FontKind::Shx) && !run.bold && !run.italic {
+                    coded.push_str(&format!("\\F{font};"));
+                } else {
+                    let b = u8::from(run.bold);
+                    let i = u8::from(run.italic);
+                    coded.push_str(&format!("\\f{font}|b{b}|i{i}|c0|p0;"));
+                }
+            } else if run.bold || run.italic {
+                let b = u8::from(run.bold);
+                let i = u8::from(run.italic);
+                coded.push_str(&format!("\\f|b{b}|i{i}|c0|p0;"));
+            }
+            if let Some(h) = run.height {
+                coded.push_str(&format!("\\H{h};"));
+            }
+            if let Some(w) = run.width_factor {
+                coded.push_str(&format!("\\W{w};"));
+            }
+            if let Some(q) = run.oblique {
+                coded.push_str(&format!("\\Q{q};"));
+            }
+            if let Some(t) = run.tracking {
+                coded.push_str(&format!("\\T{t};"));
+            }
+            if let Some(color) = run.color {
+                let aci = match color {
+                    ObjectColor::ByBlock => 0u16,
+                    ObjectColor::Index(i) => u16::from(i),
+                    ObjectColor::ByLayer => 256u16,
+                };
+                coded.push_str(&format!("\\C{aci};"));
+            }
+            if run.underline && !text.underline {
+                coded.push_str("\\L");
+            }
+            if run.overline && !text.overline {
+                coded.push_str("\\O");
+            }
+        }
+        coded.push_str(&mtext_escape_body(&run.text));
+        if has_override {
+            if run.overline && !text.overline {
+                coded.push_str("\\o");
+            }
+            if run.underline && !text.underline {
+                coded.push_str("\\l");
+            }
+            coded.push('}');
+        }
+    }
+    if text.overline {
+        coded.push_str("\\o");
+    }
+    if text.underline {
+        coded.push_str("\\l");
+    }
+    coded
+}
+
+/// Active inline formatting state while parsing an AutoCAD MTEXT string (#61).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct MTextState {
+    font: Option<String>,
+    bold: bool,
+    italic: bool,
+    height: Option<f64>,
+    width_factor: Option<f64>,
+    oblique: Option<f64>,
+    tracking: Option<f64>,
+    underline: bool,
+    overline: bool,
+    color: Option<ObjectColor>,
+}
+
+/// Parses an AutoCAD MTEXT string with inline formatting codes (`\f`/`\F`,
+/// `\H`, `\W`, `\Q`, `\T`, `\L`/`\l`, `\O`/`\o`, `\C`, `\P`/`\N`, `\~`,
+/// `\U+XXXX`, `\A`, and `{...}` groups) (#61).
+///
+/// Returns `None` if an unmodelled code (`\S`, `\p`, `\c`, `\K`, unmatched
+/// braces, raw `%%`, or out-of-range numeric parameter) is encountered so
+/// originals with unsupported formatting are never silently flattened.
+pub(super) fn mtext_rich_contents(value: &str, base_height: f64) -> Option<ParsedMText> {
+    // Fast path: plain MTEXT (with optional whole-text \W / \L / \O) keeps
+    // `runs` empty for full backwards compatibility.
+    if let Some((contents, width_factor, underline, overline)) = mtext_styled_contents(value) {
+        return Some(ParsedMText {
+            contents,
+            width_factor,
+            underline,
+            overline,
+            runs: Vec::new(),
+        });
+    }
+
+    let mut stack: Vec<MTextState> = Vec::new();
+    let mut state = MTextState::default();
+    let mut runs: Vec<MTextRun> = Vec::new();
+    let mut rest = value;
+
+    let push_char = |runs: &mut Vec<MTextRun>, st: &MTextState, ch: char| {
+        let candidate = MTextRun {
+            text: String::new(),
+            font: st.font.clone(),
+            bold: st.bold,
+            italic: st.italic,
+            height: st.height,
+            width_factor: st.width_factor,
+            oblique: st.oblique,
+            tracking: st.tracking,
+            underline: st.underline,
+            overline: st.overline,
+            color: st.color,
+        };
+        if let Some(last) = runs.last_mut() {
+            if last.same_style(&candidate) {
+                last.text.push(ch);
+                return;
+            }
+        }
+        let mut run = candidate;
+        run.text.push(ch);
+        runs.push(run);
+    };
+
+    while let Some(c) = rest.chars().next() {
+        match c {
+            '{' => {
+                stack.push(state.clone());
+                rest = &rest[1..];
+            }
+            '}' => {
+                state = stack.pop()?;
+                rest = &rest[1..];
+            }
+            '%' if rest.starts_with("%%") => return None,
+            '\\' => {
+                let after_bs = &rest[1..];
+                let code = after_bs.chars().next()?;
+                match code {
+                    '\\' => {
+                        push_char(&mut runs, &state, '\\');
+                        rest = &after_bs[1..];
+                    }
+                    '{' => {
+                        push_char(&mut runs, &state, '{');
+                        rest = &after_bs[1..];
+                    }
+                    '}' => {
+                        push_char(&mut runs, &state, '}');
+                        rest = &after_bs[1..];
+                    }
+                    '~' => {
+                        push_char(&mut runs, &state, ' ');
+                        rest = &after_bs[1..];
+                    }
+                    'P' | 'N' => {
+                        push_char(&mut runs, &state, '\n');
+                        rest = &after_bs[1..];
+                    }
+                    'L' => {
+                        state.underline = true;
+                        rest = &after_bs[1..];
+                    }
+                    'l' => {
+                        state.underline = false;
+                        rest = &after_bs[1..];
+                    }
+                    'O' => {
+                        state.overline = true;
+                        rest = &after_bs[1..];
+                    }
+                    'o' => {
+                        state.overline = false;
+                        rest = &after_bs[1..];
+                    }
+                    'U' | 'u' if after_bs.get(1..2) == Some("+") => {
+                        let hex = after_bs.get(2..6)?;
+                        let cp = u32::from_str_radix(hex, 16).ok()?;
+                        let ch = char::from_u32(cp)?;
+                        push_char(&mut runs, &state, ch);
+                        rest = &after_bs[6..];
+                    }
+                    'f' => {
+                        let (arg, tail) = after_bs[1..].split_once(';')?;
+                        let mut parts = arg.split('|');
+                        let family = parts.next().unwrap_or("").trim();
+                        if !family.is_empty() {
+                            if crate::text::inline_font_name_problem(family).is_some() {
+                                return None;
+                            }
+                            state.font = Some(family.to_owned());
+                        }
+                        for flag in parts {
+                            if let Some(v) =
+                                flag.strip_prefix('b').or_else(|| flag.strip_prefix('B'))
+                            {
+                                state.bold = v != "0";
+                            } else if let Some(v) =
+                                flag.strip_prefix('i').or_else(|| flag.strip_prefix('I'))
+                            {
+                                state.italic = v != "0";
+                            } else if flag.starts_with(['c', 'C', 'p', 'P']) {
+                                // Windows charset / pitch-and-family metadata: accepted.
+                            } else if !flag.is_empty() {
+                                return None;
+                            }
+                        }
+                        rest = tail;
+                    }
+                    'F' => {
+                        let (arg, tail) = after_bs[1..].split_once(';')?;
+                        let name = arg.trim();
+                        if name.is_empty() || crate::text::inline_font_name_problem(name).is_some()
+                        {
+                            return None;
+                        }
+                        state.font = Some(name.to_owned());
+                        state.bold = false;
+                        state.italic = false;
+                        rest = tail;
+                    }
+                    'H' => {
+                        let (arg, tail) = after_bs[1..].split_once(';')?;
+                        let h = if let Some(num) =
+                            arg.strip_suffix('x').or_else(|| arg.strip_suffix('X'))
+                        {
+                            let factor: f64 = num.parse().ok()?;
+                            if !factor.is_finite() || factor <= 0.0 {
+                                return None;
+                            }
+                            state.height.unwrap_or(base_height) * factor
+                        } else {
+                            let abs: f64 = arg.parse().ok()?;
+                            if !abs.is_finite() || abs <= 0.0 {
+                                return None;
+                            }
+                            abs
+                        };
+                        state.height = Some(h);
+                        rest = tail;
+                    }
+                    'W' => {
+                        let (arg, tail) = after_bs[1..].split_once(';')?;
+                        let wf = if let Some(num) =
+                            arg.strip_suffix('x').or_else(|| arg.strip_suffix('X'))
+                        {
+                            let factor: f64 = num.parse().ok()?;
+                            if !factor.is_finite() || factor <= 0.0 {
+                                return None;
+                            }
+                            state.width_factor.unwrap_or(1.0) * factor
+                        } else {
+                            arg.parse::<f64>().ok()?
+                        };
+                        if !wf.is_finite() || !(WIDTH_FACTORS.0..=WIDTH_FACTORS.1).contains(&wf) {
+                            return None;
+                        }
+                        state.width_factor = Some(wf);
+                        rest = tail;
+                    }
+                    'Q' => {
+                        let (arg, tail) = after_bs[1..].split_once(';')?;
+                        let ang: f64 = arg.parse().ok()?;
+                        if !ang.is_finite() || !(OBLIQUE_ANGLES.0..=OBLIQUE_ANGLES.1).contains(&ang)
+                        {
+                            return None;
+                        }
+                        state.oblique = Some(ang);
+                        rest = tail;
+                    }
+                    'T' => {
+                        let (arg, tail) = after_bs[1..].split_once(';')?;
+                        let trk: f64 = arg.parse().ok()?;
+                        if !trk.is_finite()
+                            || !(TRACKING_FACTORS.0..=TRACKING_FACTORS.1).contains(&trk)
+                        {
+                            return None;
+                        }
+                        state.tracking = Some(trk);
+                        rest = tail;
+                    }
+                    'C' => {
+                        let (arg, tail) = after_bs[1..].split_once(';')?;
+                        let aci: u16 = arg.parse().ok()?;
+                        state.color = match aci {
+                            0 => Some(ObjectColor::ByBlock),
+                            1..=255 => Some(ObjectColor::Index(aci as u8)),
+                            256 => Some(ObjectColor::ByLayer),
+                            _ => return None,
+                        };
+                        rest = tail;
+                    }
+                    'A' => {
+                        // Baseline alignment (`\A0;`, `\A1;`, `\A2;`): accepted.
+                        let (arg, tail) = after_bs[1..].split_once(';')?;
+                        if !matches!(arg, "0" | "1" | "2") {
+                            return None;
+                        }
+                        rest = tail;
+                    }
+                    _ => return None,
+                }
+            }
+            ch => {
+                push_char(&mut runs, &state, ch);
+                rest = &rest[ch.len_utf8()..];
+            }
+        }
+    }
+    if !stack.is_empty() {
+        return None;
+    }
+
+    let contents: String = runs.iter().map(|r| r.text.as_str()).collect();
+    // If all runs are plain (e.g. only `\A1;` or empty `{}` groups were present),
+    // collapse back to plain `MText` with empty `runs`.
+    if runs.iter().all(MTextRun::is_plain) {
+        return Some(ParsedMText {
+            contents,
+            width_factor: None,
+            underline: false,
+            overline: false,
+            runs: Vec::new(),
+        });
+    }
+    Some(ParsedMText {
+        contents,
+        width_factor: None,
+        underline: false,
+        overline: false,
+        runs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,9 +961,91 @@ mod tests {
             mtext_styled_contents("\\LNOTES:"),
             Some(("NOTES:".to_owned(), None, true, false))
         );
-        // Partial inline formatting is still refused.
+        // Partial inline formatting is still refused by the plain-text helper.
         assert_eq!(mtext_styled_contents("a\\Lb"), None);
         assert_eq!(mtext_styled_contents("\\La\\lb"), None);
+    }
+
+    #[test]
+    fn rich_mtext_inline_codes_parse_and_round_trip() {
+        // Real-job pattern from #61: `{\fSomeFont|b0|i0|c0|p0;...}`.
+        let parsed = mtext_rich_contents("{\\fSomeFont|b0|i0|c0|p0;NOTE:} plain", 2.5).unwrap();
+        assert_eq!(parsed.contents, "NOTE: plain");
+        assert_eq!(parsed.runs.len(), 2);
+        assert_eq!(parsed.runs[0].text, "NOTE:");
+        assert_eq!(parsed.runs[0].font.as_deref(), Some("SomeFont"));
+        assert!(!parsed.runs[0].bold && !parsed.runs[0].italic);
+        assert_eq!(parsed.runs[1].text, " plain");
+        assert!(parsed.runs[1].is_plain());
+
+        // Full combination: font, bold, italic, absolute & relative height,
+        // width factor, oblique, tracking, underline, overline, colour, nesting,
+        // non-breaking space, unicode escape and \A1;.
+        let raw = "\\A1;{\\fArial|b1|i1|c0|p34;\\H2x;\\C1;\\LRED\\l} {\\Fromans.shx;\\H3.5;\\W0.8;\\Q15;\\T1.2;\\OTOP\\o}\\P{\\C256;90\\U+00B0\\~C}";
+        let parsed = mtext_rich_contents(raw, 2.5).unwrap();
+        assert_eq!(parsed.contents, "RED TOP\n90° C");
+        assert_eq!(parsed.runs[0].font.as_deref(), Some("Arial"));
+        assert!(parsed.runs[0].bold && parsed.runs[0].italic && parsed.runs[0].underline);
+        assert_eq!(parsed.runs[0].height, Some(5.0)); // 2x * 2.5
+        assert_eq!(parsed.runs[0].color, Some(ObjectColor::Index(1)));
+        assert_eq!(parsed.runs[1].text, " ");
+        assert!(parsed.runs[1].is_plain());
+        assert_eq!(parsed.runs[2].font.as_deref(), Some("romans.shx"));
+        assert_eq!(parsed.runs[2].height, Some(3.5));
+        assert_eq!(parsed.runs[2].width_factor, Some(0.8));
+        assert_eq!(parsed.runs[2].oblique, Some(15.0));
+        assert_eq!(parsed.runs[2].tracking, Some(1.2));
+        assert!(parsed.runs[2].overline);
+        let last = parsed.runs.last().unwrap();
+        assert_eq!(last.text, "90° C");
+        assert_eq!(last.color, Some(ObjectColor::ByLayer));
+
+        // Round-trip through `mtext_rich_code` -> `mtext_rich_contents`.
+        let mt = MText {
+            contents: parsed.contents.clone(),
+            runs: parsed.runs.clone(),
+            position: Point3::new(0.0, 0.0, 0.0),
+            height: 2.5,
+            width: 0.0,
+            style: STANDARD.into(),
+            width_factor: None,
+            rotation: 0.0,
+            justify: Attachment::TopLeft,
+            underline: false,
+            overline: false,
+            layer: "0".into(),
+            field: None,
+            annotative: false,
+            annotation_scales: Vec::new(),
+            properties: Default::default(),
+        };
+        let encoded = mtext_rich_code(&mt);
+        let decoded = mtext_rich_contents(&encoded, 2.5).unwrap();
+        assert_eq!(decoded.contents, mt.contents);
+        assert_eq!(decoded.runs, mt.runs);
+
+        // Partial underline works in rich MTEXT.
+        let partial = mtext_rich_contents("a\\Lb", 2.0).unwrap();
+        assert_eq!(partial.contents, "ab");
+        assert_eq!(partial.runs.len(), 2);
+        assert!(!partial.runs[0].underline && partial.runs[1].underline);
+
+        // Unmodelled codes and malformed inputs still return None.
+        for bad in [
+            "\\S1/2;",
+            "\\pqc;centered",
+            "\\c255;truecolor",
+            "\\Kstrike\\k",
+            "{\\fArial;unclosed",
+            "\\H0;zero",
+            "\\W0;zero",
+            "\\Q90;too-slanted",
+            "\\T0.5;too-tight",
+            "\\C257;bad-aci",
+            "100%%",
+        ] {
+            assert_eq!(mtext_rich_contents(bad, 2.5), None, "{bad}");
+        }
     }
 
     #[test]

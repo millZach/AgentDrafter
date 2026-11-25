@@ -800,6 +800,7 @@ impl Dimension {
         let pieces = self.text_pieces(style);
         let mut text = MText {
             contents: flat(&pieces),
+            runs: Vec::new(),
             position: self.location,
             height: sizes.text,
             width: 0.0,

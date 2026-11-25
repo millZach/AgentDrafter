@@ -4,13 +4,13 @@
 //! like a layer. Text and multiline text are objects: `objects.rs` lists
 //! them and hands their keys to [`text`] and [`mtext`] here.
 
-use super::layers::{name_error, named_entries};
-use super::strict_yaml::{key_path, Node};
+use super::layers::{name_error, named_entries, object_color};
+use super::strict_yaml::{key_path, Kind, Node};
 use super::{angle, at, bad_value, boolean, choice, length, plain_number, point, scalar, Fields};
 use crate::error::{Error, ErrorCode};
 use crate::text::{
-    font_name_problem, Attachment, Justify, MText, Text, TextStyle, FONT_CHOICES, STANDARD,
-    WIDTH_FACTORS,
+    font_name_problem, inline_font_name_problem, Attachment, Justify, MText, MTextRun, Text,
+    TextStyle, FONT_CHOICES, OBLIQUE_ANGLES, STANDARD, TRACKING_FACTORS, WIDTH_FACTORS,
 };
 use crate::units::Unit;
 
@@ -45,8 +45,9 @@ pub(crate) const TEXT_KEYS: [&str; 19] = [
 ];
 
 /// The keys multiline text takes.
-pub(crate) const MTEXT_KEYS: [&str; 20] = [
+pub(crate) const MTEXT_KEYS: [&str; 21] = [
     "contents",
+    "runs",
     "field",
     "position",
     "height",
@@ -66,6 +67,21 @@ pub(crate) const MTEXT_KEYS: [&str; 20] = [
     "linetype_scale",
     "plot_style",
     "transparency",
+];
+
+/// The keys one inline-formatted run of an `mtext` takes (#61).
+pub(crate) const MTEXT_RUN_KEYS: [&str; 11] = [
+    "text",
+    "font",
+    "bold",
+    "italic",
+    "height",
+    "width_factor",
+    "oblique",
+    "tracking",
+    "underline",
+    "overline",
+    "color",
 ];
 
 pub(super) fn text_styles(node: &Node) -> Result<Vec<TextStyle>, Error> {
@@ -184,18 +200,33 @@ pub(super) fn mtext(
         )?),
         _ => None,
     };
-    let contents = match fields.text("contents") {
-        Some(contents_node) => {
+    let (contents, runs) = match (fields.text("contents"), fields.get("runs")) {
+        (Some(_), Some(runs_node)) => {
+            return Err(bad_value(
+                runs_node,
+                &fields.path_of("runs"),
+                "write either `contents` for plain multiline text or `runs` for inline-formatted spans, not both",
+            ));
+        }
+        (None, Some(runs_node)) => {
+            let runs = parse_mtext_runs(runs_node, &fields.path_of("runs"), units)?;
+            let plain: String = runs.iter().map(|r| r.text.as_str()).collect();
+            if let Some(problem) = contents_problem(&plain) {
+                return Err(bad_value(runs_node, &fields.path_of("runs"), problem));
+            }
+            (plain, runs)
+        }
+        (Some(contents_node), None) => {
             let contents_path = fields.path_of("contents");
             let written = scalar(contents_node, &contents_path, "the text")?;
             let contents = shown_mtext(written);
             if let Some(problem) = contents_problem(&contents) {
                 return Err(bad_value(contents_node, &contents_path, problem));
             }
-            contents
+            (contents, Vec::new())
         }
-        None if field.is_some() => String::new(),
-        None => {
+        (None, None) if field.is_some() => (String::new(), Vec::new()),
+        (None, None) => {
             let _ = fields.require_text("contents")?;
             unreachable!("require_text returns Err when missing")
         }
@@ -225,6 +256,7 @@ pub(super) fn mtext(
         super::annotation_scale::object_annotation(fields, declared_scales)?;
     Ok(MText {
         contents,
+        runs,
         position: point(
             fields.require("position")?,
             &fields.path_of("position"),
@@ -244,6 +276,132 @@ pub(super) fn mtext(
         annotation_scales,
         properties: Default::default(),
     })
+}
+
+fn parse_mtext_runs(node: &Node, path: &str, units: Unit) -> Result<Vec<MTextRun>, Error> {
+    let Kind::Sequence(items) = &node.kind else {
+        return Err(at(
+            Error::new(
+                ErrorCode::WrongType,
+                "runs is a list of formatted text spans, such as `- {text: 'NOTES:', bold: true}`",
+            ),
+            path,
+            node.at,
+        ));
+    };
+    if items.is_empty() {
+        return Err(bad_value(
+            node,
+            path,
+            "runs needs at least one span of text",
+        ));
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for (idx, item) in items.iter().enumerate() {
+        let item_path = format!("{path}[{idx}]");
+        let rf = Fields::of(item, &item_path, &MTEXT_RUN_KEYS, "an mtext run")?;
+        let text_node = rf.require_text("text")?;
+        let text_path = rf.path_of("text");
+        let raw_text = scalar(text_node, &text_path, "the run's text")?.replace("\r\n", "\n");
+        if let Some(c) = raw_text.chars().find(|c| c.is_control() && *c != '\n') {
+            return Err(bad_value(
+                text_node,
+                &text_path,
+                format!(
+                    "text cannot hold the control character `{}`",
+                    c.escape_default()
+                ),
+            ));
+        }
+        let font = match rf.text("font") {
+            Some(f_node) => {
+                let f_path = rf.path_of("font");
+                let name = scalar(f_node, &f_path, "a font family or file name")?;
+                if let Some(problem) = inline_font_name_problem(name) {
+                    return Err(bad_value(f_node, &f_path, problem));
+                }
+                Some(name.trim().to_owned())
+            }
+            None => None,
+        };
+        let bold = optional_flag(&rf, "bold")?;
+        let italic = optional_flag(&rf, "italic")?;
+        let height = match rf.get("height") {
+            Some(h_node) => {
+                let h_path = rf.path_of("height");
+                let h = length(h_node, &h_path, units)?;
+                if h <= 0.0 {
+                    return Err(bad_value(
+                        h_node,
+                        &h_path,
+                        "a text height is more than 0: the height of the capitals",
+                    ));
+                }
+                Some(h)
+            }
+            None => None,
+        };
+        let wf = match rf.get("width_factor") {
+            Some(w_node) => Some(width_factor(w_node, &rf.path_of("width_factor"))?),
+            None => None,
+        };
+        let oblique = match rf.get("oblique") {
+            Some(q_node) => {
+                let q_path = rf.path_of("oblique");
+                let deg = plain_number(q_node, &q_path, "an oblique angle in degrees")?;
+                if !(OBLIQUE_ANGLES.0..=OBLIQUE_ANGLES.1).contains(&deg) {
+                    return Err(bad_value(
+                        q_node,
+                        &q_path,
+                        format!(
+                            "an oblique angle is from {} to {} degrees",
+                            OBLIQUE_ANGLES.0, OBLIQUE_ANGLES.1
+                        ),
+                    ));
+                }
+                Some(deg)
+            }
+            None => None,
+        };
+        let tracking = match rf.get("tracking") {
+            Some(t_node) => {
+                let t_path = rf.path_of("tracking");
+                let trk = plain_number(t_node, &t_path, "a tracking factor")?;
+                if !(TRACKING_FACTORS.0..=TRACKING_FACTORS.1).contains(&trk) {
+                    return Err(bad_value(
+                        t_node,
+                        &t_path,
+                        format!(
+                            "a tracking factor is from {} to {}",
+                            TRACKING_FACTORS.0, TRACKING_FACTORS.1
+                        ),
+                    ));
+                }
+                Some(trk)
+            }
+            None => None,
+        };
+        let underline = optional_flag(&rf, "underline")?;
+        let overline = optional_flag(&rf, "overline")?;
+        let color = match rf.get("color") {
+            Some(c_node) => Some(object_color(c_node, &rf.path_of("color"))?),
+            None => None,
+        };
+        out.push(MTextRun {
+            text: raw_text,
+            font,
+            bold,
+            italic,
+            height,
+            width_factor: wf,
+            oblique,
+            tracking,
+            underline,
+            overline,
+            color,
+        });
+    }
+    Ok(out)
 }
 
 fn optional_flag(fields: &Fields, key: &str) -> Result<bool, Error> {

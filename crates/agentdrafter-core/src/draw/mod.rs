@@ -543,6 +543,8 @@ impl Pen<'_> {
 #[derive(Default)]
 struct Drawn {
     shapes: Vec<Shape>,
+    /// Shapes with an inline colour override (such as MTEXT `\C<n>;` runs, #61).
+    colored: Vec<(Color, Shape)>,
     /// The lines of text it draws, as they read.
     runs: Vec<TextRun>,
     /// The points that count towards the extents without drawing: a
@@ -1074,6 +1076,11 @@ impl<'a> Drawer<'a> {
                     let mut s = m.clone();
                     s.height *= inv;
                     s.width *= inv;
+                    for run in &mut s.runs {
+                        if let Some(h) = &mut run.height {
+                            *h *= inv;
+                        }
+                    }
                     Some(Object::MText(s))
                 }
                 Object::Hatch(h) if !h.is_solid() => {
@@ -1324,6 +1331,14 @@ impl<'a> Drawer<'a> {
             runs: match placed {
                 Some(placed) => lettering.runs.into_iter().map(|r| placed.run(r)).collect(),
                 None => lettering.runs,
+            },
+            colored: match placed {
+                Some(placed) => lettering
+                    .colored
+                    .into_iter()
+                    .map(|(c, s)| (c, placed.shape(s)))
+                    .collect(),
+                None => lettering.colored,
             },
             ..shapes(lettering.shapes)
         };
@@ -1975,10 +1990,18 @@ impl DisplayList {
                 self.wide_arcs
                     .extend(drawn.arcs.into_iter().map(|c| (index, c)));
                 self.add(index, path, pen, drawn.shapes, drawn.reach);
+                for (color, shape) in drawn.colored {
+                    self.add(index, path, Pen { color, ..pen }, vec![shape], Vec::new());
+                }
                 self.add_text(index, path, drawn.runs);
             }
             Shown::Counted => {
-                let points: Vec<Point2> = drawn.shapes.iter().flat_map(Shape::points).collect();
+                let points: Vec<Point2> = drawn
+                    .shapes
+                    .iter()
+                    .chain(drawn.colored.iter().map(|(_, s)| s))
+                    .flat_map(Shape::points)
+                    .collect();
                 self.take_in(points);
                 self.take_in(drawn.reach);
             }
@@ -2055,6 +2078,20 @@ impl DisplayList {
                         clip: None,
                         clip_boundary: None,
                         color: pen.color,
+                        plot_style: plot_style.clone(),
+                        transparency: pen.transparency,
+                        shape,
+                    }));
+                self.items
+                    .extend(drawn.colored.into_iter().map(|(color, shape)| Item {
+                        object: index,
+                        part: None,
+                        nested: Vec::new(),
+                        cell: Some(cell),
+                        viewport: None,
+                        clip: None,
+                        clip_boundary: None,
+                        color,
                         plot_style: plot_style.clone(),
                         transparency: pen.transparency,
                         shape,

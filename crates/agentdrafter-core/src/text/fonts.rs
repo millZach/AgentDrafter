@@ -30,12 +30,20 @@ use crate::settings::Settings;
 /// Open fonts with the same advance widths as common TrueType fonts, by
 /// the file name of the font they stand in for. Each is taken only if it is
 /// in a font folder; none is in this repository.
-const METRIC_TWINS: [(&str, [&str; 2]); 6] = [
+const METRIC_TWINS: [(&str, [&str; 2]); 12] = [
     (
         "arial.ttf",
         ["LiberationSans-Regular.ttf", "Arimo-Regular.ttf"],
     ),
     ("arialbd.ttf", ["LiberationSans-Bold.ttf", "Arimo-Bold.ttf"]),
+    (
+        "ariali.ttf",
+        ["LiberationSans-Italic.ttf", "Arimo-Italic.ttf"],
+    ),
+    (
+        "arialbi.ttf",
+        ["LiberationSans-BoldItalic.ttf", "Arimo-BoldItalic.ttf"],
+    ),
     (
         "times.ttf",
         ["LiberationSerif-Regular.ttf", "Tinos-Regular.ttf"],
@@ -45,6 +53,14 @@ const METRIC_TWINS: [(&str, [&str; 2]); 6] = [
         ["LiberationSerif-Bold.ttf", "Tinos-Bold.ttf"],
     ),
     (
+        "timesi.ttf",
+        ["LiberationSerif-Italic.ttf", "Tinos-Italic.ttf"],
+    ),
+    (
+        "timesbi.ttf",
+        ["LiberationSerif-BoldItalic.ttf", "Tinos-BoldItalic.ttf"],
+    ),
+    (
         "cour.ttf",
         ["LiberationMono-Regular.ttf", "Cousine-Regular.ttf"],
     ),
@@ -52,7 +68,127 @@ const METRIC_TWINS: [(&str, [&str; 2]); 6] = [
         "courbd.ttf",
         ["LiberationMono-Bold.ttf", "Cousine-Bold.ttf"],
     ),
+    (
+        "couri.ttf",
+        ["LiberationMono-Italic.ttf", "Cousine-Italic.ttf"],
+    ),
+    (
+        "courbi.ttf",
+        ["LiberationMono-BoldItalic.ttf", "Cousine-BoldItalic.ttf"],
+    ),
 ];
+
+/// Well-known TrueType families mapped to `[regular, bold, italic, bold_italic]`
+/// file names so MTEXT inline `\fArial|b1|i0;...` resolves to the right face (#61).
+const FAMILY_FACES: [(&str, [&str; 4]); 7] = [
+    (
+        "arial",
+        ["arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"],
+    ),
+    (
+        "helvetica",
+        ["arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"],
+    ),
+    (
+        "times new roman",
+        ["times.ttf", "timesbd.ttf", "timesi.ttf", "timesbi.ttf"],
+    ),
+    (
+        "courier new",
+        ["cour.ttf", "courbd.ttf", "couri.ttf", "courbi.ttf"],
+    ),
+    (
+        "calibri",
+        [
+            "calibri.ttf",
+            "calibrib.ttf",
+            "calibrii.ttf",
+            "calibriz.ttf",
+        ],
+    ),
+    (
+        "verdana",
+        [
+            "verdana.ttf",
+            "verdanab.ttf",
+            "verdanai.ttf",
+            "verdanaz.ttf",
+        ],
+    ),
+    (
+        "tahoma",
+        ["tahoma.ttf", "tahomabd.ttf", "tahoma.ttf", "tahomabd.ttf"],
+    ),
+];
+
+/// Resolves an inline MTEXT font override (`name`, `bold`, `italic`, or the
+/// style's `base_font` when `name` is `None`). Returns `(font, used, has_bold_face, has_italic_face)`
+/// where `has_bold_face` / `has_italic_face` say whether the loaded font file
+/// already supplies bold/italic outlines so the renderer knows whether to apply
+/// synthetic bold/italic styling (#61).
+pub(crate) fn find_inline(
+    name: Option<&str>,
+    base_font: &str,
+    bold: bool,
+    italic: bool,
+    settings: &Settings,
+) -> (Font, FontUsed, bool, bool) {
+    let requested = name.unwrap_or(base_font).trim();
+    let lower = requested.to_ascii_lowercase();
+    let face_idx = usize::from(bold) + 2 * usize::from(italic);
+    // Check known TrueType family names or base file names for bold/italic faces.
+    let family = FAMILY_FACES
+        .iter()
+        .find(|(fam, faces)| *fam == lower || faces.iter().any(|f| f.eq_ignore_ascii_case(&lower)));
+    if let Some((_, faces)) = family {
+        let wanted = faces[face_idx];
+        let (font, used) = find(wanted, settings);
+        if matches!(font, Font::TrueType(_)) {
+            let has_bold = bold && (faces[1] != faces[0]);
+            let has_italic = italic && (faces[2] != faces[0]);
+            return (font, used, has_bold, has_italic);
+        }
+        // If bold/italic face wasn't found, fall back to the regular face.
+        if face_idx != 0 {
+            let (reg_font, reg_used) = find(faces[0], settings);
+            if matches!(reg_font, Font::TrueType(_)) {
+                return (reg_font, reg_used, false, false);
+            }
+        }
+        return (font, used, false, false);
+    }
+    // File name with `.ttf` or `.shx` extension.
+    if FontKind::of(requested).is_some() {
+        let (font, used) = find(requested, settings);
+        return (font, used, false, false);
+    }
+    // Unrecognized family/SHX name without extension: try `<name>.ttf`, then `<name>.shx`.
+    let ttf_name = format!("{requested}.ttf");
+    if let Ok((font, source)) = read(&ttf_name, settings) {
+        let used = FontUsed {
+            requested: requested.to_owned(),
+            used: ttf_name,
+            substituted: false,
+            why: None,
+            source,
+        };
+        return (font, used, false, false);
+    }
+    let shx_name = format!("{requested}.shx");
+    if let Ok((font, source)) = read(&shx_name, settings) {
+        let used = FontUsed {
+            requested: requested.to_owned(),
+            used: shx_name,
+            substituted: false,
+            why: None,
+            source,
+        };
+        return (font, used, false, false);
+    }
+    let (_, mut used) = find(&ttf_name, settings);
+    used.requested = requested.to_owned();
+    (Font::Hershey, used, false, false)
+}
 
 /// A box in a glyph's or a text's own units, with Y up from the baseline.
 #[derive(Clone, Copy, Debug, PartialEq)]
