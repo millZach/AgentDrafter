@@ -160,6 +160,42 @@ _Avoid_: revcloud (alone it is AutoCAD's command name), markup bubble
 A closed polygonal mask, AutoCAD's WIPEOUT object, that hides whatever is drawn beneath it in the background colour (white on paper and in plotted PDFs and PNGs, the model-space background on screen) without trimming or deleting the geometry underneath; its boundary outline is controlled drawing-wide by `wipeout_frame` (`off`, `on`, or `display`, AutoCAD's `WIPEOUTFRAME` / `ACAD_WIPEOUT_VARS`). May appear on a sheet, in a template, in a row, or inside a block.
 _Avoid_: mask (a mask is the display-list shape a wipeout draws), cover, blanking box
 
+**Point style**:
+How `point` (`POINT`) objects draw across a sheet, controlled by AutoCAD's `pdmode` (`PDMODE`: dot, blank, `+`, `×`, or `|`, optionally inside a circle and/or square) and `pdsize` (`PDSIZE`: absolute drawing units when positive, 5% of view height when 0, or percentage of view height when negative). Changed with `set_point_style` (`DDPTYPE`).
+_Avoid_: marker style, node style
+
+**Construction line**:
+An infinite line (`xline`, AutoCAD's XLINE) defined by a point it passes through and a direction vector, clipped to the sheet or viewport view bounds when drawn so it never blows out extents.
+_Avoid_: infinite line, guideline
+
+**Ray**:
+A semi-infinite line (`ray`, AutoCAD's RAY) starting at a base point and extending indefinitely along a direction vector, clipped to the sheet or viewport view bounds when drawn.
+_Avoid_: half-line
+
+**Multiline**:
+A set of parallel lines (`mline`, AutoCAD's MLINE) drawn along a path of vertices with mitered corners, optional background fill, joints and end caps, governed by its multiline style, scale and justification (`top`, `zero` or `bottom`).
+_Avoid_: double line, parallel polyline
+
+**Multiline style**:
+A named definition (`mline_styles`, AutoCAD's MLSTYLE / `ACAD_MLINESTYLE`) giving a multiline's parallel elements (offset, colour and linetype), optional fill colour, joint lines, start/end angles and end-cap flags. Every drawing has AutoCAD's `Standard` (`+0.5` / `-0.5`) without listing it.
+_Avoid_: mline format
+
+**Tolerance**:
+A geometric dimensioning and tolerancing (GD&T) feature control frame (`tolerance`, AutoCAD's TOLERANCE) drawn as boxed compartments holding GD&T symbols (`{\Fgdt;...}`) and datum/tolerance text at a position and direction, sized by its dimension style or `text_height`.
+_Avoid_: GD&T box, callout frame
+
+**Centre mark**:
+A crosshair with optional radial extension lines (`center_mark`, AutoCAD's CENTERMARK) marking the centre of a circle or arc, written into DWG/DXF as an anonymous block insert carrying AutoCAD's `OCS_CENTERMARK` extended data.
+_Avoid_: crosshair, center tick
+
+**Centre line**:
+A centre line segment with independent start and end extensions (`center_line`, AutoCAD's CENTERLINE), written into DWG/DXF as a line carrying AutoCAD's `OCS_CENTERLINE` extended data.
+_Avoid_: axis line
+
+**Shape**:
+A compiled SHX vector symbol placed on a sheet (`shape`, AutoCAD's SHAPE), naming its `.shx` shape file (looked up in font folders, never bundled from Autodesk), shape name or number, position, size, rotation, width factor and oblique angle.
+_Avoid_: glyph (a glyph is a character in a font), symbol (a symbol is usually a block)
+
 **Draw order**:
 The back-to-front sequence in which objects draw: earlier objects draw behind later ones, so a wipeout hides objects drawn before it while objects drawn after it appear on top. Controlled in sheet descriptions by list order, in change sets by `draw_order` (`DRAWORDER` / `DR`), `text_to_front` (`TEXTTOFRONT`), and the optional `draw_order` key on every `add_*` operation, and in DWGs by each space's `ACAD_SORTENTS` (`SORTENTSTABLE`) extension dictionary.
 _Avoid_: z-order (Z is the vertical coordinate axis), layer order (layers do not set draw order)

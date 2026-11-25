@@ -2192,6 +2192,14 @@ fn points_of(object: &Object) -> Vec<(String, Point3)> {
         Object::Wipeout(wipeout) => listed("points", &wipeout.points),
         Object::RasterImage(image) => one("position", image.position),
         Object::PdfUnderlay(underlay) => one("position", underlay.position),
+        Object::Point(pt) => one("position", pt.position),
+        Object::XLine(xl) => one("through", xl.through),
+        Object::Ray(ray) => one("from", ray.from),
+        Object::MLine(ml) => listed("points", &ml.points),
+        Object::Tolerance(tol) => one("position", tol.position),
+        Object::CenterMark(cm) => one("center", cm.center),
+        Object::CenterLine(cl) => vec![("from".to_owned(), cl.from), ("to".to_owned(), cl.to)],
+        Object::Shape(sh) => one("position", sh.position),
         Object::RevisionCloud(cloud) => match &cloud.boundary {
             crate::model::RevisionCloudBoundary::Rectangle { from, to } => {
                 vec![("from".to_owned(), *from), ("to".to_owned(), *to)]

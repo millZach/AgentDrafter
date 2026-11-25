@@ -124,12 +124,15 @@ pub(crate) fn compute_explode(
         Object::MLeader(mleader) => explode_mleader(mleader, sheet, fonts)?,
         Object::Leader(leader) => explode_leader(leader)?,
         Object::Table(table) => explode_table(table, sheet)?,
+        Object::MLine(mline) => explode_mline(mline, sheet)?,
+        Object::CenterMark(cm) => explode_center_mark(cm)?,
         other => {
             return Err(Error::new(
                 ErrorCode::BadValue,
                 format!(
                     "cannot explode a {}; `explode` works on inserts, polylines, donuts, \
-                     revision clouds, hatches, dimensions, multileaders, leaders and tables",
+                     revision clouds, hatches, dimensions, multileaders, leaders, tables, \
+                     multilines and centre marks",
                     other.type_name()
                 ),
             ));
@@ -374,6 +377,97 @@ fn place_object(
             out.properties = properties;
             Some(Object::PdfUnderlay(out))
         }
+        Object::Point(pt) => Some(Object::Point(crate::model::Point {
+            position: placement.point(pt.position),
+            angle: (pt.angle + insert_rotation).rem_euclid(360.0),
+            layer,
+            properties,
+        })),
+        Object::XLine(xl) => {
+            let p0 = placement.point(xl.through);
+            let u = xl.unit_direction();
+            let p1 = placement.point(Point3::new(
+                xl.through.x + u.x,
+                xl.through.y + u.y,
+                xl.through.z + u.z,
+            ));
+            let dir =
+                crate::model::normalize_point3(Point3::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z));
+            Some(Object::XLine(crate::model::XLine {
+                through: p0,
+                direction: dir,
+                layer,
+                properties,
+            }))
+        }
+        Object::Ray(ray) => {
+            let p0 = placement.point(ray.from);
+            let u = ray.unit_direction();
+            let p1 = placement.point(Point3::new(
+                ray.from.x + u.x,
+                ray.from.y + u.y,
+                ray.from.z + u.z,
+            ));
+            let dir =
+                crate::model::normalize_point3(Point3::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z));
+            Some(Object::Ray(crate::model::Ray {
+                from: p0,
+                direction: dir,
+                layer,
+                properties,
+            }))
+        }
+        Object::MLine(ml) => Some(Object::MLine(crate::model::MLine {
+            points: ml.points.iter().map(|&p| placement.point(p)).collect(),
+            style: ml.style.clone(),
+            scale: ml.scale * scale,
+            justification: ml.justification,
+            closed: ml.closed,
+            suppress_start_caps: ml.suppress_start_caps,
+            suppress_end_caps: ml.suppress_end_caps,
+            layer,
+            properties,
+        })),
+        Object::Tolerance(tol) => Some(Object::Tolerance(crate::model::Tolerance {
+            position: placement.point(tol.position),
+            direction: (tol.direction + insert_rotation).rem_euclid(360.0),
+            dimension_style: tol.dimension_style.clone(),
+            text: tol.text.clone(),
+            text_height: tol.text_height.map(|h| h * scale),
+            layer,
+            properties,
+        })),
+        Object::CenterMark(cm) => Some(Object::CenterMark(crate::model::CenterMark {
+            center: placement.point(cm.center),
+            radius: cm.radius * scale,
+            cross_size: cm.cross_size.map(|v| v * scale),
+            cross_gap: cm.cross_gap.map(|v| v * scale),
+            extension: cm.extension.map(|v| v * scale),
+            show_extensions: cm.show_extensions,
+            rotation: (cm.rotation + insert_rotation).rem_euclid(360.0),
+            layer,
+            properties,
+        })),
+        Object::CenterLine(cl) => Some(Object::CenterLine(crate::model::CenterLine {
+            from: placement.point(cl.from),
+            to: placement.point(cl.to),
+            start_extension: cl.start_extension * scale,
+            end_extension: cl.end_extension * scale,
+            layer,
+            properties,
+        })),
+        Object::Shape(sh) => Some(Object::Shape(crate::model::ShxShape {
+            file: sh.file.clone(),
+            name: sh.name.clone(),
+            number: sh.number,
+            position: placement.point(sh.position),
+            size: sh.size * scale,
+            rotation: (sh.rotation + insert_rotation).rem_euclid(360.0),
+            width_factor: sh.width_factor,
+            oblique: sh.oblique,
+            layer,
+            properties,
+        })),
         Object::RevisionCloud(rc) => {
             let boundary = match &rc.boundary {
                 RevisionCloudBoundary::Rectangle { from, to }
@@ -1168,6 +1262,136 @@ fn explode_table(table: &Table, sheet: &Sheet) -> Result<Vec<Object>, Error> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// MLine -> element Line segments + optional joint & square cap Lines
+// ---------------------------------------------------------------------------
+
+fn explode_mline(mline: &crate::model::MLine, sheet: &Sheet) -> Result<Vec<Object>, Error> {
+    let style = sheet
+        .mline_style(&mline.style)
+        .unwrap_or_else(crate::model::MLineStyle::standard);
+    let (chains, min_idx, max_idx) = crate::draw::extra::mline_geometry(mline, &style);
+    if chains.is_empty() {
+        return Ok(Vec::new());
+    }
+    let n = chains[0].len();
+    let closed = mline.closed && n >= 3;
+    let z = mline.points.first().map(|p| p.z).unwrap_or(0.0);
+    let mut out = Vec::new();
+    for (ei, chain) in chains.iter().enumerate() {
+        let elem = &style.elements[ei];
+        let mut props = mline.properties.clone();
+        if elem.color != ObjectColor::ByBlock {
+            props.color = elem.color;
+        }
+        if !matches!(elem.linetype, ObjectLinetype::ByBlock) {
+            props.linetype = elem.linetype.clone();
+        }
+        let seg_count = if closed { n } else { n.saturating_sub(1) };
+        for i in 0..seg_count {
+            let a = chain[i];
+            let b = chain[(i + 1) % n];
+            let pa = Point3::new(a[0], a[1], z);
+            let pb = Point3::new(b[0], b[1], z);
+            if non_degenerate_line(pa, pb) {
+                out.push(Object::Line(Line {
+                    from: pa,
+                    to: pb,
+                    layer: mline.layer.clone(),
+                    properties: props.clone(),
+                }));
+            }
+        }
+    }
+    if min_idx != max_idx {
+        let joint_range = if closed { 0..n } else { 1..n.saturating_sub(1) };
+        if style.display_joints {
+            for vi in joint_range {
+                let pa = Point3::new(chains[min_idx][vi][0], chains[min_idx][vi][1], z);
+                let pb = Point3::new(chains[max_idx][vi][0], chains[max_idx][vi][1], z);
+                if non_degenerate_line(pa, pb) {
+                    out.push(Object::Line(Line {
+                        from: pa,
+                        to: pb,
+                        layer: mline.layer.clone(),
+                        properties: mline.properties.clone(),
+                    }));
+                }
+            }
+        }
+        if !closed {
+            if style.start_square_cap && !mline.suppress_start_caps {
+                let pa = Point3::new(chains[min_idx][0][0], chains[min_idx][0][1], z);
+                let pb = Point3::new(chains[max_idx][0][0], chains[max_idx][0][1], z);
+                if non_degenerate_line(pa, pb) {
+                    out.push(Object::Line(Line {
+                        from: pa,
+                        to: pb,
+                        layer: mline.layer.clone(),
+                        properties: mline.properties.clone(),
+                    }));
+                }
+            }
+            if style.end_square_cap && !mline.suppress_end_caps {
+                let last = n - 1;
+                let pa = Point3::new(chains[min_idx][last][0], chains[min_idx][last][1], z);
+                let pb = Point3::new(chains[max_idx][last][0], chains[max_idx][last][1], z);
+                if non_degenerate_line(pa, pb) {
+                    out.push(Object::Line(Line {
+                        from: pa,
+                        to: pb,
+                        layer: mline.layer.clone(),
+                        properties: mline.properties.clone(),
+                    }));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// CenterMark -> crosshair + optional extension Lines
+// ---------------------------------------------------------------------------
+
+fn explode_center_mark(cm: &crate::model::CenterMark) -> Result<Vec<Object>, Error> {
+    let cross_half = cm.effective_cross_size() * 0.5;
+    let gap = cm.effective_cross_gap();
+    let ext = cm.effective_extension();
+    let (sin, cos) = cm.rotation.to_radians().sin_cos();
+    let pt = |lx: f64, ly: f64| -> Point3 {
+        Point3::new(
+            cm.center.x + lx * cos - ly * sin,
+            cm.center.y + lx * sin + ly * cos,
+            cm.center.z,
+        )
+    };
+    let mut out = Vec::new();
+    let mut push = |a: Point3, b: Point3| {
+        if non_degenerate_line(a, b) {
+            out.push(Object::Line(Line {
+                from: a,
+                to: b,
+                layer: cm.layer.clone(),
+                properties: cm.properties.clone(),
+            }));
+        }
+    };
+    push(pt(-cross_half, 0.0), pt(cross_half, 0.0));
+    push(pt(0.0, -cross_half), pt(0.0, cross_half));
+    if cm.show_extensions {
+        let r0 = cross_half + gap;
+        let r1 = (cm.radius + ext).max(r0);
+        if r1 > r0 + EPS {
+            push(pt(r0, 0.0), pt(r1, 0.0));
+            push(pt(-r0, 0.0), pt(-r1, 0.0));
+            push(pt(0.0, r0), pt(0.0, r1));
+            push(pt(0.0, -r0), pt(0.0, -r1));
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1194,10 +1418,14 @@ mod tests {
             table_styles: Vec::new(),
             mleader_styles: Vec::new(),
             dimension_styles: Vec::new(),
+            mline_styles: Vec::new(),
+            pdmode: 0,
+            pdsize: 0.0,
             blocks: Vec::new(),
             xrefs: Vec::new(),
             resolved_xrefs: Vec::new(),
             resolved_media: Vec::new(),
+            resolved_shapes: Vec::new(),
             objects: Vec::new(),
             paper: None,
             page_setup: None,

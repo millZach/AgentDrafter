@@ -324,6 +324,84 @@ pub(crate) fn compute_stretch(
                 Ok(StretchAction::Untouched)
             }
         }
+        Object::Point(pt) => {
+            if box_.contains(pt.position) {
+                Ok(StretchAction::MoveWhole)
+            } else {
+                Ok(StretchAction::Untouched)
+            }
+        }
+        Object::XLine(xl) => {
+            if box_.contains(xl.through) {
+                Ok(StretchAction::MoveWhole)
+            } else {
+                Ok(StretchAction::Untouched)
+            }
+        }
+        Object::Ray(ray) => {
+            if box_.contains(ray.from) {
+                Ok(StretchAction::MoveWhole)
+            } else {
+                Ok(StretchAction::Untouched)
+            }
+        }
+        Object::MLine(ml) => {
+            let hits: Vec<bool> = ml.points.iter().map(|&p| box_.contains(p)).collect();
+            let count = hits.iter().filter(|&&h| h).count();
+            if count == 0 {
+                Ok(StretchAction::Untouched)
+            } else if count == ml.points.len() {
+                Ok(StretchAction::MoveWhole)
+            } else {
+                let mut updated = ml.clone();
+                updated.points = ml
+                    .points
+                    .iter()
+                    .zip(&hits)
+                    .map(|(&p, &h)| if h { shift(p, delta) } else { p })
+                    .collect();
+                Ok(StretchAction::Replace(Object::MLine(updated)))
+            }
+        }
+        Object::Tolerance(tol) => {
+            if box_.contains(tol.position) {
+                Ok(StretchAction::MoveWhole)
+            } else {
+                Ok(StretchAction::Untouched)
+            }
+        }
+        Object::CenterMark(cm) => {
+            if box_.contains(cm.center) {
+                Ok(StretchAction::MoveWhole)
+            } else {
+                Ok(StretchAction::Untouched)
+            }
+        }
+        Object::CenterLine(cl) => {
+            let a_in = box_.contains(cl.from);
+            let b_in = box_.contains(cl.to);
+            match (a_in, b_in) {
+                (false, false) => Ok(StretchAction::Untouched),
+                (true, true) => Ok(StretchAction::MoveWhole),
+                (true, false) => {
+                    let mut updated = cl.clone();
+                    updated.from = shift(cl.from, delta);
+                    Ok(StretchAction::Replace(Object::CenterLine(updated)))
+                }
+                (false, true) => {
+                    let mut updated = cl.clone();
+                    updated.to = shift(cl.to, delta);
+                    Ok(StretchAction::Replace(Object::CenterLine(updated)))
+                }
+            }
+        }
+        Object::Shape(sh) => {
+            if box_.contains(sh.position) {
+                Ok(StretchAction::MoveWhole)
+            } else {
+                Ok(StretchAction::Untouched)
+            }
+        }
         Object::RevisionCloud(rc) => match &rc.boundary {
             RevisionCloudBoundary::Rectangle { from, to } => {
                 let corners = [

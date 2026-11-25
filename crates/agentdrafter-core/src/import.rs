@@ -1352,6 +1352,106 @@ fn object_value(object: &Object, names: &Names) -> Value {
             put("from", point_value(line.from));
             put("to", point_value(line.to));
         }
+        Object::Point(pt) => {
+            put("position", point_value(pt.position));
+            if pt.angle != 0.0 {
+                put("angle", json!(pt.angle));
+            }
+        }
+        Object::XLine(xl) => {
+            put("through", point_value(xl.through));
+            put("direction", point_value(xl.unit_direction()));
+        }
+        Object::Ray(ray) => {
+            put("from", point_value(ray.from));
+            put("direction", point_value(ray.unit_direction()));
+        }
+        Object::MLine(ml) => {
+            put(
+                "points",
+                Value::Array(ml.points.iter().map(|&p| point_value(p)).collect()),
+            );
+            if ml.style != crate::model::STANDARD_MLINE_STYLE {
+                put("style", json!(ml.style));
+            }
+            if ml.scale != 1.0 {
+                put("scale", json!(ml.scale));
+            }
+            if !ml.justification.is_zero() {
+                put("justification", json!(ml.justification));
+            }
+            if ml.closed {
+                put("closed", json!(true));
+            }
+            if ml.suppress_start_caps {
+                put("suppress_start_caps", json!(true));
+            }
+            if ml.suppress_end_caps {
+                put("suppress_end_caps", json!(true));
+            }
+        }
+        Object::Tolerance(tol) => {
+            put("position", point_value(tol.position));
+            put("text", json!(tol.text));
+            if tol.direction != 0.0 {
+                put("direction", json!(tol.direction));
+            }
+            if tol.dimension_style != crate::model::STANDARD_DIMENSION_STYLE {
+                put("dimension_style", json!(tol.dimension_style));
+            }
+            if let Some(h) = tol.text_height {
+                put("text_height", json!(h));
+            }
+        }
+        Object::CenterMark(cm) => {
+            put("center", point_value(cm.center));
+            put("radius", json!(cm.radius));
+            if let Some(v) = cm.cross_size {
+                put("cross_size", json!(v));
+            }
+            if let Some(v) = cm.cross_gap {
+                put("cross_gap", json!(v));
+            }
+            if let Some(v) = cm.extension {
+                put("extension", json!(v));
+            }
+            if !cm.show_extensions {
+                put("show_extensions", json!(false));
+            }
+            if cm.rotation != 0.0 {
+                put("rotation", json!(cm.rotation));
+            }
+        }
+        Object::CenterLine(cl) => {
+            put("from", point_value(cl.from));
+            put("to", point_value(cl.to));
+            if cl.start_extension != 0.0 {
+                put("start_extension", json!(cl.start_extension));
+            }
+            if cl.end_extension != 0.0 {
+                put("end_extension", json!(cl.end_extension));
+            }
+        }
+        Object::Shape(sh) => {
+            put("file", json!(sh.file));
+            if !sh.name.is_empty() {
+                put("name", json!(sh.name));
+            }
+            if let Some(n) = sh.number {
+                put("number", json!(n));
+            }
+            put("position", point_value(sh.position));
+            put("size", json!(sh.size));
+            if sh.rotation != 0.0 {
+                put("rotation", json!(sh.rotation));
+            }
+            if sh.width_factor != 1.0 {
+                put("width_factor", json!(sh.width_factor));
+            }
+            if sh.oblique != 0.0 {
+                put("oblique", json!(sh.oblique));
+            }
+        }
         Object::Polyline(polyline) => {
             let flat = polyline.is_flat();
             let last = polyline.points.len().saturating_sub(1);

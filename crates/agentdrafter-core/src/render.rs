@@ -247,7 +247,12 @@ fn render_within(
     check(request)?;
     let through = through(request, settings)?;
     let source = request.source.as_path();
-    let record = read_record(source)?;
+    let mut record = read_record(source)?;
+    if let Some(dir) = source.parent() {
+        crate::text::fonts::resolve_sheet_shapes(&mut record.sheet, settings, &[dir]);
+    } else {
+        crate::text::fonts::resolve_sheet_shapes(&mut record.sheet, settings, &[]);
+    }
     let output = request
         .output
         .clone()

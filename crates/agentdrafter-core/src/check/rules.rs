@@ -726,7 +726,15 @@ impl Sheet<'_> {
             | Object::Ellipse(_)
             | Object::Spline(_)
             | Object::RevisionCloud(_)
-            | Object::Viewport(_) => Drawn::Line,
+            | Object::Viewport(_)
+            | Object::Point(_)
+            | Object::XLine(_)
+            | Object::Ray(_)
+            | Object::MLine(_)
+            | Object::Tolerance(_)
+            | Object::CenterMark(_)
+            | Object::CenterLine(_)
+            | Object::Shape(_) => Drawn::Line,
             Object::Hatch(_)
             | Object::Solid(_)
             | Object::Donut(_)

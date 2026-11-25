@@ -47,6 +47,7 @@ mod annotation_scale;
 mod block;
 mod dimension;
 mod dynamic_block;
+mod extra;
 mod field;
 mod group;
 mod hatch;
@@ -255,10 +256,44 @@ pub(crate) fn write_new_sheet_as(
     if uses_annotation_scales {
         block::register_named_application(&mut drawing, annotation_scale::ACAD_ANNOTATIVE)?;
     }
+    let has_center_line = sheet
+        .objects
+        .iter()
+        .chain(sheet.blocks.iter().flat_map(|b| b.objects.iter()))
+        .any(|o| matches!(o, Object::CenterLine(_)));
+    if has_center_line {
+        extra::ensure_app_id(
+            &mut drawing,
+            acadrust::entities::CENTERLINE_XDATA_APPLICATION,
+        );
+    }
+    let has_center_mark = sheet
+        .objects
+        .iter()
+        .chain(sheet.blocks.iter().flat_map(|b| b.objects.iter()))
+        .any(|o| matches!(o, Object::CenterMark(_)));
+    if has_center_mark {
+        extra::ensure_app_id(
+            &mut drawing,
+            acadrust::entities::CENTERMARK_XDATA_APPLICATION,
+        );
+    }
+    for obj in sheet
+        .objects
+        .iter()
+        .chain(sheet.blocks.iter().flat_map(|b| b.objects.iter()))
+    {
+        if let Object::Shape(sh) = obj {
+            extra::ensure_shape_style(&mut drawing, &sh.file);
+        }
+    }
+    extra::write_point_style(&mut drawing, sheet.pdmode, sheet.pdsize);
     dimension::prepare(&mut drawing, sheet)?;
     // Layers, linetypes, text styles and applications take their handles
     // before the blocks and objects take theirs.
     drawing.assign_table_entry_handles();
+    let mline_style_handles = extra::add_mline_styles(&mut drawing, &sheet.mline_styles);
+    let mut center_mark_counter = 0usize;
     let scale_handles = if uses_annotation_scales {
         annotation_scale::write_scales_and_variables(&mut drawing, sheet)
     } else {
@@ -325,6 +360,45 @@ pub(crate) fn write_new_sheet_as(
                     let (mut e, _) = media::dwg_pdf_underlay(&mut drawing, pdf, h);
                     pdf.layer.clone_into(&mut e.common_mut().layer);
                     set_properties(e.common_mut(), &pdf.properties);
+                    e
+                }
+                Object::MLine(ml) => {
+                    let style = sheet
+                        .mline_style(&ml.style)
+                        .unwrap_or_else(crate::model::MLineStyle::standard);
+                    let sh = mline_style_handles.get(&style.name.to_lowercase()).copied();
+                    let mut e = EntityType::MLine(extra::dwg_mline(ml, &style, sh));
+                    ml.layer.clone_into(&mut e.common_mut().layer);
+                    set_properties(e.common_mut(), &ml.properties);
+                    e
+                }
+                Object::Tolerance(tol) => {
+                    let mut e =
+                        EntityType::Tolerance(extra::dwg_tolerance(&drawing, tol, Some(sheet)));
+                    tol.layer.clone_into(&mut e.common_mut().layer);
+                    set_properties(e.common_mut(), &tol.properties);
+                    e
+                }
+                Object::CenterMark(cm) => {
+                    let mut e = EntityType::Insert(extra::dwg_center_mark(
+                        &mut drawing,
+                        cm,
+                        &mut center_mark_counter,
+                    ));
+                    cm.layer.clone_into(&mut e.common_mut().layer);
+                    set_properties(e.common_mut(), &cm.properties);
+                    e
+                }
+                Object::CenterLine(cl) => {
+                    let mut e = EntityType::Line(extra::dwg_center_line(&mut drawing, cl));
+                    cl.layer.clone_into(&mut e.common_mut().layer);
+                    set_properties(e.common_mut(), &cl.properties);
+                    e
+                }
+                Object::Shape(sh) => {
+                    let mut e = EntityType::Shape(extra::dwg_shape(&mut drawing, sh, Some(sheet)));
+                    sh.layer.clone_into(&mut e.common_mut().layer);
+                    set_properties(e.common_mut(), &sh.properties);
                     e
                 }
                 _ => dwg_object(object, start_of, &sheet.blocks)?,
@@ -456,6 +530,125 @@ pub(crate) fn write_new_sheet_as(
                 Error::new(
                     ErrorCode::DwgWrite,
                     format!("could not add a PDF underlay to the drawing: {e}"),
+                )
+            })?;
+            id_to_handle.insert(written.id.to_lowercase(), handle);
+            continue;
+        }
+        if let Object::MLine(ml) = object {
+            let style = sheet
+                .mline_style(&ml.style)
+                .unwrap_or_else(crate::model::MLineStyle::standard);
+            let sh = mline_style_handles.get(&style.name.to_lowercase()).copied();
+            let mut dwg_ml = EntityType::MLine(extra::dwg_mline(ml, &style, sh));
+            let common = dwg_ml.common_mut();
+            ml.layer.clone_into(&mut common.layer);
+            set_properties(common, &ml.properties);
+            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    dwg_ml.common_mut(),
+                    &ml.properties.plot_style,
+                );
+            }
+            let handle = add_to(&mut drawing, dwg_ml, paper).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add a multiline to the drawing: {e}"),
+                )
+            })?;
+            id_to_handle.insert(written.id.to_lowercase(), handle);
+            continue;
+        }
+        if let Object::Tolerance(tol) = object {
+            let mut dwg_tol =
+                EntityType::Tolerance(extra::dwg_tolerance(&drawing, tol, Some(sheet)));
+            let common = dwg_tol.common_mut();
+            tol.layer.clone_into(&mut common.layer);
+            set_properties(common, &tol.properties);
+            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    dwg_tol.common_mut(),
+                    &tol.properties.plot_style,
+                );
+            }
+            let handle = add_to(&mut drawing, dwg_tol, paper).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add a tolerance to the drawing: {e}"),
+                )
+            })?;
+            id_to_handle.insert(written.id.to_lowercase(), handle);
+            continue;
+        }
+        if let Object::CenterMark(cm) = object {
+            let mut dwg_cm = EntityType::Insert(extra::dwg_center_mark(
+                &mut drawing,
+                cm,
+                &mut center_mark_counter,
+            ));
+            let common = dwg_cm.common_mut();
+            cm.layer.clone_into(&mut common.layer);
+            set_properties(common, &cm.properties);
+            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    dwg_cm.common_mut(),
+                    &cm.properties.plot_style,
+                );
+            }
+            let handle = add_to(&mut drawing, dwg_cm, paper).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add a centre mark to the drawing: {e}"),
+                )
+            })?;
+            id_to_handle.insert(written.id.to_lowercase(), handle);
+            continue;
+        }
+        if let Object::CenterLine(cl) = object {
+            let mut dwg_cl = EntityType::Line(extra::dwg_center_line(&mut drawing, cl));
+            let common = dwg_cl.common_mut();
+            cl.layer.clone_into(&mut common.layer);
+            set_properties(common, &cl.properties);
+            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    dwg_cl.common_mut(),
+                    &cl.properties.plot_style,
+                );
+            }
+            let handle = add_to(&mut drawing, dwg_cl, paper).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add a centre line to the drawing: {e}"),
+                )
+            })?;
+            id_to_handle.insert(written.id.to_lowercase(), handle);
+            continue;
+        }
+        if let Object::Shape(sh) = object {
+            let mut dwg_sh = EntityType::Shape(extra::dwg_shape(&mut drawing, sh, Some(sheet)));
+            let common = dwg_sh.common_mut();
+            sh.layer.clone_into(&mut common.layer);
+            set_properties(common, &sh.properties);
+            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            if named_plot_styles {
+                page_setup::set_entity_plot_style(
+                    &mut drawing,
+                    dwg_sh.common_mut(),
+                    &sh.properties.plot_style,
+                );
+            }
+            let handle = add_to(&mut drawing, dwg_sh, paper).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add a shape to the drawing: {e}"),
                 )
             })?;
             id_to_handle.insert(written.id.to_lowercase(), handle);
@@ -1112,12 +1305,21 @@ fn dwg_object(
                 "a viewport belongs in a sheet's paper space",
             ))
         }
-        Object::RasterImage(_) | Object::PdfUnderlay(_) => {
+        Object::RasterImage(_)
+        | Object::PdfUnderlay(_)
+        | Object::MLine(_)
+        | Object::Tolerance(_)
+        | Object::CenterMark(_)
+        | Object::CenterLine(_)
+        | Object::Shape(_) => {
             return Err(Error::new(
                 ErrorCode::DwgWrite,
-                "raster images and PDF underlays require drawing-level definition wiring",
+                "this object requires drawing-level table or dictionary wiring",
             ))
         }
+        Object::Point(pt) => EntityType::Point(extra::dwg_point(pt)),
+        Object::XLine(xl) => EntityType::XLine(extra::dwg_xline(xl)),
+        Object::Ray(ray) => EntityType::Ray(extra::dwg_ray(ray)),
         Object::Insert(insert) => {
             let Some(definition) = blocks.iter().find(|b| b.name == insert.block) else {
                 return Err(Error::new(
@@ -1526,7 +1728,12 @@ fn contents(
     let blocks_not_read = read
         .iter()
         .zip(&records)
-        .filter(|(b, r)| b.is_none() && !leaders_only(r) && !is_xref_record(r))
+        .filter(|(b, r)| {
+            b.is_none()
+                && !leaders_only(r)
+                && !is_xref_record(r)
+                && !extra::is_center_mark_block(drawing, &r.name)
+        })
         .count();
     let mut blocks = Vec::new();
     let mut block_handles = Vec::new();
@@ -1891,6 +2098,9 @@ fn contents(
         mleader_styles_not_read,
         dimension_styles,
         dimension_styles_not_read,
+        mline_styles: extra::read_mline_styles(drawing),
+        pdmode: drawing.header.point_display_mode,
+        pdsize: drawing.header.point_display_size,
         blocks,
         xrefs,
         block_handles,
@@ -2714,12 +2924,31 @@ fn read_object_in(
     let properties = read_properties_in(common, named_mode, ps_map)?;
     let layer = layer_of(common);
     let object = match dwg_object {
-        EntityType::Line(line) => Object::Line(Line {
-            from: point(line.start),
-            to: point(line.end),
+        EntityType::Line(line) => {
+            if let Some(cl) = extra::try_read_center_line(line, layer.clone(), Default::default()) {
+                Object::CenterLine(cl)
+            } else {
+                Object::Line(Line {
+                    from: point(line.start),
+                    to: point(line.end),
+                    layer,
+                    properties: Default::default(),
+                })
+            }
+        }
+        EntityType::Point(p) => Object::Point(extra::read_point(p, layer, Default::default())),
+        EntityType::XLine(xl) => Object::XLine(extra::read_xline(xl, layer, Default::default())),
+        EntityType::Ray(r) => Object::Ray(extra::read_ray(r, layer, Default::default())),
+        EntityType::MLine(ml) => Object::MLine(extra::read_mline(ml, layer, Default::default())),
+        EntityType::Tolerance(tol) => Object::Tolerance(extra::read_tolerance(
+            drawing?,
+            tol,
             layer,
-            properties: Default::default(),
-        }),
+            Default::default(),
+        )),
+        EntityType::Shape(sh) => {
+            Object::Shape(extra::read_shape(drawing?, sh, layer, Default::default()))
+        }
         EntityType::LwPolyline(flat) if flat.normal == Vector3::UNIT_Z => {
             Object::Polyline(read_flat_polyline(flat, layer)?)
         }
@@ -2810,9 +3039,16 @@ fn read_object_in(
         EntityType::AttributeDefinition(definition) => {
             Object::AttributeDefinition(block::read_attribute_definition(definition, layer)?)
         }
-        EntityType::Insert(insert) => Object::Insert(block::read_insert_in(
-            drawing, insert, layer, blocks, xrefs,
-        )?),
+        EntityType::Insert(insert) => {
+            if let Some(cm) = extra::try_read_center_mark(insert, layer.clone(), Default::default())
+            {
+                Object::CenterMark(cm)
+            } else {
+                Object::Insert(block::read_insert_in(
+                    drawing, insert, layer, blocks, xrefs,
+                )?)
+            }
+        }
         _ => return None,
     };
     let mut object = object;
@@ -3920,10 +4156,14 @@ mod tests {
             table_styles: Vec::new(),
             mleader_styles: Vec::new(),
             dimension_styles: Vec::new(),
+            mline_styles: Vec::new(),
+            pdmode: 0,
+            pdsize: 0.0,
             blocks: Vec::new(),
             xrefs: Vec::new(),
             resolved_xrefs: Vec::new(),
             resolved_media: Vec::new(),
+            resolved_shapes: Vec::new(),
             objects: Vec::new(),
             paper: None,
             page_setup: None,

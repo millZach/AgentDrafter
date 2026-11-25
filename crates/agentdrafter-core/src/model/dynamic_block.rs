@@ -904,6 +904,21 @@ fn translate_object(obj: &mut Object, dv: Point3) {
         Object::Insert(ins) => {
             ins.position = add_pt(ins.position, dv);
         }
+        Object::Point(pt) => pt.position = add_pt(pt.position, dv),
+        Object::XLine(xl) => xl.through = add_pt(xl.through, dv),
+        Object::Ray(ray) => ray.from = add_pt(ray.from, dv),
+        Object::MLine(ml) => {
+            for p in &mut ml.points {
+                *p = add_pt(*p, dv);
+            }
+        }
+        Object::Tolerance(tol) => tol.position = add_pt(tol.position, dv),
+        Object::CenterMark(cm) => cm.center = add_pt(cm.center, dv),
+        Object::CenterLine(cl) => {
+            cl.from = add_pt(cl.from, dv);
+            cl.to = add_pt(cl.to, dv);
+        }
+        Object::Shape(sh) => sh.position = add_pt(sh.position, dv),
         Object::Table(_)
         | Object::MLeader(_)
         | Object::Leader(_)
@@ -1093,6 +1108,60 @@ fn stretch_object(obj: &mut Object, bmin: [f64; 2], bmax: [f64; 2], dv: Point3) 
                 moved = true;
             }
         }
+        Object::Point(pt) => {
+            if in_box(pt.position, bmin, bmax) {
+                pt.position = add_pt(pt.position, dv);
+                moved = true;
+            }
+        }
+        Object::XLine(xl) => {
+            if in_box(xl.through, bmin, bmax) {
+                xl.through = add_pt(xl.through, dv);
+                moved = true;
+            }
+        }
+        Object::Ray(ray) => {
+            if in_box(ray.from, bmin, bmax) {
+                ray.from = add_pt(ray.from, dv);
+                moved = true;
+            }
+        }
+        Object::MLine(ml) => {
+            for p in &mut ml.points {
+                if in_box(*p, bmin, bmax) {
+                    *p = add_pt(*p, dv);
+                    moved = true;
+                }
+            }
+        }
+        Object::Tolerance(tol) => {
+            if in_box(tol.position, bmin, bmax) {
+                tol.position = add_pt(tol.position, dv);
+                moved = true;
+            }
+        }
+        Object::CenterMark(cm) => {
+            if in_box(cm.center, bmin, bmax) {
+                cm.center = add_pt(cm.center, dv);
+                moved = true;
+            }
+        }
+        Object::CenterLine(cl) => {
+            if in_box(cl.from, bmin, bmax) {
+                cl.from = add_pt(cl.from, dv);
+                moved = true;
+            }
+            if in_box(cl.to, bmin, bmax) {
+                cl.to = add_pt(cl.to, dv);
+                moved = true;
+            }
+        }
+        Object::Shape(sh) => {
+            if in_box(sh.position, bmin, bmax) {
+                sh.position = add_pt(sh.position, dv);
+                moved = true;
+            }
+        }
         Object::Table(_)
         | Object::MLeader(_)
         | Object::Leader(_)
@@ -1270,6 +1339,47 @@ fn rotate_object(obj: &mut Object, pivot: Point3, degrees: f64) {
         Object::Insert(ins) => {
             ins.position = rotate_pt(ins.position, pivot, sin, cos);
             ins.rotation = normalize_degrees(ins.rotation + degrees);
+        }
+        Object::Point(pt) => {
+            pt.position = rotate_pt(pt.position, pivot, sin, cos);
+            pt.angle = normalize_degrees(pt.angle + degrees);
+        }
+        Object::XLine(xl) => {
+            xl.through = rotate_pt(xl.through, pivot, sin, cos);
+            xl.direction = crate::model::normalize_point3(Point3::new(
+                xl.direction.x * cos - xl.direction.y * sin,
+                xl.direction.x * sin + xl.direction.y * cos,
+                xl.direction.z,
+            ));
+        }
+        Object::Ray(ray) => {
+            ray.from = rotate_pt(ray.from, pivot, sin, cos);
+            ray.direction = crate::model::normalize_point3(Point3::new(
+                ray.direction.x * cos - ray.direction.y * sin,
+                ray.direction.x * sin + ray.direction.y * cos,
+                ray.direction.z,
+            ));
+        }
+        Object::MLine(ml) => {
+            for p in &mut ml.points {
+                *p = rotate_pt(*p, pivot, sin, cos);
+            }
+        }
+        Object::Tolerance(tol) => {
+            tol.position = rotate_pt(tol.position, pivot, sin, cos);
+            tol.direction = normalize_degrees(tol.direction + degrees);
+        }
+        Object::CenterMark(cm) => {
+            cm.center = rotate_pt(cm.center, pivot, sin, cos);
+            cm.rotation = normalize_degrees(cm.rotation + degrees);
+        }
+        Object::CenterLine(cl) => {
+            cl.from = rotate_pt(cl.from, pivot, sin, cos);
+            cl.to = rotate_pt(cl.to, pivot, sin, cos);
+        }
+        Object::Shape(sh) => {
+            sh.position = rotate_pt(sh.position, pivot, sin, cos);
+            sh.rotation = normalize_degrees(sh.rotation + degrees);
         }
         Object::Table(_)
         | Object::MLeader(_)
@@ -1512,6 +1622,45 @@ fn mirror_object(obj: &mut Object, a: Point3, b: Point3) {
             ins.position = mirror_pt(ins.position, a, b);
             ins.mirrored = !ins.mirrored;
             ins.rotation = normalize_degrees(2.0 * axis_deg - ins.rotation + 180.0);
+        }
+        Object::Point(pt) => {
+            pt.position = mirror_pt(pt.position, a, b);
+            pt.angle = normalize_degrees(2.0 * axis_deg - pt.angle);
+        }
+        Object::XLine(xl) => {
+            let p0 = mirror_pt(xl.through, a, b);
+            let p1 = mirror_pt(add_pt(xl.through, xl.unit_direction()), a, b);
+            xl.through = p0;
+            xl.direction =
+                crate::model::normalize_point3(Point3::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z));
+        }
+        Object::Ray(ray) => {
+            let p0 = mirror_pt(ray.from, a, b);
+            let p1 = mirror_pt(add_pt(ray.from, ray.unit_direction()), a, b);
+            ray.from = p0;
+            ray.direction =
+                crate::model::normalize_point3(Point3::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z));
+        }
+        Object::MLine(ml) => {
+            for p in &mut ml.points {
+                *p = mirror_pt(*p, a, b);
+            }
+        }
+        Object::Tolerance(tol) => {
+            tol.position = mirror_pt(tol.position, a, b);
+            tol.direction = readable(normalize_degrees(2.0 * axis_deg - tol.direction));
+        }
+        Object::CenterMark(cm) => {
+            cm.center = mirror_pt(cm.center, a, b);
+            cm.rotation = normalize_degrees(2.0 * axis_deg - cm.rotation);
+        }
+        Object::CenterLine(cl) => {
+            cl.from = mirror_pt(cl.from, a, b);
+            cl.to = mirror_pt(cl.to, a, b);
+        }
+        Object::Shape(sh) => {
+            sh.position = mirror_pt(sh.position, a, b);
+            sh.rotation = normalize_degrees(2.0 * axis_deg - sh.rotation);
         }
         Object::Table(_)
         | Object::MLeader(_)

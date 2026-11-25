@@ -130,6 +130,12 @@ pub(crate) enum Kind {
     /// Adds, removes, or replaces supported annotation scales on annotative
     /// objects, or toggles their `annotative` flag (`OBJECTSCALE` / `ANNOUPDATE`).
     SetObjectScales,
+    /// Sets drawing-wide point display style (`PDMODE` and/or `PDSIZE`):
+    /// AutoCAD's DDPTYPE / PTYPE.
+    SetPointStyle,
+    /// Adds or updates a named multiline style (`mline_styles` / `ACAD_MLINESTYLE`):
+    /// AutoCAD's MLSTYLE.
+    AddMLineStyle,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -311,8 +317,13 @@ impl Spec {
             Kind::AddGroup => &["G"],
             Kind::SetAnnotationScale => &["SCALELISTEDIT"],
             Kind::SetObjectScales => &["ANNOUPDATE"],
+            Kind::SetPointStyle => &["PTYPE", "PDMODE", "PDSIZE"],
             Kind::Add("image", None) => &["IMAGE"],
             Kind::Add("pdf_underlay", None) => &["PDFUNDERLAY"],
+            Kind::Add("point", None) => &["PO"],
+            Kind::Add("xline", None) => &["XL"],
+            Kind::Add("mline", None) => &["ML"],
+            Kind::Add("tolerance", None) => &["TOL"],
             _ => &[],
         }
     }
@@ -364,7 +375,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 92] = [
+pub(crate) const SPECS: [Spec; 102] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -380,6 +391,14 @@ pub(crate) const SPECS: [Spec; 92] = [
     add("add_wipeout", "WIPEOUT", "wipeout"),
     add("add_image", "IMAGEATTACH", "image"),
     add("add_pdf_underlay", "PDFATTACH", "pdf_underlay"),
+    add("add_point", "POINT", "point"),
+    add("add_xline", "XLINE", "xline"),
+    add("add_ray", "RAY", "ray"),
+    add("add_mline", "MLINE", "mline"),
+    add("add_tolerance", "TOLERANCE", "tolerance"),
+    add("add_center_mark", "CENTERMARK", "center_mark"),
+    add("add_center_line", "CENTERLINE", "center_line"),
+    add("add_shape", "SHAPE", "shape"),
     add("insert_block", "INSERT", "insert"),
     add("add_table", "TABLE", "table"),
     add("add_mleader", "MLEADER", "mleader"),
@@ -640,6 +659,16 @@ pub(crate) const SPECS: [Spec; 92] = [
         name: "set_object_scales",
         alias: "OBJECTSCALE",
         kind: Kind::SetObjectScales,
+    },
+    Spec {
+        name: "set_point_style",
+        alias: "DDPTYPE",
+        kind: Kind::SetPointStyle,
+    },
+    Spec {
+        name: "add_mline_style",
+        alias: "MLSTYLE",
+        kind: Kind::AddMLineStyle,
     },
 ];
 
@@ -1215,9 +1244,10 @@ fn does(spec: &Spec) -> String {
         Kind::Explode => "Explodes one or more compound objects (`target` or `targets`) — an \
                           insert into its evaluated block's objects and visible attributes as \
                           text, a polyline, donut or revision cloud into lines and arcs, and a \
-                          hatch, dimension, multileader, leader or table into the objects that \
-                          draw it. Removes the source object(s) (`deleted`), assigns each new \
-                          object its own ID, and lists them under `created`. AutoCAD's EXPLODE (X)."
+                          hatch, dimension, multileader, leader, table, multiline or centre mark \
+                          into the objects that draw it. Removes the source object(s) (`deleted`), \
+                          assigns each new object its own ID, and lists them under `created`. \
+                          AutoCAD's EXPLODE (X)."
             .to_owned(),
         Kind::SetField => "Attaches, updates, or clears an AutoCAD field (`FIELD`) on a text, \
                            multiline text, or insert attribute (`tag`, with optional `occurrence` \
@@ -1276,6 +1306,16 @@ fn does(spec: &Spec) -> String {
                                   their `annotative` flag (`text`, `mtext`, `dimension`, \
                                   `mleader`, `hatch`, or `insert`). AutoCAD's OBJECTSCALE / \
                                   ANNOUPDATE."
+            .to_owned(),
+        Kind::SetPointStyle => "Sets the drawing-wide point display style (`pdmode` / `PDMODE`) \
+                                and/or point display size (`pdsize` / `PDSIZE`: positive = drawing \
+                                units, 0 = 5% of viewport height, negative = percentage of viewport \
+                                height) on a template or original DWG. AutoCAD's DDPTYPE (PTYPE)."
+            .to_owned(),
+        Kind::AddMLineStyle => "Adds or updates a named multiline style under `mline_styles` \
+                                (`ACAD_MLINESTYLE`), with its parallel `elements` (offset, colour, \
+                                linetype), optional background `fill_color`, `display_joints`, \
+                                `start_angle`, `end_angle`, and end-cap flags. AutoCAD's MLSTYLE."
             .to_owned(),
     }
 }
@@ -1787,9 +1827,10 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
     let target = json!({ "$ref": "#/$defs/target" });
     let mut schema = match spec.kind {
         Kind::Add(object, kind) => {
+            let def_name = crate::description::schema::object_def_name(object);
             let mut schema = defs
                 .get(&format!("op_{object}"))
-                .unwrap_or(&defs[object])
+                .unwrap_or(&defs[def_name])
                 .clone();
             // The engine writes copy_of on a copy; an add does not take it.
             if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
@@ -3281,6 +3322,98 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
             }
             schema
         }
+        Kind::SetPointStyle => {
+            let mut schema = json!({
+                "type": "object",
+                "required": [],
+                "additionalProperties": false,
+                "properties": {
+                    "sheet": {
+                        "description": "A sheet built from the template to edit (optional on an \
+                                        original DWG).",
+                        "$ref": "#/$defs/sheet_name",
+                    },
+                    "template": {
+                        "description": "The template to edit. Give sheet or template.",
+                        "$ref": "#/$defs/template_path",
+                    },
+                    "pdmode": {
+                        "description": "AutoCAD PDMODE point display mode: 0 (dot), 1 (none), \
+                                        2 (+), 3 (x), 4 (|), optionally plus 32 (circle) and/or \
+                                        64 (square).",
+                        "type": "integer",
+                        "enum": [0, 1, 2, 3, 4, 32, 33, 34, 35, 36, 64, 65, 66, 67, 68, 96, 97, 98, 99, 100],
+                    },
+                    "pdsize": {
+                        "description": "AutoCAD PDSIZE point display size: positive for absolute \
+                                        drawing units, 0 for 5% of viewport height, negative for \
+                                        percentage of viewport height.",
+                        "type": "number",
+                    },
+                },
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
+        Kind::AddMLineStyle => {
+            let mut schema = json!({
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": {
+                    "sheet": {
+                        "description": "A sheet built from the template to edit (optional on an \
+                                        original DWG).",
+                        "$ref": "#/$defs/sheet_name",
+                    },
+                    "template": {
+                        "description": "The template to edit. Give sheet or template.",
+                        "$ref": "#/$defs/template_path",
+                    },
+                    "name": {
+                        "description": "Name of the multiline style (e.g. `WALL`, `PIPE`, or \
+                                        `Standard`).",
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "description": { "type": "string" },
+                    "elements": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "required": ["offset"],
+                            "additionalProperties": false,
+                            "properties": {
+                                "offset": { "type": "number" },
+                                "color": { "$ref": "#/$defs/object_color" },
+                                "linetype": { "$ref": "#/$defs/object_linetype" },
+                            },
+                        },
+                    },
+                    "fill_color": { "$ref": "#/$defs/object_color" },
+                    "display_joints": { "type": "boolean" },
+                    "start_angle": { "type": "number", "minimum": 10.0, "maximum": 170.0 },
+                    "end_angle": { "type": "number", "minimum": 10.0, "maximum": 170.0 },
+                    "start_square_cap": { "type": "boolean" },
+                    "start_round_cap": { "type": "boolean" },
+                    "start_inner_arcs_cap": { "type": "boolean" },
+                    "end_square_cap": { "type": "boolean" },
+                    "end_round_cap": { "type": "boolean" },
+                    "end_inner_arcs_cap": { "type": "boolean" },
+                },
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
         Kind::SetObjectScales => {
             let mut schema = json!({
                 "type": "object",
@@ -4372,6 +4505,116 @@ fn read_set_annotation_scale_body(
         add_scales,
         remove_scales,
     })
+}
+
+#[inline(never)]
+fn read_set_point_style_body(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let to = parse_template_or_sheet_target(map, default_sheet, fail)?;
+    let pdmode = match map.get("pdmode") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(n)) => {
+            let Some(v) = n.as_i64().and_then(|v| i16::try_from(v).ok()) else {
+                return Err(fail(
+                    ErrorCode::BadValue,
+                    "expected an integer AutoCAD PDMODE code (0..4, 32..36, 64..68, or 96..100)"
+                        .to_owned(),
+                    "pdmode",
+                ));
+            };
+            if !crate::model::is_valid_pdmode(v) {
+                return Err(fail(
+                    ErrorCode::BadValue,
+                    format!(
+                        "`pdmode` {v} is not a valid AutoCAD PDMODE (expected base 0..4 plus \
+                         optional 32 circle and/or 64 square)"
+                    ),
+                    "pdmode",
+                ));
+            }
+            Some(v)
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected an integer under `pdmode`".to_owned(),
+                "pdmode",
+            ))
+        }
+    };
+    let pdsize = match map.get("pdsize") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(n)) => {
+            let v = n.as_f64().unwrap_or(f64::NAN);
+            if !v.is_finite() {
+                return Err(fail(
+                    ErrorCode::BadValue,
+                    "`pdsize` must be a finite number".to_owned(),
+                    "pdsize",
+                ));
+            }
+            Some(v)
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected a number under `pdsize`".to_owned(),
+                "pdsize",
+            ))
+        }
+    };
+    if pdmode.is_none() && pdsize.is_none() {
+        return Err(fail(
+            ErrorCode::MissingKey,
+            "set_point_style needs at least one of `pdmode` or `pdsize`".to_owned(),
+            "",
+        ));
+    }
+    Ok(Body::SetPointStyle { to, pdmode, pdsize })
+}
+
+#[inline(never)]
+fn read_add_mline_style_body(
+    map: &Map<String, Value>,
+    default_sheet: Option<&str>,
+    fail: &dyn Fn(ErrorCode, String, &str) -> Error,
+) -> Result<Body, Error> {
+    let to = parse_template_or_sheet_target(map, default_sheet, fail)?;
+    let name = match map.get("name") {
+        Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
+        Some(Value::String(_)) => {
+            return Err(fail(
+                ErrorCode::BadValue,
+                "a multiline style name cannot be empty".to_owned(),
+                "name",
+            ))
+        }
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected a multiline style name under `name`".to_owned(),
+                "name",
+            ))
+        }
+        None => {
+            return Err(fail(
+                ErrorCode::MissingKey,
+                "missing key `name`, the multiline style's name".to_owned(),
+                "name",
+            ))
+        }
+    };
+    let mut style = Map::new();
+    for (k, v) in map {
+        if matches!(k.as_str(), "op" | "sheet" | "template" | "name") {
+            continue;
+        }
+        style.insert(k.clone(), v.clone());
+    }
+    Ok(Body::AddMLineStyle { to, name, style })
 }
 
 #[inline(never)]
@@ -5630,6 +5873,18 @@ pub(crate) enum Body {
         add: Vec<String>,
         remove: Vec<String>,
     },
+    /// Sets drawing-wide point display style (`PDMODE` / `PDSIZE`, AutoCAD `DDPTYPE`).
+    SetPointStyle {
+        to: AddTo,
+        pdmode: Option<i16>,
+        pdsize: Option<f64>,
+    },
+    /// Adds or updates a named multiline style (`mline_styles`, AutoCAD `MLSTYLE`).
+    AddMLineStyle {
+        to: AddTo,
+        name: String,
+        style: Map<String, Value>,
+    },
 }
 
 /// How a `break` operation specifies its cut points, as parsed (may hold
@@ -6487,7 +6742,8 @@ fn operation(
                         })
                         .map(|(k, v)| (k.clone(), v.clone())),
                 );
-                let schema = defs.get(&format!("op_{object}")).unwrap_or(&defs[object]);
+                let def_name = crate::description::schema::object_def_name(object);
+                let schema = defs.get(&format!("op_{object}")).unwrap_or(&defs[def_name]);
                 let mut snaps = Vec::new();
                 for (key, value) in &keys {
                     let slots: Vec<&Value> = schema["properties"].get(key).into_iter().collect();
@@ -7198,6 +7454,30 @@ fn operation(
         Kind::SetObjectScales => {
             keys(&["target", "targets", "annotative", "scales", "add", "remove"])?;
             read_set_object_scales_body(map, default_sheet, &fail)?
+        }
+        Kind::SetPointStyle => {
+            keys(&["sheet", "template", "pdmode", "pdsize"])?;
+            read_set_point_style_body(map, default_sheet, &fail)?
+        }
+        Kind::AddMLineStyle => {
+            keys(&[
+                "sheet",
+                "template",
+                "name",
+                "description",
+                "elements",
+                "fill_color",
+                "display_joints",
+                "start_angle",
+                "end_angle",
+                "start_square_cap",
+                "start_round_cap",
+                "start_inner_arcs_cap",
+                "end_square_cap",
+                "end_round_cap",
+                "end_inner_arcs_cap",
+            ])?;
+            read_add_mline_style_body(map, default_sheet, &fail)?
         }
         Kind::SetAttributes => {
             keys(&[

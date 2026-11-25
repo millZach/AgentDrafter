@@ -537,13 +537,22 @@ pub fn display_list_with(
         (_, Some(p)) => Some(p.files.clone()),
         _ => None,
     };
-    let drawn = read(
+    let mut drawn = read(
         source,
         request.sheet.as_deref(),
         request.entry,
         files.clone(),
         request,
     )?;
+    if let Some(dir) = if source.is_dir() {
+        Some(source)
+    } else {
+        source.parent()
+    } {
+        crate::text::fonts::resolve_sheet_shapes(&mut drawn.sheet, settings, &[dir]);
+    } else {
+        crate::text::fonts::resolve_sheet_shapes(&mut drawn.sheet, settings, &[]);
+    }
     // A sheet drawn in several layouts draws the one asked for.
     let pages = drawn.sheet.pages();
     let layouts: Vec<String> = if pages.len() > 1 {

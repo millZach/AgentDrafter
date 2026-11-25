@@ -1323,6 +1323,14 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::SetAnnotationScale {
                 to: AddTo::Sheet(sheet),
                 ..
+            }
+            | Body::SetPointStyle {
+                to: AddTo::Sheet(sheet),
+                ..
+            }
+            | Body::AddMLineStyle {
+                to: AddTo::Sheet(sheet),
+                ..
             } => (sheet, "sheet"),
             Body::Table {
                 to: AddTo::Template(written),
@@ -1357,6 +1365,14 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 ..
             }
             | Body::SetAnnotationScale {
+                to: AddTo::Template(written),
+                ..
+            }
+            | Body::SetPointStyle {
+                to: AddTo::Template(written),
+                ..
+            }
+            | Body::AddMLineStyle {
                 to: AddTo::Template(written),
                 ..
             } => {
@@ -2036,6 +2052,14 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         );
     }
 
+    if let Body::SetPointStyle { to, pdmode, pdsize } = &op.body {
+        return apply_set_point_style(at, op, to, *pdmode, *pdsize);
+    }
+
+    if let Body::AddMLineStyle { to, name, style } = &op.body {
+        return apply_add_mline_style(at, op, to, name, style);
+    }
+
     if let Body::Block {
         library,
         import: Some(import),
@@ -2141,6 +2165,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::EditGroup { .. }
         | Body::SetAnnotationScale { .. }
         | Body::SetObjectScales { .. }
+        | Body::SetPointStyle { .. }
+        | Body::AddMLineStyle { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -2637,6 +2663,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::EditGroup { .. }
         | Body::SetAnnotationScale { .. }
         | Body::SetObjectScales { .. }
+        | Body::SetPointStyle { .. }
+        | Body::AddMLineStyle { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -3285,6 +3313,105 @@ fn apply_set_annotation_scale(
             path,
             format!(
                 "updates annotation scales ({summary}) in template `{written}`, so on {}",
+                every_sheet(&files.names(&sheets))
+            ),
+        )),
+        sheets,
+        refuse: false,
+    }
+}
+
+/// Applies `set_point_style` (`DDPTYPE` / `PTYPE` / `PDMODE` / `PDSIZE`) to a
+/// template's top-level `pdmode` and/or `pdsize`.
+fn apply_set_point_style(
+    at: &mut Attempt,
+    op: &Operation,
+    to: &AddTo,
+    pdmode: Option<i16>,
+    pdsize: Option<f64>,
+) -> Applied {
+    let files = at.files;
+    let t = match to {
+        AddTo::Template(written) => files.template(written).expect("checked before"),
+        AddTo::Sheet(sheet) => files.template_of[files.sheet(sheet).expect("checked before")],
+    };
+    let sheets = files.templates[t].sheets.clone();
+    let fail = |code: ErrorCode, message: String, field: &str| Applied {
+        sheets: sheets.clone(),
+        outcome: Err(op_error(op.index, op.spec.name, code, message, field)),
+        refuse: false,
+    };
+    if let Some(refusal) = many_paths(files, FileRef::Template(t), op, "template") {
+        return refusal;
+    }
+    let written = files.templates[t].written.clone();
+    let record = match at.template(t) {
+        Ok(record) => record,
+        Err(e) => return fail(e.code, e.message, ""),
+    };
+    let path = record.path.clone();
+    let summary = match record.set_point_style(pdmode, pdsize) {
+        Ok(s) => s,
+        Err(e) => {
+            let field = e.field.as_deref().unwrap_or("");
+            return fail(e.code, e.message, field);
+        }
+    };
+    Applied {
+        outcome: Ok(empty_done(
+            path,
+            format!(
+                "sets point style ({summary}) in template `{written}`, so on {}",
+                every_sheet(&files.names(&sheets))
+            ),
+        )),
+        sheets,
+        refuse: false,
+    }
+}
+
+/// Applies `add_mline_style` (`MLSTYLE`) to a template's top-level
+/// `mline_styles` mapping.
+fn apply_add_mline_style(
+    at: &mut Attempt,
+    op: &Operation,
+    to: &AddTo,
+    name: &str,
+    style: &Map<String, Value>,
+) -> Applied {
+    let files = at.files;
+    let t = match to {
+        AddTo::Template(written) => files.template(written).expect("checked before"),
+        AddTo::Sheet(sheet) => files.template_of[files.sheet(sheet).expect("checked before")],
+    };
+    let sheets = files.templates[t].sheets.clone();
+    let fail = |code: ErrorCode, message: String, field: &str| Applied {
+        sheets: sheets.clone(),
+        outcome: Err(op_error(op.index, op.spec.name, code, message, field)),
+        refuse: false,
+    };
+    if let Some(refusal) = many_paths(files, FileRef::Template(t), op, "template") {
+        return refusal;
+    }
+    let written = files.templates[t].written.clone();
+    let record = match at.template(t) {
+        Ok(record) => record,
+        Err(e) => return fail(e.code, e.message, ""),
+    };
+    let path = record.path.clone();
+    let updated = match record.add_mline_style(name, style) {
+        Ok(u) => u,
+        Err(e) => {
+            let field = e.field.as_deref().unwrap_or("");
+            return fail(e.code, e.message, field);
+        }
+    };
+    let verb = if updated { "updates" } else { "adds" };
+    Applied {
+        outcome: Ok(empty_done(
+            path,
+            format!(
+                "{verb} multiline style `{name}` in template `{written}`, so on {}",
                 every_sheet(&files.names(&sheets))
             ),
         )),
@@ -12435,6 +12562,14 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::SetAnnotationScale {
             to: AddTo::Template(written),
             ..
+        }
+        | Body::SetPointStyle {
+            to: AddTo::Template(written),
+            ..
+        }
+        | Body::AddMLineStyle {
+            to: AddTo::Template(written),
+            ..
         } => files.template(written) == Some(files.template_of[k]),
         Body::BindXref {
             to: AddTo::Template(written),
@@ -12476,6 +12611,14 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
             ..
         }
         | Body::SetAnnotationScale {
+            to: AddTo::Sheet(sheet),
+            ..
+        }
+        | Body::SetPointStyle {
+            to: AddTo::Sheet(sheet),
+            ..
+        }
+        | Body::AddMLineStyle {
             to: AddTo::Sheet(sheet),
             ..
         } => files
@@ -12616,7 +12759,9 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
         | Body::Ungroup { .. }
         | Body::EditGroup { .. }
         | Body::SetAnnotationScale { .. }
-        | Body::SetObjectScales { .. } => {
+        | Body::SetObjectScales { .. }
+        | Body::SetPointStyle { .. }
+        | Body::AddMLineStyle { .. } => {
             let key = rest.rsplit('.').next().unwrap_or("");
             if key.is_empty() {
                 "name".to_owned()
@@ -12992,6 +13137,15 @@ fn target_words(op: &Operation) -> String {
             to: AddTo::Sheet(s),
             ..
         } => format!("annotation scales of sheet `{s}`'s template"),
+        Body::SetPointStyle {
+            to: AddTo::Template(t),
+            ..
+        } => format!("point style in template `{t}`"),
+        Body::SetPointStyle {
+            to: AddTo::Sheet(s),
+            ..
+        } => format!("point style of sheet `{s}`'s template"),
+        Body::AddMLineStyle { name, .. } => format!("multiline style `{name}`"),
         Body::SetObjectScales { targets, .. } => match targets.as_slice() {
             [(only, _)] => only.words(),
             many => format!("{} objects", many.len()),

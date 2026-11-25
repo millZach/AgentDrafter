@@ -223,6 +223,7 @@ pub(crate) fn read_block_library(text: &str) -> Result<(BlockLibrary, Vec<Notice
         table_styles: &[],
         mleader_styles: &[],
         dimension_styles: &[],
+        mline_styles: &[],
         layouts: &[],
         annotation_scales: &[],
     };

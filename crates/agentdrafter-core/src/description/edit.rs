@@ -771,6 +771,64 @@ impl RecordFile {
         Ok(parts.join("; "))
     }
 
+    /// Updates a template's drawing-wide point display style (`PDMODE` /
+    /// `PDSIZE` via `set_point_style` / `DDPTYPE`).
+    pub(crate) fn set_point_style(
+        &mut self,
+        pdmode: Option<i16>,
+        pdsize: Option<f64>,
+    ) -> Result<String, Error> {
+        use super::extra::{PDMODE_KEY, PDSIZE_KEY};
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(mode) = pdmode {
+            self.set_top_scalar(PDMODE_KEY, Value::Number(mode.into()))?;
+            parts.push(format!("pdmode = {mode}"));
+        }
+        if let Some(size) = pdsize {
+            self.set_top_scalar(PDSIZE_KEY, serde_json::json!(size))?;
+            parts.push(format!("pdsize = {size}"));
+        }
+        Ok(parts.join("; "))
+    }
+
+    /// Adds or updates a named multiline style under `mline_styles:`
+    /// (`add_mline_style` / `MLSTYLE`). Returns `true` if an existing style
+    /// with the same name was updated, `false` if a new style was added.
+    pub(crate) fn add_mline_style(
+        &mut self,
+        name: &str,
+        style: &Map<String, Value>,
+    ) -> Result<bool, Error> {
+        use super::extra::{MLINE_STYLES_KEY, MLINE_STYLE_KEYS};
+        let mut ordered: Vec<(&String, &Value)> = style.iter().collect();
+        ordered.sort_by_key(|(key, _)| {
+            MLINE_STYLE_KEYS
+                .iter()
+                .position(|k| k == key)
+                .unwrap_or(MLINE_STYLE_KEYS.len())
+        });
+        let value = Node::new(Kind::Mapping(
+            ordered
+                .into_iter()
+                .map(|(k, v)| new_entry(k, node_of(v)))
+                .collect(),
+        ));
+        let entries = self.table_mut(MLINE_STYLES_KEY)?;
+        let updated = if let Some(existing) = entries
+            .iter_mut()
+            .find(|e| e.key.eq_ignore_ascii_case(name))
+        {
+            existing.key = name.to_owned();
+            existing.value = value;
+            true
+        } else {
+            entries.push(new_entry(name, value));
+            false
+        };
+        self.note_rewrite(MLINE_STYLES_KEY);
+        Ok(updated)
+    }
+
     /// Reads an object's explicit `annotative` flag (if written) and
     /// `annotation_scales` list (if written).
     pub(crate) fn object_annotation_state(
@@ -2264,9 +2322,15 @@ impl RecordFile {
         for entry in keys.iter_mut() {
             let field = key_path(&object_path, &entry.key);
             match (kind.as_str(), entry.key.as_str()) {
-                ("line", "from" | "to")
-                | ("arc" | "circle" | "ellipse", "center")
-                | ("text" | "mtext" | "insert" | "table" | "image" | "pdf_underlay", "position") => {
+                ("line" | "center_line", "from" | "to")
+                | ("arc" | "circle" | "ellipse" | "center_mark", "center")
+                | (
+                    "text" | "mtext" | "insert" | "table" | "image" | "pdf_underlay" | "point"
+                    | "tolerance" | "shape",
+                    "position",
+                )
+                | ("xline", "through")
+                | ("ray", "from") => {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
                 ("donut", "center") => move_point(&mut entry.value, by, units, &field)?,
@@ -2289,7 +2353,7 @@ impl RecordFile {
                 ("dimension", "center" | "point" | "location" | "feature") => {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
-                ("polyline" | "leader" | "dimension" | "wipeout", "points")
+                ("polyline" | "leader" | "dimension" | "wipeout" | "mline", "points")
                 | ("image" | "pdf_underlay", "clip")
                 | ("spline", "fit_points" | "control_points")
                 | ("solid", "corners")

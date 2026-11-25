@@ -227,7 +227,7 @@ pub(crate) struct Resolved {
 
 /// The object types a transform takes: every type a sheet holds but a
 /// viewport, which is a window on the paper.
-const TRANSFORMED_TYPES: [&str; 20] = [
+const TRANSFORMED_TYPES: [&str; 28] = [
     "line",
     "polyline",
     "arc",
@@ -243,6 +243,14 @@ const TRANSFORMED_TYPES: [&str; 20] = [
     "wipeout",
     "image",
     "pdf_underlay",
+    "point",
+    "xline",
+    "ray",
+    "mline",
+    "tolerance",
+    "center_mark",
+    "center_line",
+    "shape",
     "insert",
     "table",
     "mleader",
@@ -402,16 +410,22 @@ impl At<'_> {
         for entry in keys.iter_mut() {
             let field = key_path(path, &entry.key);
             let did = match (kind, entry.key.as_str()) {
-                ("line", "from" | "to")
-                | ("arc" | "circle" | "ellipse" | "donut", "center")
-                | ("text" | "mtext" | "insert" | "image" | "pdf_underlay", "position")
+                ("line" | "center_line", "from" | "to")
+                | ("arc" | "circle" | "ellipse" | "donut" | "center_mark", "center")
+                | (
+                    "text" | "mtext" | "insert" | "image" | "pdf_underlay" | "point" | "tolerance"
+                    | "shape",
+                    "position",
+                )
+                | ("xline", "through")
+                | ("ray", "from")
                 | ("dimension", "center" | "point" | "location" | "feature") => {
                     self.point(&mut entry.value, &field)?
                 }
                 ("polyline", "points") => self.vertices(&mut entry.value, &field)?,
                 ("spline", "fit_points" | "control_points")
                 | ("solid", "corners")
-                | ("wipeout", "points")
+                | ("wipeout" | "mline", "points")
                 | ("image" | "pdf_underlay", "clip")
                 | ("revision_cloud", "polygon")
                 | ("leader" | "dimension", "points") => self.points(&mut entry.value, &field)?,
@@ -479,6 +493,9 @@ impl At<'_> {
                     any
                 }
                 ("ellipse", "major_axis") => self.vector(&mut entry.value, &field)?,
+                ("xline" | "ray", "direction") if !scaled => {
+                    self.vector(&mut entry.value, &field)?
+                }
                 ("polyline", "width")
                 | ("arc" | "circle", "radius")
                 | ("donut", "outside_diameter" | "inside_diameter")
@@ -486,23 +503,29 @@ impl At<'_> {
                 | ("text" | "mtext", "height")
                 | ("mtext", "width")
                 | ("image", "width" | "height")
+                | ("tolerance", "text_height")
+                | ("center_mark", "radius" | "cross_size" | "cross_gap" | "extension")
+                | ("center_line", "start_extension" | "end_extension")
+                | ("shape", "size")
                 | ("mleader" | "leader", "arrow_size" | "gap")
                 | ("mleader", "landing")
                     if scaled =>
                 {
                     self.length(&mut entry.value, &field)?
                 }
-                ("insert", "scale") | ("pdf_underlay", "scale") | ("hatch", "scale")
+                ("insert", "scale")
+                | ("pdf_underlay", "scale")
+                | ("mline", "scale")
+                | ("hatch", "scale")
                     if scaled && !solid =>
                 {
                     self.number(&mut entry.value, &field)?
                 }
-                ("text" | "mtext", "rotation") => {
+                ("text" | "mtext", "rotation") | ("tolerance", "direction") => {
                     self.angle(&mut entry.value, &field, &|a| t.text_angle(a))?
                 }
-                ("image" | "pdf_underlay", "rotation") => {
-                    self.angle(&mut entry.value, &field, &|a| t.angle(a))?
-                }
+                ("image" | "pdf_underlay" | "center_mark" | "shape", "rotation")
+                | ("point", "angle") => self.angle(&mut entry.value, &field, &|a| t.angle(a))?,
                 ("insert", "rotation") => match t.how {
                     How::Mirror(_) => {
                         self.angle(&mut entry.value, &field, &|a| t.angle(a) + 180.0)?
@@ -576,6 +599,31 @@ impl At<'_> {
                     keys.push(new_entry("scale", Node::scalar(number_text(k))));
                     changed.push("scale".to_owned());
                 }
+            }
+            "point" if !written(keys, "angle") => {
+                let r = t.angle(0.0);
+                if r != 0.0 {
+                    keys.push(new_entry("angle", Node::scalar(number_text(r))));
+                    changed.push("angle".to_owned());
+                }
+            }
+            "tolerance" if !written(keys, "direction") => {
+                let r = t.text_angle(0.0);
+                if r != 0.0 {
+                    keys.push(new_entry("direction", Node::scalar(number_text(r))));
+                    changed.push("direction".to_owned());
+                }
+            }
+            "center_mark" | "shape" if !written(keys, "rotation") => {
+                let r = t.angle(0.0);
+                if r != 0.0 {
+                    keys.push(new_entry("rotation", Node::scalar(number_text(r))));
+                    changed.push("rotation".to_owned());
+                }
+            }
+            "mline" if scaled && !written(keys, "scale") => {
+                keys.push(new_entry("scale", Node::scalar(number_text(k))));
+                changed.push("scale".to_owned());
             }
             "insert" => {
                 if !written(keys, "rotation") {

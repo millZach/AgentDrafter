@@ -97,6 +97,14 @@ fn object_kind_name(object: &Object) -> &'static str {
         Object::Leader(_) => "leader",
         Object::Dimension(_) => "dimension",
         Object::Viewport(_) => "viewport",
+        Object::Point(_) => "point",
+        Object::XLine(_) => "xline",
+        Object::Ray(_) => "ray",
+        Object::MLine(_) => "mline",
+        Object::Tolerance(_) => "tolerance",
+        Object::CenterMark(_) => "center_mark",
+        Object::CenterLine(_) => "center_line",
+        Object::Shape(_) => "shape",
     }
 }
 
@@ -1733,6 +1741,136 @@ pub(crate) fn object_to_record_keys(
             }
             push_common_keys(&mut keys, &ins.layer, &ins.properties, id, name, space);
             ("insert", keys)
+        }
+        Object::Point(pt) => {
+            keys.insert("position".to_owned(), pt_json(pt.position));
+            if pt.angle.abs() > 1e-12 {
+                keys.insert("angle".to_owned(), json!(pt.angle));
+            }
+            push_common_keys(&mut keys, &pt.layer, &pt.properties, id, name, space);
+            ("point", keys)
+        }
+        Object::XLine(xl) => {
+            keys.insert("through".to_owned(), pt_json(xl.through));
+            keys.insert("direction".to_owned(), pt_json(xl.direction));
+            push_common_keys(&mut keys, &xl.layer, &xl.properties, id, name, space);
+            ("xline", keys)
+        }
+        Object::Ray(ray) => {
+            keys.insert("from".to_owned(), pt_json(ray.from));
+            keys.insert("direction".to_owned(), pt_json(ray.direction));
+            push_common_keys(&mut keys, &ray.layer, &ray.properties, id, name, space);
+            ("ray", keys)
+        }
+        Object::MLine(ml) => {
+            keys.insert(
+                "points".to_owned(),
+                Value::Array(ml.points.iter().map(|&p| pt_json(p)).collect()),
+            );
+            if !ml
+                .style
+                .eq_ignore_ascii_case(crate::model::STANDARD_MLINE_STYLE)
+            {
+                keys.insert("style".to_owned(), Value::String(ml.style.clone()));
+            }
+            if (ml.scale - 1.0).abs() > 1e-12 {
+                keys.insert("scale".to_owned(), json!(ml.scale));
+            }
+            if ml.justification != crate::model::MLineJustification::Top {
+                let jname = match ml.justification {
+                    crate::model::MLineJustification::Top => "top",
+                    crate::model::MLineJustification::Zero => "zero",
+                    crate::model::MLineJustification::Bottom => "bottom",
+                };
+                keys.insert("justification".to_owned(), Value::String(jname.to_owned()));
+            }
+            if ml.closed {
+                keys.insert("closed".to_owned(), Value::Bool(true));
+            }
+            if ml.suppress_start_caps {
+                keys.insert("suppress_start_caps".to_owned(), Value::Bool(true));
+            }
+            if ml.suppress_end_caps {
+                keys.insert("suppress_end_caps".to_owned(), Value::Bool(true));
+            }
+            push_common_keys(&mut keys, &ml.layer, &ml.properties, id, name, space);
+            ("mline", keys)
+        }
+        Object::Tolerance(tol) => {
+            keys.insert("position".to_owned(), pt_json(tol.position));
+            keys.insert("text".to_owned(), Value::String(tol.text.clone()));
+            if tol.direction.abs() > 1e-12 {
+                keys.insert("direction".to_owned(), json!(tol.direction));
+            }
+            if !tol
+                .dimension_style
+                .eq_ignore_ascii_case(crate::model::STANDARD_DIMENSION_STYLE)
+            {
+                keys.insert(
+                    "dimension_style".to_owned(),
+                    Value::String(tol.dimension_style.clone()),
+                );
+            }
+            if let Some(h) = tol.text_height {
+                keys.insert("text_height".to_owned(), json!(h));
+            }
+            push_common_keys(&mut keys, &tol.layer, &tol.properties, id, name, space);
+            ("tolerance", keys)
+        }
+        Object::CenterMark(cm) => {
+            keys.insert("center".to_owned(), pt_json(cm.center));
+            keys.insert("radius".to_owned(), json!(cm.radius));
+            if let Some(v) = cm.cross_size {
+                keys.insert("cross_size".to_owned(), json!(v));
+            }
+            if let Some(v) = cm.cross_gap {
+                keys.insert("cross_gap".to_owned(), json!(v));
+            }
+            if let Some(v) = cm.extension {
+                keys.insert("extension".to_owned(), json!(v));
+            }
+            if !cm.show_extensions {
+                keys.insert("show_extensions".to_owned(), Value::Bool(false));
+            }
+            if cm.rotation.abs() > 1e-12 {
+                keys.insert("rotation".to_owned(), json!(cm.rotation));
+            }
+            push_common_keys(&mut keys, &cm.layer, &cm.properties, id, name, space);
+            ("center_mark", keys)
+        }
+        Object::CenterLine(cl) => {
+            keys.insert("from".to_owned(), pt_json(cl.from));
+            keys.insert("to".to_owned(), pt_json(cl.to));
+            if cl.start_extension.abs() > 1e-12 {
+                keys.insert("start_extension".to_owned(), json!(cl.start_extension));
+            }
+            if cl.end_extension.abs() > 1e-12 {
+                keys.insert("end_extension".to_owned(), json!(cl.end_extension));
+            }
+            push_common_keys(&mut keys, &cl.layer, &cl.properties, id, name, space);
+            ("center_line", keys)
+        }
+        Object::Shape(sh) => {
+            keys.insert("file".to_owned(), Value::String(sh.file.clone()));
+            if !sh.name.is_empty() {
+                keys.insert("shape".to_owned(), Value::String(sh.name.clone()));
+            }
+            if let Some(num) = sh.number {
+                keys.insert("number".to_owned(), json!(num));
+            }
+            keys.insert("position".to_owned(), pt_json(sh.position));
+            keys.insert("size".to_owned(), json!(sh.size));
+            if sh.rotation.abs() > 1e-12 {
+                keys.insert("rotation".to_owned(), json!(sh.rotation));
+            }
+            if (sh.width_factor - 1.0).abs() > 1e-12 {
+                keys.insert("width_factor".to_owned(), json!(sh.width_factor));
+            }
+            if sh.oblique.abs() > 1e-12 {
+                keys.insert("oblique".to_owned(), json!(sh.oblique));
+            }
+            push_common_keys(&mut keys, &sh.layer, &sh.properties, id, name, space);
+            ("shape", keys)
         }
         _ => unreachable!("object_to_record_keys only produces drawn or insert objects"),
     }
