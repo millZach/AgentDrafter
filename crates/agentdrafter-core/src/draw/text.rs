@@ -56,7 +56,15 @@ pub(super) fn draw_text(
         width_factor: text.width_factor,
     };
     let mut out = Drawn::default();
-    place.line(font, &text.contents, [0.0, 0.0], tolerance, &mut out);
+    place.line(
+        font,
+        &text.contents,
+        [0.0, 0.0],
+        tolerance,
+        text.underline,
+        text.overline,
+        &mut out,
+    );
     out.lettering(lineweight)
 }
 
@@ -193,7 +201,15 @@ pub(super) fn draw_mtext(
         // The point of the ink as far across as the position is across the
         // box lands on the box at that point: its left edge, middle or right.
         let x = left + box_width * across - (ink_left + (ink_right - ink_left) * across);
-        place.line(font, line, [x, top + baseline], tolerance, &mut out);
+        place.line(
+            font,
+            line,
+            [x, top + baseline],
+            tolerance,
+            text.underline,
+            text.overline,
+            &mut out,
+        );
     }
     out.lettering(lineweight)
 }
@@ -295,7 +311,17 @@ impl Drawn {
 impl Placement {
     /// Draws one line of text whose baseline starts at `start`, in the
     /// text's own frame before it is turned.
-    fn line(&self, font: &Font, contents: &str, start: Point2, tolerance: f64, out: &mut Drawn) {
+    #[allow(clippy::too_many_arguments)]
+    fn line(
+        &self,
+        font: &Font,
+        contents: &str,
+        start: Point2,
+        tolerance: f64,
+        underline: bool,
+        overline: bool,
+        out: &mut Drawn,
+    ) {
         let (sin, cos) = self.rotation.to_radians().sin_cos();
         let along = self.height * self.width_factor;
         let up = self.height;
@@ -306,6 +332,43 @@ impl Placement {
                 self.origin[0] + u * cos - v * sin,
                 self.origin[1] + u * sin + v * cos,
             ]
+        };
+        let add_decorations = |from: (f64, f64), to: (f64, f64), out: &mut Drawn| {
+            if (!underline && !overline) || to.0 <= from.0 {
+                return;
+            }
+            if let Some((u_pos, u_thick)) = font.decoration_bar() {
+                let thick = u_thick.max(0.04);
+                let mut push_bar = |y_bot: f64, y_top: f64| {
+                    out.fills.push(vec![
+                        place(from, [0.0, y_bot]),
+                        place(to, [0.0, y_bot]),
+                        place(to, [0.0, y_top]),
+                        place(from, [0.0, y_top]),
+                        place(from, [0.0, y_bot]),
+                    ]);
+                };
+                if underline {
+                    let y_top = u_pos.min(-0.05);
+                    push_bar(y_top - thick, y_top);
+                }
+                if overline {
+                    let gap = (-u_pos).max(0.05);
+                    let y_bot = 1.0 + gap;
+                    push_bar(y_bot, y_bot + thick);
+                }
+            } else {
+                // SHX and Hershey stroke fonts: single stroke below baseline
+                // and above cap height in the text's lineweight (#60).
+                if underline {
+                    out.strokes
+                        .push(vec![place(from, [0.0, -0.2]), place(to, [0.0, -0.2])]);
+                }
+                if overline {
+                    out.strokes
+                        .push(vec![place(from, [0.0, 1.2]), place(to, [0.0, 1.2])]);
+                }
+            }
         };
         let mut pen = (0.0, 0.0);
         // The run of characters along the baseline: one unit of the font's
@@ -351,14 +414,17 @@ impl Placement {
                 });
             }
             run.characters.push((glyph.character, glyph.advance.0));
+            let run_end = (pen.0 + glyph.advance.0, run_pen.1);
             pen = (pen.0 + glyph.advance.0, pen.1 + glyph.advance.1);
             // An SHX character can move the pen off the line; the characters
             // after it run along a baseline of their own.
             if glyph.advance.1 != 0.0 {
+                add_decorations(run_pen, run_end, out);
                 out.runs.push(std::mem::replace(&mut run, run_from(pen)));
                 run_pen = pen;
             }
         }
+        add_decorations(run_pen, (pen.0, run_pen.1), out);
         out.runs.push(run);
         out.runs.retain(|run| !run.characters.is_empty());
     }
@@ -392,5 +458,139 @@ mod tests {
     fn without_a_width_lines_break_only_where_the_contents_do() {
         assert_eq!(wrap(&Font::Hershey, "A B\nC", 0.0), ["A B", "C"]);
         assert_eq!(wrap(&Font::Hershey, "A\n\nB", 0.0), ["A", "", "B"]);
+    }
+
+    #[test]
+    fn underline_and_overline_draw_strokes_for_shx_and_bars_for_truetype() {
+        use crate::model::Point3;
+        use crate::settings::Settings;
+        use crate::text::truetype::tests::made_up_font;
+        use crate::text::{Justify, TextStyle};
+
+        // Hershey (stroke font): underline adds a stroke at y = -0.2 * h and
+        // overline at y = 1.2 * h, spanning the line's advance.
+        let sheet =
+            crate::description::parse_sheet_description("units: mm\nobjects: []\n").unwrap();
+        let fonts = SheetFonts::find(&sheet, &Settings::default());
+        let plain = Text {
+            contents: "AB".into(),
+            position: Point3::new(10.0, 20.0, 0.0),
+            height: 5.0,
+            style: "Standard".into(),
+            width_factor: 1.0,
+            rotation: 0.0,
+            justify: Justify::Left,
+            underline: false,
+            overline: false,
+            layer: "0".into(),
+            field: None,
+            annotative: false,
+            annotation_scales: Vec::new(),
+            properties: Default::default(),
+        };
+        let plain_strokes = match draw_text(&plain, &fonts, 0.25, 0.01).shapes.as_slice() {
+            [Shape::Stroke { runs, .. }] => runs.len(),
+            other => panic!("expected one stroke shape: {other:?}"),
+        };
+        let styled = Text {
+            underline: true,
+            overline: true,
+            ..plain.clone()
+        };
+        let styled_runs = match draw_text(&styled, &fonts, 0.25, 0.01).shapes.as_slice() {
+            [Shape::Stroke { runs, .. }] => runs.clone(),
+            other => panic!("expected one stroke shape: {other:?}"),
+        };
+        assert_eq!(styled_runs.len(), plain_strokes + 2);
+        let under = &styled_runs[plain_strokes];
+        let over = &styled_runs[plain_strokes + 1];
+        assert!((under[0][0] - 10.0).abs() < 1e-9);
+        assert!((under[0][1] - 19.0).abs() < 1e-9); // 20 - 0.2 * 5
+        assert!(under[1][0] > 10.0);
+        assert!((under[1][1] - 19.0).abs() < 1e-9);
+        assert!((over[0][1] - 26.0).abs() < 1e-9); // 20 + 1.2 * 5
+        assert!((over[1][1] - 26.0).abs() < 1e-9);
+
+        // TrueType font: underline and overline draw filled bars.
+        let dir = std::env::temp_dir().join(format!("agentdrafter-uline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("madeup.ttf"),
+            made_up_font(&[('A', 700, [50, 0, 650, 700])]),
+        )
+        .unwrap();
+        let mut ttf_sheet =
+            crate::description::parse_sheet_description("units: mm\nobjects: []\n").unwrap();
+        ttf_sheet
+            .text_styles
+            .push(TextStyle::new("ttf", "madeup.ttf"));
+        let settings = Settings {
+            font_folders: vec![dir.clone()],
+            ..Settings::default()
+        };
+        let ttf_fonts = SheetFonts::find(&ttf_sheet, &settings);
+        let ttf_plain = Text {
+            style: "ttf".into(),
+            contents: "AA".into(),
+            ..plain
+        };
+        let plain_fills = match draw_text(&ttf_plain, &ttf_fonts, 0.25, 0.01)
+            .shapes
+            .as_slice()
+        {
+            [Shape::Fill { contours, .. }] => contours.len(),
+            other => panic!("expected one fill shape: {other:?}"),
+        };
+        let ttf_styled = Text {
+            underline: true,
+            overline: true,
+            ..ttf_plain
+        };
+        let styled_fills = match draw_text(&ttf_styled, &ttf_fonts, 0.25, 0.01)
+            .shapes
+            .as_slice()
+        {
+            [Shape::Fill { contours, .. }] => contours.clone(),
+            other => panic!("expected one fill shape: {other:?}"),
+        };
+        assert_eq!(styled_fills.len(), plain_fills + 2);
+        // Underline bar sits strictly below y = 20; overline bar sits above y = 25.
+        assert!(styled_fills[plain_fills].iter().all(|p| p[1] < 20.0));
+        assert!(styled_fills[plain_fills + 1].iter().all(|p| p[1] > 25.0));
+
+        // MText with underline skips blank lines.
+        let mtext = MText {
+            contents: "A\n\nB".into(),
+            position: Point3::new(0.0, 10.0, 0.0),
+            height: 2.0,
+            width: 0.0,
+            style: "Standard".into(),
+            width_factor: None,
+            rotation: 0.0,
+            justify: Attachment::TopLeft,
+            underline: true,
+            overline: false,
+            layer: "0".into(),
+            field: None,
+            annotative: false,
+            annotation_scales: Vec::new(),
+            properties: Default::default(),
+        };
+        let plain_m = MText {
+            underline: false,
+            ..mtext.clone()
+        };
+        let m_plain_n = match draw_mtext(&plain_m, &fonts, 0.25, 0.01).shapes.as_slice() {
+            [Shape::Stroke { runs, .. }] => runs.len(),
+            other => panic!("expected stroke: {other:?}"),
+        };
+        let m_under_n = match draw_mtext(&mtext, &fonts, 0.25, 0.01).shapes.as_slice() {
+            [Shape::Stroke { runs, .. }] => runs.len(),
+            other => panic!("expected stroke: {other:?}"),
+        };
+        // Two non-empty lines (`A` and `B`) get 1 underline stroke each; blank line gets none.
+        assert_eq!(m_under_n, m_plain_n + 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

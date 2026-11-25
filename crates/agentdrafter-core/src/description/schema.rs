@@ -1142,6 +1142,14 @@ fn text_defs(defs: &mut Map<String, Value>) {
                                     (bottom is the lowest descender). Without it, left.",
                     "enum": Justify::ALL.map(Justify::name),
                 },
+                "underline": {
+                    "description": "Whether the text is underlined (AutoCAD's %%u). Without it, false.",
+                    "type": "boolean",
+                },
+                "overline": {
+                    "description": "Whether the text is overlined (AutoCAD's %%o). Without it, false.",
+                    "type": "boolean",
+                },
                 "annotative": { "$ref": "#/$defs/annotative" },
                 "annotation_scales": { "$ref": "#/$defs/object_annotation_scales" },
             }),
@@ -1191,6 +1199,14 @@ fn text_defs(defs: &mut Map<String, Value>) {
                     "description": "Which point of the text's box sits at its position. \
                                     Without it, top_left.",
                     "enum": Attachment::ALL.map(Attachment::name),
+                },
+                "underline": {
+                    "description": "Whether the text is underlined (AutoCAD's \\L...\\l). Without it, false.",
+                    "type": "boolean",
+                },
+                "overline": {
+                    "description": "Whether the text is overlined (AutoCAD's \\O...\\o). Without it, false.",
+                    "type": "boolean",
                 },
                 "annotative": { "$ref": "#/$defs/annotative" },
                 "annotation_scales": { "$ref": "#/$defs/object_annotation_scales" },

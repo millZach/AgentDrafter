@@ -184,6 +184,17 @@ impl Font {
         }
     }
 
+    /// For a TrueType font, the underline `(position, thickness)` in units
+    /// where capitals stand 1 tall, so underline and overline draw as filled
+    /// bars scaled with the text. `None` for stroke fonts (SHX and Hershey),
+    /// which draw underline and overline as strokes in the text's lineweight.
+    pub(crate) fn decoration_bar(&self) -> Option<(f64, f64)> {
+        match self {
+            Font::TrueType(font) => Some(font.underline_metrics()),
+            Font::Shx(_) | Font::Hershey => None,
+        }
+    }
+
     /// `text` laid out on one line from the origin, in units where the
     /// capitals stand 1 tall.
     pub(crate) fn line(&self, text: &str) -> Line {

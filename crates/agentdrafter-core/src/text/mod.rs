@@ -270,6 +270,12 @@ pub struct Text {
     /// Where the text sits against its position.
     #[serde(default)]
     pub justify: Justify,
+    /// Whether the text is underlined (AutoCAD's `%%u`).
+    #[serde(default, skip_serializing_if = "crate::model::is_false")]
+    pub underline: bool,
+    /// Whether the text is overlined (AutoCAD's `%%o`).
+    #[serde(default, skip_serializing_if = "crate::model::is_false")]
+    pub overline: bool,
     #[serde(default = "crate::model::layer_zero")]
     pub layer: String,
     /// Optional AutoCAD field attached to this text (`FIELD`).
@@ -312,6 +318,12 @@ pub struct MText {
     /// Where the box sits against its position.
     #[serde(default)]
     pub justify: Attachment,
+    /// Whether the text is underlined (AutoCAD's `\L...\l`).
+    #[serde(default, skip_serializing_if = "crate::model::is_false")]
+    pub underline: bool,
+    /// Whether the text is overlined (AutoCAD's `\O...\o`).
+    #[serde(default, skip_serializing_if = "crate::model::is_false")]
+    pub overline: bool,
     #[serde(default = "crate::model::layer_zero")]
     pub layer: String,
     /// Optional AutoCAD field attached to this multiline text (`FIELD`).

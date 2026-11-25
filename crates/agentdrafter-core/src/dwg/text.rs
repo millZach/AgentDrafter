@@ -113,7 +113,10 @@ pub(super) fn dwg_text(text: &Text, start: Point3) -> DwgText {
         .into_iter()
         .find(|(j, _, _)| *j == text.justify)
         .unwrap_or(JUSTIFICATIONS[0]);
-    let mut dwg_text = DwgText::with_value(text_code(&text.contents), vector(start));
+    let mut dwg_text = DwgText::with_value(
+        text_styled_code(&text.contents, text.underline, text.overline),
+        vector(start),
+    );
     dwg_text.height = text.height;
     dwg_text.rotation = text.rotation.to_radians();
     dwg_text.width_factor = text.width_factor;
@@ -130,7 +133,12 @@ pub(super) fn dwg_text(text: &Text, start: Point3) -> DwgText {
 
 pub(super) fn dwg_mtext(text: &MText) -> DwgMText {
     let mut dwg_text = DwgMText::with_value(
-        mtext_code(&text.contents, text.width_factor),
+        mtext_styled_code(
+            &text.contents,
+            text.width_factor,
+            text.underline,
+            text.overline,
+        ),
         vector(text.position),
     );
     dwg_text.height = text.height;
@@ -207,14 +215,17 @@ pub(super) fn read_text(dwg_text: &DwgText, layer: String) -> Option<Text> {
     } else {
         dwg_text.alignment_point?
     };
+    let (contents, underline, overline) = text_styled_contents(&dwg_text.value)?;
     Some(Text {
-        contents: text_contents(&dwg_text.value)?,
+        contents,
         position: point(position),
         height: dwg_text.height,
         style: style_name(&dwg_text.style),
         width_factor: dwg_text.width_factor,
         rotation: normalize_degrees(dwg_text.rotation.to_degrees()),
         justify,
+        underline,
+        overline,
         layer,
         field: None,
         annotative: false,
@@ -224,7 +235,8 @@ pub(super) fn read_text(dwg_text: &DwgText, layer: String) -> Option<Text> {
 }
 
 /// Multiline text the core can read back exactly: no columns, background,
-/// line spacing of its own or formatting codes.
+/// line spacing of its own or inline formatting codes beyond whole-text
+/// underline/overline and width factor.
 pub(super) fn read_mtext(dwg_text: &DwgMText, layer: String) -> Option<MText> {
     let plain = dwg_text.normal == Vector3::UNIT_Z
         && matches!(
@@ -239,7 +251,7 @@ pub(super) fn read_mtext(dwg_text: &DwgMText, layer: String) -> Option<MText> {
     if !plain {
         return None;
     }
-    let (contents, width_factor) = mtext_contents(&dwg_text.value)?;
+    let (contents, width_factor, underline, overline) = mtext_styled_contents(&dwg_text.value)?;
     let (justify, _) = ATTACHMENTS
         .into_iter()
         .find(|(_, a)| *a == dwg_text.attachment_point)?;
@@ -252,6 +264,8 @@ pub(super) fn read_mtext(dwg_text: &DwgMText, layer: String) -> Option<MText> {
         width_factor,
         rotation: normalize_degrees(dwg_text.rotation.to_degrees()),
         justify,
+        underline,
+        overline,
         layer,
         field: None,
         annotative: dwg_text.is_annotative,
@@ -271,6 +285,20 @@ pub(super) fn style_name(name: &str) -> String {
 /// Codes a single line of text: each `%` of a run of two or more becomes `%%%`.
 pub(super) fn text_code(contents: &str) -> String {
     code_percent_runs(contents, "%%%")
+}
+
+/// Codes a single line of text with whole-line AutoCAD `%%u` (underline) and
+/// `%%o` (overline) switches (#60).
+pub(super) fn text_styled_code(contents: &str, underline: bool, overline: bool) -> String {
+    let mut coded = String::with_capacity(contents.len() + 6);
+    if underline {
+        coded.push_str("%%u");
+    }
+    if overline {
+        coded.push_str("%%o");
+    }
+    coded.push_str(&text_code(contents));
+    coded
 }
 
 /// Each `%` of a run of two or more written as `code`; a lone `%` as it is.
@@ -298,11 +326,42 @@ fn code_percent_runs(contents: &str, code: &str) -> String {
 /// What a single line of text says, decoded, or none when it holds a code
 /// other than `%%%`, such as `%%d`, `%%u` or `\U+00B0`.
 pub(super) fn text_contents(value: &str) -> Option<String> {
+    let (contents, underline, overline) = text_styled_contents(value)?;
+    (!underline && !overline).then_some(contents)
+}
+
+/// Decodes a single line of text, honouring whole-line `%%u`/`%%U` (underline)
+/// and `%%o`/`%%O` (overline) switches (#60). Returns `None` if partial
+/// mid-string underline/overline toggling or any other unmodelled code
+/// (`%%d`, `\U+`, `\M+`) is present.
+pub(super) fn text_styled_contents(value: &str) -> Option<(String, bool, bool)> {
     let mut contents = String::with_capacity(value.len());
     let mut rest = value;
+    let mut cur_u = false;
+    let mut cur_o = false;
+    let mut seen: Option<(bool, bool)> = None;
     while let Some(c) = rest.chars().next() {
         if let Some(after) = rest.strip_prefix("%%%") {
+            if let Some(prev) = seen {
+                if prev != (cur_u, cur_o) {
+                    return None;
+                }
+            } else {
+                seen = Some((cur_u, cur_o));
+            }
             contents.push('%');
+            rest = after;
+        } else if let Some(after) = rest
+            .strip_prefix("%%u")
+            .or_else(|| rest.strip_prefix("%%U"))
+        {
+            cur_u = !cur_u;
+            rest = after;
+        } else if let Some(after) = rest
+            .strip_prefix("%%o")
+            .or_else(|| rest.strip_prefix("%%O"))
+        {
+            cur_o = !cur_o;
             rest = after;
         } else if ["%%", "\\U+", "\\M+"]
             .iter()
@@ -310,18 +369,43 @@ pub(super) fn text_contents(value: &str) -> Option<String> {
         {
             return None;
         } else {
+            if let Some(prev) = seen {
+                if prev != (cur_u, cur_o) {
+                    return None;
+                }
+            } else {
+                seen = Some((cur_u, cur_o));
+            }
             contents.push(c);
             rest = &rest[c.len_utf8()..];
         }
     }
-    Some(contents)
+    let (underline, overline) = seen.unwrap_or((cur_u, cur_o));
+    Some((contents, underline, overline))
 }
 
 /// Codes multiline text, with its width factor at the start when it has one.
 pub(super) fn mtext_code(contents: &str, width_factor: Option<f64>) -> String {
-    let mut coded = String::with_capacity(contents.len() + 8);
+    mtext_styled_code(contents, width_factor, false, false)
+}
+
+/// Codes multiline text with optional width factor and whole-text underline
+/// (`\L...\l`) and overline (`\O...\o`) switches (#60).
+pub(super) fn mtext_styled_code(
+    contents: &str,
+    width_factor: Option<f64>,
+    underline: bool,
+    overline: bool,
+) -> String {
+    let mut coded = String::with_capacity(contents.len() + 16);
     if let Some(factor) = width_factor {
         coded.push_str(&format!("\\W{factor};"));
+    }
+    if underline {
+        coded.push_str("\\L");
+    }
+    if overline {
+        coded.push_str("\\O");
     }
     let escaped: String = contents
         .chars()
@@ -334,12 +418,26 @@ pub(super) fn mtext_code(contents: &str, width_factor: Option<f64>) -> String {
         })
         .collect();
     coded.push_str(&code_percent_runs(&escaped, PERCENT_CODE));
+    if overline {
+        coded.push_str("\\o");
+    }
+    if underline {
+        coded.push_str("\\l");
+    }
     coded
 }
 
 /// What multiline text says, decoded, and its width factor, or none when
-/// it holds a code the core does not model.
+/// it holds a code the core does not model (including underline/overline).
 pub(super) fn mtext_contents(value: &str) -> Option<(String, Option<f64>)> {
+    let (contents, width_factor, underline, overline) = mtext_styled_contents(value)?;
+    (!underline && !overline).then_some((contents, width_factor))
+}
+
+/// Decodes multiline text, its optional width factor, and whole-text
+/// underline (`\L`/`\l`) and overline (`\O`/`\o`) switches (#60). Returns
+/// `None` if partial formatting or any unmodelled code is present.
+pub(super) fn mtext_styled_contents(value: &str) -> Option<(String, Option<f64>, bool, bool)> {
     let (width_factor, mut rest) = match value.strip_prefix("\\W") {
         Some(after) => {
             let (number, text) = after.split_once(';')?;
@@ -353,17 +451,36 @@ pub(super) fn mtext_contents(value: &str) -> Option<(String, Option<f64>)> {
         None => (None, value),
     };
     let mut contents = String::with_capacity(rest.len());
+    let mut cur_u = false;
+    let mut cur_o = false;
+    let mut seen: Option<(bool, bool)> = None;
     while let Some(c) = rest.chars().next() {
         let (decoded, length) = match c {
             '\\' => {
                 if rest.starts_with(PERCENT_CODE) {
-                    ('%', PERCENT_CODE.len())
+                    (Some('%'), PERCENT_CODE.len())
                 } else {
                     match rest[1..].chars().next()? {
-                        '\\' => ('\\', 2),
-                        '{' => ('{', 2),
-                        '}' => ('}', 2),
-                        'P' => ('\n', 2),
+                        '\\' => (Some('\\'), 2),
+                        '{' => (Some('{'), 2),
+                        '}' => (Some('}'), 2),
+                        'P' => (Some('\n'), 2),
+                        'L' => {
+                            cur_u = true;
+                            (None, 2)
+                        }
+                        'l' => {
+                            cur_u = false;
+                            (None, 2)
+                        }
+                        'O' => {
+                            cur_o = true;
+                            (None, 2)
+                        }
+                        'o' => {
+                            cur_o = false;
+                            (None, 2)
+                        }
                         _ => return None,
                     }
                 }
@@ -371,12 +488,24 @@ pub(super) fn mtext_contents(value: &str) -> Option<(String, Option<f64>)> {
             '{' | '}' => return None,
             // A run of `%` written as it is reads as a code in AutoCAD.
             '%' if rest.starts_with("%%") => return None,
-            c => (c, c.len_utf8()),
+            c => (Some(c), c.len_utf8()),
         };
-        contents.push(decoded);
+        if let Some(ch) = decoded {
+            if ch != '\n' {
+                if let Some(prev) = seen {
+                    if prev != (cur_u, cur_o) {
+                        return None;
+                    }
+                } else {
+                    seen = Some((cur_u, cur_o));
+                }
+            }
+            contents.push(ch);
+        }
         rest = &rest[length..];
     }
-    Some((contents, width_factor))
+    let (underline, overline) = seen.unwrap_or((cur_u, cur_o));
+    Some((contents, width_factor, underline, overline))
 }
 
 #[cfg(test)]
@@ -398,6 +527,61 @@ mod tests {
         // Codes the core does not model are not read.
         assert_eq!(text_contents("90%%d"), None);
         assert_eq!(text_contents("\\U+00B0"), None);
+        assert_eq!(text_contents("%%uNOTES"), None);
+    }
+
+    #[test]
+    fn single_line_underline_and_overline_round_trip() {
+        for (contents, u, o, coded) in [
+            ("NOTES:", true, false, "%%uNOTES:"),
+            ("HEADER", false, true, "%%oHEADER"),
+            ("TITLE", true, true, "%%u%%oTITLE"),
+            ("50%%", true, false, "%%u50%%%%%%"),
+            ("%%u", true, false, "%%u%%%%%%u"),
+            ("PLAIN", false, false, "PLAIN"),
+        ] {
+            assert_eq!(text_styled_code(contents, u, o), coded);
+            assert_eq!(
+                text_styled_contents(coded),
+                Some((contents.to_owned(), u, o))
+            );
+        }
+        // Uppercase codes, reversed order and optional closing switches read back.
+        assert_eq!(
+            text_styled_contents("%%UNOTES:%%U"),
+            Some(("NOTES:".to_owned(), true, false))
+        );
+        assert_eq!(
+            text_styled_contents("%%O%%uBOTH%%u%%O"),
+            Some(("BOTH".to_owned(), true, true))
+        );
+        // Partial mid-string toggling and other codes are not flattened.
+        for unmodelled in ["A %%uB%%u C", "%%uA%%u B", "A %%oB", "90%%d", "\\U+00B0"] {
+            assert_eq!(text_styled_contents(unmodelled), None, "{unmodelled}");
+        }
+    }
+
+    #[test]
+    fn multiline_underline_and_overline_round_trip() {
+        for (contents, wf, u, o, coded) in [
+            ("NOTES:", None, true, false, "\\LNOTES:\\l"),
+            ("ONE\nTWO", Some(0.8), false, true, "\\W0.8;\\OONE\\PTWO\\o"),
+            ("BOTH", None, true, true, "\\L\\OBOTH\\o\\l"),
+        ] {
+            assert_eq!(mtext_styled_code(contents, wf, u, o), coded);
+            assert_eq!(
+                mtext_styled_contents(coded),
+                Some((contents.to_owned(), wf, u, o))
+            );
+        }
+        // Unclosed whole-text switches read back too.
+        assert_eq!(
+            mtext_styled_contents("\\LNOTES:"),
+            Some(("NOTES:".to_owned(), None, true, false))
+        );
+        // Partial inline formatting is still refused.
+        assert_eq!(mtext_styled_contents("a\\Lb"), None);
+        assert_eq!(mtext_styled_contents("\\La\\lb"), None);
     }
 
     #[test]
@@ -440,6 +624,8 @@ mod tests {
             width_factor: 1.0,
             rotation: 0.0,
             justify: Justify::Right,
+            underline: false,
+            overline: false,
             layer: "0".into(),
             field: None,
             properties: Default::default(),

@@ -1673,6 +1673,12 @@ fn object_value(object: &Object, names: &Names) -> Value {
             if text.justify != Justify::Left {
                 put("justify", json!(text.justify.name()));
             }
+            if text.underline {
+                put("underline", json!(true));
+            }
+            if text.overline {
+                put("overline", json!(true));
+            }
         }
         Object::MText(text) => {
             put("contents", json!(text.contents));
@@ -1693,6 +1699,12 @@ fn object_value(object: &Object, names: &Names) -> Value {
             }
             if text.justify != Attachment::TopLeft {
                 put("justify", json!(text.justify.name()));
+            }
+            if text.underline {
+                put("underline", json!(true));
+            }
+            if text.overline {
+                put("overline", json!(true));
             }
         }
         Object::AttributeDefinition(definition) => {

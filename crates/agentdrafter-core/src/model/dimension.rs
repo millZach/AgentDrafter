@@ -807,6 +807,8 @@ impl Dimension {
             width_factor: None,
             rotation: 0.0,
             justify: Attachment::MiddleCenter,
+            underline: false,
+            overline: false,
             layer: self.layer.clone(),
             field: None,
             properties: self.properties.clone(),

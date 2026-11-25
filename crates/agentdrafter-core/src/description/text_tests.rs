@@ -74,6 +74,8 @@ fn text_reads_every_key() {
             width_factor: 1.2,
             rotation: 270.0,
             justify: Justify::MiddleCenter,
+            underline: false,
+            overline: false,
             layer: "0".into(),
             field: None,
             properties: Default::default(),
@@ -131,6 +133,8 @@ fn mtext_reads_every_key_and_drops_line_breaks_at_the_end() {
             width_factor: Some(0.9),
             rotation: 45.0,
             justify: Attachment::BottomRight,
+            underline: false,
+            overline: false,
             layer: "0".into(),
             field: None,
             properties: Default::default(),
@@ -147,6 +151,92 @@ fn mtext_reads_every_key_and_drops_line_breaks_at_the_end() {
     assert_eq!(text.width_factor, None);
     assert_eq!(text.width, 0.0);
     assert_eq!(text.justify, Attachment::TopLeft);
+}
+
+#[test]
+fn text_and_mtext_parse_and_round_trip_underline_and_overline() {
+    let Object::Text(t) = one(
+        "text: {contents: 'NOTES:', position: [10, 20, 0], height: 3, underline: true, overline: true}",
+    ) else {
+        panic!()
+    };
+    assert!(t.underline);
+    assert!(t.overline);
+    let Object::MText(m) = one(
+        "mtext: {contents: 'LINE 1\\nLINE 2', position: [10, 30, 0], height: 3, underline: true}",
+    ) else {
+        panic!()
+    };
+    assert!(m.underline);
+    assert!(!m.overline);
+
+    // Full DWG build + read-back round-trip (#60).
+    let dir = std::env::temp_dir().join(format!("agentdrafter-uline-dwg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let yaml = dir.join("sheet.yaml");
+    let dwg = dir.join("sheet.dwg");
+    std::fs::write(
+        &yaml,
+        "units: mm\nobjects:\n\
+         \x20 - text: {contents: 'NOTES:', position: [10, 20, 0], height: 3, underline: true}\n\
+         \x20 - text: {contents: 'HEADER', position: [10, 30, 0], height: 3, overline: true}\n\
+         \x20 - text: {contents: 'BOTH', position: [10, 40, 0], height: 3, underline: true, overline: true}\n\
+         \x20 - mtext: {contents: 'MTEXT', position: [10, 50, 0], height: 3, underline: true, overline: true}\n",
+    )
+    .unwrap();
+    let settings = crate::Settings::default();
+    crate::build_with(
+        &crate::BuildRequest {
+            description: yaml,
+            output: Some(dwg.clone()),
+            overwrite: true,
+        },
+        &settings,
+    )
+    .unwrap();
+    let read = crate::read_original(&crate::ReadRequest {
+        source: dwg.clone(),
+        mirror: None,
+        no_mirror: false,
+    })
+    .unwrap();
+    assert!(read.decoded);
+    assert!(read.not_read.is_empty(), "{:?}", read.not_read);
+    let mirror = std::fs::read_to_string(read.mirror.as_deref().unwrap()).unwrap();
+    assert!(mirror.contains("underline: true"), "{mirror}");
+    assert!(mirror.contains("overline: true"), "{mirror}");
+    let read_dwg = crate::dwg::read(&dwg).unwrap();
+    assert_eq!(read_dwg.objects.len(), 4);
+    match &read_dwg.objects[0] {
+        Object::Text(t) => assert_eq!(
+            (t.contents.as_str(), t.underline, t.overline),
+            ("NOTES:", true, false)
+        ),
+        other => panic!("expected text: {other:?}"),
+    }
+    match &read_dwg.objects[1] {
+        Object::Text(t) => assert_eq!(
+            (t.contents.as_str(), t.underline, t.overline),
+            ("HEADER", false, true)
+        ),
+        other => panic!("expected text: {other:?}"),
+    }
+    match &read_dwg.objects[2] {
+        Object::Text(t) => assert_eq!(
+            (t.contents.as_str(), t.underline, t.overline),
+            ("BOTH", true, true)
+        ),
+        other => panic!("expected text: {other:?}"),
+    }
+    match &read_dwg.objects[3] {
+        Object::MText(m) => assert_eq!(
+            (m.contents.as_str(), m.underline, m.overline),
+            ("MTEXT", true, true)
+        ),
+        other => panic!("expected mtext: {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -412,7 +502,7 @@ fn an_unknown_key_lists_the_keys_text_takes() {
         &e,
         ErrorCode::UnknownKey,
         "objects[0].text.oblique",
-        &["a text takes contents, field, position, height, style, width_factor, rotation, justify, annotative, annotation_scales, layer"],
+        &["a text takes contents, field, position, height, style, width_factor, rotation, justify, underline, overline, annotative, annotation_scales, layer"],
     );
     let e = object_error("mtext: {contents: A, position: [0, 0, 0], height: 1, columns: 2}");
     assert_names(

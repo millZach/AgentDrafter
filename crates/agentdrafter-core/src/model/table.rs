@@ -357,6 +357,8 @@ impl Table {
             width_factor: None,
             rotation: 0.0,
             justify,
+            underline: false,
+            overline: false,
             layer: self.layer.clone(),
             field: None,
             properties: self.properties.clone(),

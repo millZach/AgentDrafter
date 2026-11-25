@@ -398,6 +398,8 @@ Text and multiline text lie in the plane parallel to XY at their position's `z`.
 | `width_factor` | both | How wide characters are drawn, from 0.01 to 100. Without it, a `text` takes its style's width factor, as AutoCAD's TEXT command does, and `mtext` draws at its style's. |
 | `rotation` | both | An angle: degrees anticlockwise from the X axis. Without it, 0. |
 | `justify` | both | Where the text sits against its position. Without it, `left` for `text` and `top_left` for `mtext`. |
+| `underline` | both | `true` to underline the text (AutoCAD's `%%u` on `text`, `\L...\l` on `mtext`). Without it, `false`. |
+| `overline` | both | `true` to overline the text (AutoCAD's `%%o` on `text`, `\O...\o` on `mtext`). Without it, `false`. |
 
 A `text` is justified as AutoCAD's TEXT command justifies it: `left`, `center` or `right` on the baseline; `middle`, centred both ways on what the text draws (for a TrueType font whose glyphs sit wholly above the baseline, on AutoCAD's `textbox` shifted down to the baseline); or `top_left`, `top_center`, `top_right`, `middle_left`, `middle_center`, `middle_right`, `bottom_left`, `bottom_center` or `bottom_right`, where top is the top of the capitals, middle half their height and bottom the font's lowest descender. AutoCAD's `aligned` and `fit`, which fit text between two points, are not offered. An `mtext` is justified by its box: one of the nine `top_left` to `bottom_right`.
 

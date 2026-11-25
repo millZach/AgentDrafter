@@ -6,7 +6,7 @@
 
 use super::layers::{name_error, named_entries};
 use super::strict_yaml::{key_path, Node};
-use super::{angle, at, bad_value, choice, length, plain_number, point, scalar, Fields};
+use super::{angle, at, bad_value, boolean, choice, length, plain_number, point, scalar, Fields};
 use crate::error::{Error, ErrorCode};
 use crate::text::{
     font_name_problem, Attachment, Justify, MText, Text, TextStyle, FONT_CHOICES, STANDARD,
@@ -22,7 +22,7 @@ pub(crate) const TEXT_STYLE_KEYS: [&str; 3] = [
 ];
 
 /// The keys a single line of text takes.
-pub(crate) const TEXT_KEYS: [&str; 17] = [
+pub(crate) const TEXT_KEYS: [&str; 19] = [
     "contents",
     "field",
     "position",
@@ -31,6 +31,8 @@ pub(crate) const TEXT_KEYS: [&str; 17] = [
     "width_factor",
     "rotation",
     "justify",
+    "underline",
+    "overline",
     super::annotation_scale::ANNOTATIVE_KEY,
     super::annotation_scale::ANNOTATION_SCALES_KEY,
     "layer",
@@ -43,7 +45,7 @@ pub(crate) const TEXT_KEYS: [&str; 17] = [
 ];
 
 /// The keys multiline text takes.
-pub(crate) const MTEXT_KEYS: [&str; 18] = [
+pub(crate) const MTEXT_KEYS: [&str; 20] = [
     "contents",
     "field",
     "position",
@@ -53,6 +55,8 @@ pub(crate) const MTEXT_KEYS: [&str; 18] = [
     "width_factor",
     "rotation",
     "justify",
+    "underline",
+    "overline",
     super::annotation_scale::ANNOTATIVE_KEY,
     super::annotation_scale::ANNOTATION_SCALES_KEY,
     "layer",
@@ -133,6 +137,8 @@ pub(super) fn text(
         Some(node) => width_factor(node, &fields.path_of("width_factor"))?,
         None => style_of(&style, styles).map_or(1.0, |s| s.width_factor),
     };
+    let underline = optional_flag(fields, "underline")?;
+    let overline = optional_flag(fields, "overline")?;
     let (annotative, annotation_scales) =
         super::annotation_scale::object_annotation(fields, declared_scales)?;
     Ok(Text {
@@ -147,6 +153,8 @@ pub(super) fn text(
         width_factor,
         rotation: rotation(fields)?,
         justify: justify(fields)?,
+        underline,
+        overline,
         layer,
         field,
         annotative,
@@ -211,6 +219,8 @@ pub(super) fn mtext(
         Some(node) => Some(width_factor(node, &fields.path_of("width_factor"))?),
         None => None,
     };
+    let underline = optional_flag(fields, "underline")?;
+    let overline = optional_flag(fields, "overline")?;
     let (annotative, annotation_scales) =
         super::annotation_scale::object_annotation(fields, declared_scales)?;
     Ok(MText {
@@ -226,12 +236,21 @@ pub(super) fn mtext(
         width_factor,
         rotation: rotation(fields)?,
         justify: attachment(fields)?,
+        underline,
+        overline,
         layer,
         field,
         annotative,
         annotation_scales,
         properties: Default::default(),
     })
+}
+
+fn optional_flag(fields: &Fields, key: &str) -> Result<bool, Error> {
+    match fields.get(key) {
+        Some(node) => boolean(node, &fields.path_of(key)),
+        None => Ok(false),
+    }
 }
 
 /// What is wrong with text contents, if anything: they are empty, or hold

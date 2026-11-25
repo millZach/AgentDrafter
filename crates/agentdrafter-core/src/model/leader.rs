@@ -600,6 +600,8 @@ impl MLeader {
             } else {
                 Attachment::TopRight
             },
+            underline: false,
+            overline: false,
             layer: self.layer.clone(),
             field: None,
             annotative: false,
@@ -763,6 +765,8 @@ impl Leader {
             } else {
                 Attachment::MiddleRight
             },
+            underline: false,
+            overline: false,
             layer: self.layer.clone(),
             field: None,
             properties: self.properties.clone(),

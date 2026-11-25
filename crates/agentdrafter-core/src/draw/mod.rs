@@ -1834,6 +1834,8 @@ impl<'a> Drawer<'a> {
                             width_factor,
                             rotation: laid.text.rotation,
                             justify: crate::text::Justify::Left,
+                            underline: false,
+                            overline: false,
                             layer: laid.text.layer.clone(),
                             field: None,
                             annotative: false,
