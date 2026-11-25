@@ -48,6 +48,10 @@ _Avoid_: document, model
 AutoCAD's Drawing Exchange Format, ASCII (the default when building DXF) or binary (`dxf_binary`), read everywhere AgentDrafter reads a DWG and written by `build` (via `format` or a `.dxf` output path) and drawing sets (`format: dxf` or `dxf_binary` in `set.yaml`) with the same build mark (`$CUSTOMPROPERTYTAG` / `$CUSTOMPROPERTY`) and object IDs as a DWG.
 _Avoid_: text DWG, export file
 
+**DWG version conversion**:
+An explicit `agentdrafter convert` step (or per-job `dwg_version` in `set.yaml` / `build --dwg-version`) that writes a drawing or drawing set in another AutoCAD DWG/DXF version (`AC1009`/R12 through `AC1032`/2018) without overwriting originals, reporting per-drawing `losses` for downgraded, dropped, or changed features and objects. Revising an original DWG never converts its version (ADR-0006).
+_Avoid_: silent upgrade, auto-saveas
+
 **External reference (xref)**:
 Another DWG or DXF file linked into a host drawing (`attach`, carried along when the host is itself referenced, or `overlay`, drawn in the host only) as a block record holding a file path rather than embedded geometry, placed by regular `insert` objects (`xrefs:` in sheet descriptions and templates, `attach_xref` / `XATTACH` / `XREF`, `detach_xref` / `XDETACH`, and `bind_xref` / `XBIND`). Resolved from disk for drawing, querying and checking without embedding geometry into built DWGs, with missing or cyclic references reported under `unresolved_xrefs` and top-level `warnings`.
 _Avoid_: linked file, external block, underlay (an underlay is a PDF or raster image)

@@ -108,6 +108,10 @@
     "read": {
       "args": ["read", "demo-set/dwg/DEMO-002.dwg", "--mirror", "DEMO-002.mirror.yaml"],
       "input": {"source": "demo-set/dwg/DEMO-002.dwg", "mirror": "DEMO-002.mirror.yaml"}
+    },
+    "convert": {
+      "args": ["convert", "demo-set/dwg/DEMO-001.dwg", "--version", "2010", "--output", "DEMO-001.2010.dwg"],
+      "input": {"source": "demo-set/dwg/DEMO-001.dwg", "version": "2010", "output": "DEMO-001.2010.dwg"}
     }
   },
   "also": [

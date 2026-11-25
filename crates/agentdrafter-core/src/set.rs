@@ -27,8 +27,9 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::build::{build_sheet_as, is_same_file, BuildReport, DrawingFormat};
+use crate::build::{build_sheet_with_version, is_same_file, BuildReport, DrawingFormat};
 use crate::change::relative_to;
+use crate::convert::DwgVersion;
 use crate::description::{
     read_rows_file_in, read_rows_files_in, read_set_settings, read_template, rows_of, rows_paths,
     template_at, template_path, Disk, Row, RowsFile, SetSettings,
@@ -185,7 +186,19 @@ pub fn build_set_with_format(
     format: Option<DrawingFormat>,
     settings: &Settings,
 ) -> Reply<SetReport> {
-    match build_sheets(request, format, settings) {
+    build_set_with_options(request, format, None, settings)
+}
+
+/// Builds every sheet of a drawing set into `format` (`dwg`, ASCII `dxf`, or
+/// `dxf_binary`) and `dwg_version`, overriding `set.yaml`'s `format` and
+/// `dwg_version` when `Some`.
+pub fn build_set_with_options(
+    request: &SetBuildRequest,
+    format: Option<DrawingFormat>,
+    dwg_version: Option<DwgVersion>,
+    settings: &Settings,
+) -> Reply<SetReport> {
+    match build_sheets(request, format, dwg_version, settings) {
         Ok(report) if report.failed > 0 => {
             let error = Error::new(
                 ErrorCode::SheetsFailed,
@@ -212,11 +225,13 @@ pub fn build_set_with_format(
 fn build_sheets(
     request: &SetBuildRequest,
     format_override: Option<DrawingFormat>,
+    version_override: Option<DwgVersion>,
     settings: &Settings,
 ) -> Result<SetReport, Error> {
     let folder = request.set.as_path();
     let set = read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
     let format = format_override.unwrap_or(set.format);
+    let version = version_override.unwrap_or(set.dwg_version);
     let rows_files = read_rows_files_in(&Disk, folder, &set)?;
     let rows = rows_of(&rows_files)?;
     let output = folder.join(&set.output);
@@ -236,13 +251,14 @@ fn build_sheets(
             let dwg = output.join(format!("{}.{}", row.sheet, format.extension()));
             let mut notices = Vec::new();
             let built = read_template(&template, row, set.units, &mut notices).and_then(|record| {
-                build_sheet_as(
+                build_sheet_with_version(
                     &record,
                     &template,
                     &dwg,
                     &mark,
                     request.overwrite,
                     format,
+                    version,
                     settings,
                 )
             });

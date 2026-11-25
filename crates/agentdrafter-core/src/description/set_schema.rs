@@ -18,6 +18,7 @@ use super::set::{
 };
 use super::template::ROW_KEY;
 use crate::build::DrawingFormat;
+use crate::convert::DwgVersion;
 use crate::units::Unit;
 
 /// The name of a row's value, as a regular expression.
@@ -25,7 +26,13 @@ pub(crate) const VALUE_NAME: &str = "^[A-Za-z0-9_-]+$";
 
 /// The schema of a drawing set's settings, `set.yaml`.
 pub(crate) fn set_schema() -> Value {
-    let [units_key, output_key, rows_key, clean_key, plot_style_key, format_key] = SETTINGS_KEYS;
+    let [units_key, output_key, rows_key, clean_key, plot_style_key, format_key, dwg_version_key] =
+        SETTINGS_KEYS;
+    let mut version_choices: Vec<Value> = DwgVersion::ACCEPTED_STRINGS
+        .into_iter()
+        .map(|s| Value::String(s.to_owned()))
+        .collect();
+    version_choices.extend(DwgVersion::ACCEPTED_YEARS.into_iter().map(Value::from));
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "AgentDrafter drawing set settings",
@@ -73,6 +80,14 @@ pub(crate) fn set_schema() -> Value {
                                 default), `dxf` (ASCII DXF) or `dxf_binary` (binary DXF). A run's \
                                 own `format` overrides it for that run.",
                 "enum": DrawingFormat::ALL.map(DrawingFormat::name),
+            },
+            dwg_version_key: {
+                "description": "The DWG version the drawing set builds: `AC1032` (`2018`, the \
+                                default), `AC1027` (`2013`), `AC1024` (`2010`), `AC1021` (`2007`), \
+                                `AC1018` (`2004`), `AC1015` (`2000`), `AC1014` (`R14`), `AC1012` \
+                                (`R13`), or `AC1009` (`R12`). A run's own `dwg_version` overrides \
+                                it for that run.",
+                "enum": version_choices,
             },
         },
     })

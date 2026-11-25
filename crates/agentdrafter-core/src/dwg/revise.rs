@@ -120,68 +120,68 @@ pub(crate) struct MutationHandles {
 
 /// Structural digest of one drawing object for the pre-/post-revision diff check.
 #[derive(Clone, Debug, PartialEq)]
-struct ObjectDigest {
-    kind: String,
-    owner: u64,
+pub(super) struct ObjectDigest {
+    pub(super) kind: String,
+    pub(super) owner: u64,
     /// Exact raw bytes for R2004+ non-compound passthrough objects.
-    raw_bytes: Option<Vec<u8>>,
+    pub(super) raw_bytes: Option<Vec<u8>>,
     /// Field-complete logical digest for pre-R2004 or compound objects that
     /// acadrust re-encodes instead of streaming verbatim, and for diagnostics.
-    logical: String,
+    pub(super) logical: String,
 }
 
 /// Structural digest of one non-graphical object in `drawing.objects`.
 #[derive(Clone, Debug, PartialEq)]
-struct NonGraphicalDigest {
-    kind: String,
-    owner: u64,
-    summary: String,
+pub(super) struct NonGraphicalDigest {
+    pub(super) kind: String,
+    pub(super) owner: u64,
+    pub(super) summary: String,
 }
 
 /// Structural digest of one layer table entry.
 #[derive(Clone, Debug, PartialEq)]
-struct LayerDigest {
-    handle: u64,
-    name: String,
-    color: String,
-    color_name: Option<String>,
-    book_name: Option<String>,
-    linetype: String,
-    lineweight: String,
-    flags: (bool, bool, bool, bool, bool, bool),
-    transparency: String,
-    description: String,
+pub(super) struct LayerDigest {
+    pub(super) handle: u64,
+    pub(super) name: String,
+    pub(super) color: String,
+    pub(super) color_name: Option<String>,
+    pub(super) book_name: Option<String>,
+    pub(super) linetype: String,
+    pub(super) lineweight: String,
+    pub(super) flags: (bool, bool, bool, bool, bool, bool),
+    pub(super) transparency: String,
+    pub(super) description: String,
 }
 
 /// Structural digest of one block record table entry.
 #[derive(Clone, Debug, PartialEq)]
-struct BlockRecordDigest {
-    handle: u64,
-    name: String,
-    flags: String,
-    xref_path: String,
-    layout_handle: u64,
-    entity_handles: Vec<u64>,
+pub(super) struct BlockRecordDigest {
+    pub(super) handle: u64,
+    pub(super) name: String,
+    pub(super) flags: String,
+    pub(super) xref_path: String,
+    pub(super) layout_handle: u64,
+    pub(super) entity_handles: Vec<u64>,
 }
 
 /// Pre-edit structural snapshot of an original drawing.
-struct DrawingSnapshot {
-    dwg_version: String,
-    decode: DecodeReport,
-    objects: BTreeMap<u64, ObjectDigest>,
+pub(super) struct DrawingSnapshot {
+    pub(super) dwg_version: String,
+    pub(super) decode: DecodeReport,
+    pub(super) objects: BTreeMap<u64, ObjectDigest>,
     /// Handles of owned sub-entities (Insert SEQENDs, Polyline3D vertices)
     /// that live inside their parent entity rather than top-level `entities`.
-    sub_handles: HashSet<u64>,
-    non_graphical: BTreeMap<u64, NonGraphicalDigest>,
-    layers: BTreeMap<String, LayerDigest>,
-    line_types: BTreeMap<String, String>,
-    text_styles: BTreeMap<String, String>,
-    dim_styles: BTreeMap<String, String>,
-    app_ids: BTreeMap<String, String>,
-    ucss: BTreeMap<String, String>,
-    views: BTreeMap<String, String>,
-    vports: BTreeMap<String, String>,
-    block_records: BTreeMap<String, BlockRecordDigest>,
+    pub(super) sub_handles: HashSet<u64>,
+    pub(super) non_graphical: BTreeMap<u64, NonGraphicalDigest>,
+    pub(super) layers: BTreeMap<String, LayerDigest>,
+    pub(super) line_types: BTreeMap<String, String>,
+    pub(super) text_styles: BTreeMap<String, String>,
+    pub(super) dim_styles: BTreeMap<String, String>,
+    pub(super) app_ids: BTreeMap<String, String>,
+    pub(super) ucss: BTreeMap<String, String>,
+    pub(super) views: BTreeMap<String, String>,
+    pub(super) vports: BTreeMap<String, String>,
+    pub(super) block_records: BTreeMap<String, BlockRecordDigest>,
 }
 
 /// An open original DWG or DXF ready for in-place revision, strictly behind
@@ -5634,7 +5634,7 @@ fn writable_header_bytes(version: DxfVersion) -> Option<[u8; 6]> {
     }
 }
 
-fn check_decode_regression(
+pub(super) fn check_decode_regression(
     before: &DecodeReport,
     after: &DecodeReport,
     out: &mut Vec<UnexpectedChange>,
@@ -5795,7 +5795,7 @@ fn diff_app_id_table(
     }
 }
 
-fn snapshot_drawing(
+pub(super) fn snapshot_drawing(
     drawing: &CadDocument,
     dwg_version: &str,
     decode: &DecodeReport,

@@ -74,6 +74,7 @@ mod build;
 mod change;
 mod check;
 mod commands;
+mod convert;
 mod description;
 mod display_list;
 mod display_snaps;
@@ -107,7 +108,10 @@ mod xref;
 
 use std::path::Path;
 
-pub use build::{build, build_with, build_with_format, BuildReport, BuildRequest, DrawingFormat};
+pub use build::{
+    build, build_with, build_with_format, build_with_options, BuildReport, BuildRequest,
+    DrawingFormat,
+};
 pub use change::{
     accept_with, AcceptReport, AcceptRequest, CheckFailed, FileIssued, HowChanged, ObjectChanged,
     StampRevision,
@@ -140,6 +144,10 @@ pub use check::{
 };
 pub use commands::{
     assistant_commands, commands, find_command, Access, Command, CommandInfo, JsonReply,
+};
+pub use convert::{
+    convert, convert_reply, ConversionLoss, ConversionLossKind, ConvertBatchReport,
+    ConvertDrawingOutcome, ConvertDrawingReport, ConvertReport, ConvertRequest, DwgVersion,
 };
 pub use description::{parse_block_library, parse_sheet_description, read_sheet_description};
 pub use display_list::{
@@ -234,8 +242,8 @@ pub use revise::{
     RevisionUnexpectedChangeKind, REVISION_CHANGES_EXTENSION,
 };
 pub use set::{
-    build_set, build_set_with, build_set_with_format, Notice, NoticeCode, SetBuildRequest,
-    SetReport, SheetOutcome, SET_SETTINGS_FILE,
+    build_set, build_set_with, build_set_with_format, build_set_with_options, Notice, NoticeCode,
+    SetBuildRequest, SetReport, SheetOutcome, SET_SETTINGS_FILE,
 };
 pub use settings::SYSTEM_FONTS_VARIABLE;
 pub use settings::{system_font_folders, Settings, FONTS_VARIABLE, PLOT_STYLES_VARIABLE};

@@ -561,9 +561,25 @@ const FORMAT: Place = Place {
     json: r#"{"units": "mm", "output": "dwg", "rows": "rows.yaml", "format": V}"#,
 };
 
+const DWG_VERSION: Place = Place {
+    name: "the set's dwg_version",
+    yaml: "units: mm\noutput: dwg\nrows: rows.yaml\ndwg_version: V\n",
+    json: r#"{"units": "mm", "output": "dwg", "rows": "rows.yaml", "dwg_version": V}"#,
+};
+
 #[test]
 fn the_set_schema_accepts_exactly_the_settings_the_reader_accepts() {
     let cases: Vec<Case> = vec![
+        (&DWG_VERSION, "AC1032", json!("AC1032"), true),
+        (&DWG_VERSION, "AC1024", json!("AC1024"), true),
+        (&DWG_VERSION, "2010", json!(2010), true),
+        (&DWG_VERSION, "'2010'", json!("2010"), true),
+        (&DWG_VERSION, "R14", json!("R14"), true),
+        (&DWG_VERSION, "R12", json!("R12"), true),
+        (&DWG_VERSION, "ac1024", json!("ac1024"), false),
+        (&DWG_VERSION, "2099", json!(2099), false),
+        (&DWG_VERSION, "null", json!(null), false),
+        (&DWG_VERSION, "[2010]", json!([2010]), false),
         (&FORMAT, "dwg", json!("dwg"), true),
         (&FORMAT, "dxf", json!("dxf"), true),
         (&FORMAT, "dxf_binary", json!("dxf_binary"), true),
