@@ -5756,11 +5756,11 @@ const checks = {
       ],
     };
     // Given through the HTTP API, as an agent does, by the assistant.
-    const give = async () => {
+    const give = async (given = guide) => {
       const r = await fetch(`${server.base}/commands/guide`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ set: 'demo-plant', guide, by: 'Assistant' }),
+        body: JSON.stringify({ set: 'demo-plant', guide: given, by: 'Assistant' }),
       });
       const reply = await r.json();
       assert(r.status === 200 && reply.ok, `the guide is given: ${JSON.stringify(reply)}`);
@@ -5989,7 +5989,79 @@ const checks = {
           assert(Date.now() < dropUntil, `guide 1 was not ended on Close: ${JSON.stringify(listed())}`);
           await sleep(100);
         }
-        seen.laptop = { marks, undone: undone.undid, problems };
+        // Template-object guide step (#264): Move on a template object goes
+        // through Change all 7 sheets carrying the guide mark and ticks the step.
+        const tplGuide = await give({
+          title: 'Move TB1-2 down 0.1 in',
+          sheet: 'DP-LD-101',
+          steps: [
+            {
+              say: 'Move TB1-2 down 0.1 in with Move.',
+              title: 'Move TB1-2 down',
+              tool: 'move',
+              points: [
+                { object: { id: 'DP-LD-101/terminal-2' }, label: 'TB1-2' },
+                { at: { snap: { id: 'DP-LD-101/terminal-2', snap: 'insertion', which: 'position' } }, label: 'base point' },
+              ],
+              completes: { op: 'move', target: { id: 'DP-LD-101/terminal-2' }, by: [0, -0.1, 0] },
+            },
+          ],
+        });
+        await page.waitForSelector('[data-toast="start-guide"]', { timeout: 15000 });
+        await page.click('[data-toast="start-guide"]');
+        await untilStep(page, 1, 'template guide start');
+        await ring(page, 'object');
+        for (let same = 0, last = ''; same < 4; ) {
+          await frames(page);
+          const cur = JSON.stringify(await page.evaluate(() => window.agentdrafterViewer.view()));
+          same = cur === last ? same + 1 : 0;
+          last = cur;
+        }
+        await page.keyboard.type('M');
+        await page.keyboard.press('Enter');
+        await frames(page);
+        const term2 = await objectOf(page, 'DP-LD-101/terminal-2');
+        let pickedTerm = false;
+        for (let i = 1; i < 10 && !pickedTerm; i++) {
+          for (let j = 1; j < 8 && !pickedTerm; j++) {
+            const at = [
+              term2.bounds[0] + ((term2.bounds[2] - term2.bounds[0]) * i) / 10,
+              term2.bounds[1] + ((term2.bounds[3] - term2.bounds[1]) * j) / 8,
+            ];
+            if ((await page.evaluate(([x, y]) => window.agentdrafterViewer.pickAt(x, y, 16), at)) !== term2.place) continue;
+            await page.mouse.click(...(await onPage(page, at)));
+            pickedTerm = true;
+          }
+        }
+        assert(pickedTerm, 'a click picks terminal-2');
+        await frames(page);
+        await page.keyboard.press('Enter');
+        await ringOn(page, tplGuide, 1, 1, 'base point');
+        await clickAt(page, ringAt(tplGuide, 1, 1));
+        await page.keyboard.type('@0,-0.1');
+        await page.keyboard.press('Enter');
+        await page.waitForSelector('[data-preview] [data-pv-summary]', { timeout: 30000 });
+        before = journal().entries.length;
+        await page.click('[data-pv="go"]');
+        const tplEntry = await landedAfter(before, 'template guide move');
+        assert(
+          JSON.stringify(tplEntry.guide) === `{"guide":${tplGuide},"step":1,"of":1,"completes":true}`,
+          `template Change all kept the guide mark: ${JSON.stringify(tplEntry)}`,
+        );
+        await page.waitForSelector('[data-guide="end"]', { timeout: 15000 });
+        words = await banner(page);
+        assert(words.includes('Finished: 1 of 1 steps done'), `template guide ticked: ${words}`);
+        before = journal().entries.length;
+        await page.click('[data-g="undoall"]');
+        await landedAfter(before, 'undo template guide');
+        await page.click('[data-g="close"]');
+        await page.waitForFunction(() => !document.querySelector('.gbanner'), null, { timeout: 15000 });
+        const tplDropUntil = Date.now() + 10000;
+        while (listed().some((g) => g.guide === tplGuide)) {
+          assert(Date.now() < tplDropUntil, `guide ${tplGuide} was not ended on Close`);
+          await sleep(100);
+        }
+        seen.laptop = { marks, undone: undone.undid, tplGuide, problems };
         assert(!problems.length, `no page errors: ${problems.join('; ')}`);
         await context.close();
       }

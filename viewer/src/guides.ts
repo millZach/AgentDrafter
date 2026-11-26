@@ -564,3 +564,25 @@ export function marked<T extends { operations?: unknown[] }>(changeSet: T, run: 
   if (!step || step.setting) return changeSet;
   return { ...changeSet, guide: { guide: run.guide, step: step.step } };
 }
+
+/**
+ * The change set a template preview's Change all sends (#264): keeps its
+ * `guide` mark and returns its `runId` while that exact guide run is still
+ * active; if the guide ended or restarted while the preview was open, strips
+ * `guide` so the edit lands without a stale mark.
+ */
+export function previewConfirmSend<T extends { operations?: unknown[]; guide?: { guide: number; step: number } }>(
+  changeSet: T,
+  guideRunId: number | undefined,
+  run: GuideRun | null,
+): { changeSet: T; runId: number | undefined } {
+  if (guideRunId === undefined || !changeSet.guide) {
+    return { changeSet, runId: undefined };
+  }
+  if (run && !run.end && run.runId === guideRunId) {
+    return { changeSet, runId: guideRunId };
+  }
+  const rest = { ...changeSet };
+  delete rest.guide;
+  return { changeSet: rest, runId: undefined };
+}
