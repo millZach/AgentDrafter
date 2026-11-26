@@ -1407,7 +1407,7 @@ fn utc_now() -> String {
 }
 
 #[cfg(test)]
-pub(super) static CHILD_TEST_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static CHILD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -2045,6 +2045,13 @@ FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
             .unwrap_or_else(|e| e.into_inner())
             .is_empty()
         {
+            if handle.is_finished() {
+                let talks = assistant.lock();
+                panic!(
+                    "turn finished before registering an active child PID: {:?}",
+                    talks[&set].items
+                );
+            }
             assert!(
                 wait_start.elapsed() < Duration::from_secs(15),
                 "turn never registered an active child PID"

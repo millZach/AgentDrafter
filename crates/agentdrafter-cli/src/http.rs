@@ -2145,6 +2145,9 @@ mod tests {
 
     #[test]
     fn start_local_guards_commands_with_token_serves_desktop_csp_and_shuts_down() {
+        let _child_lock = crate::assistant::CHILD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let server = start_local(Settings::default()).unwrap();
         let host = server.address().to_string();
         assert!(server.address().ip().is_loopback());
@@ -2232,6 +2235,9 @@ mod tests {
 
     #[test]
     fn events_stream_watches_original_dwg_journal_and_handles_single_yaml_cleanly() {
+        let _child_lock = crate::assistant::CHILD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp =
             std::env::temp_dir().join(format!("agentdrafter-http-events-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
