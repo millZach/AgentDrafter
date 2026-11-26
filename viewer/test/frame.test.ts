@@ -305,12 +305,20 @@ test('the command bar prompts for a command or a selection, and offers Move, Cop
     selected.parts.filter((p) => 'act' in p).map((p) => ('act' in p ? p.act : '')),
     ['move', 'copy-objects', 'array-objects', 'erase', 'clear'],
   );
-  // A phone gives the name alone, so the options stay together.
+  // A phone gives the name alone and drops Clear (quick properties' × already clears),
+  // so all four edit options stay on one line even on narrow 320–360 px phones (#260, #247).
   const tapped = promptFor({ ...none, touch: true, selected: { id: 'DP-LD-101/device', name: 'FT-101', type: 'insert', block: 'TRANSMITTER' } });
-  assert.equal(words(tapped.parts), 'FT-101 [ <Move> <Copy> <Array> <Erase> <Clear> ]');
-  // Kept to one line on a phone: the name gives way first, whatever the font (#66).
+  assert.equal(words(tapped.parts), 'FT-101 [ <Move> <Copy> <Array> <Erase> ]');
+  assert.deepEqual(
+    tapped.parts.filter((p) => 'act' in p).map((p) => ('act' in p ? p.act : '')),
+    ['move', 'copy-objects', 'array-objects', 'erase'],
+  );
+  // Kept to one line on a phone: a long name shrinks with an ellipsis before any option wraps (#66, #247, #260).
   assert.equal(tapped.oneLine, true);
   assert.ok(!selected.oneLine);
+  const longTapped = promptFor({ ...none, touch: true, selected: { id: 'DP-LD-101/junction-box-tag', type: 'text' } });
+  assert.equal(longTapped.oneLine, true);
+  assert.equal(words(longTapped.parts), 'junction-box-tag [ <Move> <Copy> <Array> <Erase> ]');
 });
 
 test('a running tool prompts in the renderer’s words, on its layer, with its options to click and what went wrong', () => {
