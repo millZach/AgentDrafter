@@ -522,3 +522,139 @@ objects:
         "old clip boundary keeps original radius 15: {old_radius}"
     );
 }
+
+#[test]
+fn a_viewport_view_center_edit_highlights_moved_model_ink_by_stable_viewport_identity() {
+    // Two viewports showing the same model-space line, plus an earlier paper
+    // line we delete to shift both object and viewport indices (#187).
+    let set = scratch("viewport-view-center");
+    fs::create_dir_all(set.join("templates")).unwrap();
+    fs::write(
+        set.join("set.yaml"),
+        "units: mm\noutput: dwg\nrows: rows.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        set.join("templates/t.yaml"),
+        "\
+units: mm
+paper: ISO A4 landscape
+layout: {name: Plan}
+objects:
+  - line: {id: banner, space: paper, from: [10, 195, 0], to: [40, 195, 0]}
+  - line: {id: part, from: [40, 40, 0], to: [60, 40, 0]}
+  - viewport: {id: vp-a, space: paper, center: [80, 100, 0], width: 80, height: 80, view_center: [50, 40, 0], scale: 1}
+  - viewport: {id: vp-b, space: paper, center: [200, 100, 0], width: 80, height: 80, view_center: [50, 40, 0], scale: 1}
+",
+    )
+    .unwrap();
+    fs::write(
+        set.join("rows.yaml"),
+        "rows:\n  - sheet: S-1\n    template: templates/t.yaml\n",
+    )
+    .unwrap();
+
+    // Pan vp-a's view_center by +10 in X (shifting model ink -10 in paper X)
+    // and delete `banner` so vp-a, vp-b, and part all shift object indices.
+    let change_set = json!({"operations": [
+        {"op": "delete", "target": {"id": "S-1/banner"}},
+        {"op": "change", "target": {"id": "S-1/vp-a"}, "set": {"view_center": [60, 40, 0]}}
+    ]});
+    let report = draw(&request(&set, "S-1", Some(change_set)));
+    let p = preview(&report);
+
+    let vp_a_idx = place(&report, "S-1/vp-a");
+    let vp_b_idx = place(&report, "S-1/vp-b");
+    let part_items = items_of(&report, "S-1/part");
+    let part_in_a: Vec<usize> = part_items
+        .iter()
+        .copied()
+        .filter(|&i| report.display_list.items[i].viewport == Some(vp_a_idx))
+        .collect();
+    let part_in_b: Vec<usize> = part_items
+        .iter()
+        .copied()
+        .filter(|&i| report.display_list.items[i].viewport == Some(vp_b_idx))
+        .collect();
+    assert_eq!(part_in_a.len(), 1);
+    assert_eq!(part_in_b.len(), 1);
+
+    // Only part's item seen through vp-a moved; vp-b's item and vp-a's frame
+    // stayed put despite the index shift from deleting `banner`.
+    assert_eq!(p.changed, part_in_a);
+    let was_part = p
+        .was
+        .iter()
+        .find(|w| w.id.eq_ignore_ascii_case("S-1/part"))
+        .expect("old position of part in vp-a");
+    assert_eq!(was_part.how, HowChanged::Changed);
+    assert_eq!(was_part.items.len(), 1);
+    let old_min_x = was_part.items[0]
+        .points()
+        .map(|pt| pt[0])
+        .fold(f64::MAX, f64::min);
+    let new_min_x = report.display_list.items[part_in_a[0]]
+        .points()
+        .map(|pt| pt[0])
+        .fold(f64::MAX, f64::min);
+    assert!(
+        (old_min_x - new_min_x - 10.0).abs() < 1e-6,
+        "panning view_center +10 shifts paper ink -10: old={old_min_x} new={new_min_x}"
+    );
+
+    // The deleted banner is still marked Deleted in `was`.
+    let was_banner = p
+        .was
+        .iter()
+        .find(|w| w.id.eq_ignore_ascii_case("S-1/banner"))
+        .expect("deleted banner in was");
+    assert_eq!(was_banner.how, HowChanged::Deleted);
+}
+
+#[test]
+fn a_layer_color_edit_highlights_bylayer_ink_and_skips_explicit_color() {
+    // Recolouring layer `wires` changes ByLayer `wire`, leaves explicit-colour
+    // `fixed` and layer-0 `frame` untouched (#187).
+    let set = scratch("layer-color");
+    fs::create_dir_all(set.join("templates")).unwrap();
+    fs::write(
+        set.join("set.yaml"),
+        "units: mm\noutput: dwg\nrows: rows.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        set.join("templates/t.yaml"),
+        "\
+units: mm
+paper: [100, 80]
+layers:
+  wires: {color: red}
+objects:
+  - line: {id: frame, from: [0, 0, 0], to: [100, 0, 0]}
+  - line: {id: wire, from: [10, 40, 0], to: [90, 40, 0], layer: wires}
+  - line: {id: fixed, from: [10, 20, 0], to: [90, 20, 0], layer: wires, color: green}
+",
+    )
+    .unwrap();
+    fs::write(
+        set.join("rows.yaml"),
+        "rows:\n  - sheet: S-1\n    template: templates/t.yaml\n",
+    )
+    .unwrap();
+
+    let change_set = json!({"operations": [
+        {"op": "change_layer", "template": "templates/t.yaml", "name": "wires", "set": {"color": 5}}
+    ]});
+    let report = draw(&request(&set, "S-1", Some(change_set)));
+    let p = preview(&report);
+
+    let wire_items = items_of(&report, "S-1/wire");
+    assert_eq!(wire_items.len(), 1);
+    assert_eq!(p.changed, wire_items, "only ByLayer wire is highlighted");
+    assert_eq!(report.display_list.items[wire_items[0]].color.0, 5);
+    assert_eq!(p.was.len(), 1);
+    assert_eq!(p.was[0].id, "S-1/wire");
+    assert_eq!(p.was[0].how, HowChanged::Changed);
+    assert_eq!(p.was[0].items.len(), 1);
+    assert_eq!(p.was[0].items[0].color.0, 1, "old wire keeps red color");
+}

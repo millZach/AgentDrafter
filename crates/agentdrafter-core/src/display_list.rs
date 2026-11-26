@@ -757,30 +757,86 @@ fn preview_of(
         }
         items
     };
-    for object in p.objects.iter().filter(|o| on_sheet(&o.id)) {
-        let after = items_of(drew.list, place(&drew.drawn.objects, &object.id));
-        let before = old.as_ref().map_or_else(Vec::new, |(now, was_list)| {
-            items_of(was_list, place(&now.objects, &object.id))
-        });
-        match object.how {
-            HowChanged::Added => added.extend(after.iter().map(|(i, _)| *i)),
-            HowChanged::Deleted if !before.is_empty() => was.push(WasDrawn {
-                id: object.id.clone(),
-                how: HowChanged::Deleted,
-                items: remap_was(before.into_iter().map(|(_, item)| item.clone()).collect()),
-            }),
-            HowChanged::Deleted => {}
-            HowChanged::Changed => {
-                // What draws the same, before and after, is not marked.
-                let (new, gone) = differ(&after, &before);
-                changed.extend(new);
-                if !gone.is_empty() {
-                    was.push(WasDrawn {
-                        id: object.id.clone(),
-                        how: HowChanged::Changed,
-                        items: remap_was(gone),
-                    });
+    if let Some((now, was_list)) = old.as_ref() {
+        // Compare rendered items across the whole sheet by stable object,
+        // viewport, and clip-boundary identity so indirect edits (such as
+        // panning a viewport or recolouring a layer) highlight every affected
+        // item and show its old place, while index shifts from unrelated
+        // deletions never produce false diffs (#187).
+        let after_ctx = ItemContext {
+            objects: &drew.drawn.objects,
+            list: drew.list,
+        };
+        let before_ctx = ItemContext {
+            objects: &now.objects,
+            list: was_list,
+        };
+        let (after_by_id, after_order) = group_items_by_id(&drew.drawn.objects, drew.list);
+        let (before_by_id, before_order) = group_items_by_id(&now.objects, was_list);
+        let mut explicit: HashMap<String, (String, HowChanged)> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for object in p.objects.iter().filter(|o| on_sheet(&o.id)) {
+            let key = object.id.to_ascii_lowercase();
+            explicit
+                .entry(key.clone())
+                .and_modify(|(_, how)| {
+                    if *how != object.how {
+                        *how = HowChanged::Changed;
+                    }
+                })
+                .or_insert_with(|| (object.id.clone(), object.how));
+            if seen_keys.insert(key.clone()) {
+                order.push(key);
+            }
+        }
+        for key in after_order.into_iter().chain(before_order) {
+            if seen_keys.insert(key.clone()) {
+                order.push(key);
+            }
+        }
+        for key in order {
+            let after = after_by_id
+                .get(&key)
+                .map_or(&[][..], |group| group.items.as_slice());
+            let before = before_by_id
+                .get(&key)
+                .map_or(&[][..], |group| group.items.as_slice());
+            let display_id = explicit
+                .get(&key)
+                .map(|(id, _)| id.clone())
+                .or_else(|| after_by_id.get(&key).map(|group| group.id.clone()))
+                .or_else(|| before_by_id.get(&key).map(|group| group.id.clone()))
+                .unwrap_or_else(|| key.clone());
+            match explicit.get(&key).map(|(_, how)| *how) {
+                Some(HowChanged::Added) => added.extend(after.iter().map(|(i, _)| *i)),
+                Some(HowChanged::Deleted) if !before.is_empty() => was.push(WasDrawn {
+                    id: display_id,
+                    how: HowChanged::Deleted,
+                    items: remap_was(before.iter().map(|(_, item)| (*item).clone()).collect()),
+                }),
+                Some(HowChanged::Deleted) => {}
+                Some(HowChanged::Changed) | None => {
+                    // What draws the same, before and after, is not marked.
+                    let (new, gone) = differ(after, &after_ctx, before, &before_ctx);
+                    changed.extend(new);
+                    if !gone.is_empty() {
+                        was.push(WasDrawn {
+                            id: display_id,
+                            how: HowChanged::Changed,
+                            items: remap_was(gone),
+                        });
+                    }
                 }
+            }
+        }
+    } else {
+        for object in p.objects.iter().filter(|o| on_sheet(&o.id)) {
+            let after = items_of(drew.list, place(&drew.drawn.objects, &object.id));
+            match object.how {
+                HowChanged::Added => added.extend(after.iter().map(|(i, _)| *i)),
+                HowChanged::Deleted => {}
+                HowChanged::Changed => changed.extend(after.iter().map(|(i, _)| *i)),
             }
         }
     }
@@ -890,24 +946,105 @@ fn items_of(list: &DisplayList, at: Option<usize>) -> Vec<(usize, &Item)> {
         .collect()
 }
 
+/// Stable identity for an object at `index` in `objects`: its case-folded ID
+/// when present, falling back to its index.
+fn stable_object_id(objects: &[SheetObject], index: usize) -> String {
+    objects
+        .get(index)
+        .and_then(|o| o.id.as_deref())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| format!("#{index}"))
+}
+
+/// Display ID for an object at `index` in `objects`, preferring its
+/// original-case ID.
+fn display_object_id(objects: &[SheetObject], index: usize) -> String {
+    objects
+        .get(index)
+        .and_then(|o| o.id.clone())
+        .unwrap_or_else(|| format!("#{index}"))
+}
+
+/// Rendered items grouped under one stable object identity.
+struct ObjectItems<'a> {
+    id: String,
+    items: Vec<(usize, &'a Item)>,
+}
+
+/// Groups `list`'s items by stable case-folded object ID, preserving first-seen order.
+fn group_items_by_id<'a>(
+    objects: &[SheetObject],
+    list: &'a DisplayList,
+) -> (HashMap<String, ObjectItems<'a>>, Vec<String>) {
+    let mut by_id: HashMap<String, ObjectItems<'a>> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for (idx, item) in list.items.iter().enumerate() {
+        let key = stable_object_id(objects, item.object);
+        by_id
+            .entry(key.clone())
+            .or_insert_with(|| {
+                order.push(key);
+                ObjectItems {
+                    id: display_object_id(objects, item.object),
+                    items: Vec::new(),
+                }
+            })
+            .items
+            .push((idx, item));
+    }
+    (by_id, order)
+}
+
+/// Context needed to compare items by stable object, viewport, and clip identity.
+struct ItemContext<'a> {
+    objects: &'a [SheetObject],
+    list: &'a DisplayList,
+}
+
+/// Stable comparison key for one rendered item: replaces unstable `object`,
+/// `viewport`, and `clip_boundary` indices with stable viewport IDs and the
+/// actual clip boundary polygon (and normalizes `Shape::Image` index to its
+/// image payload) so unrelated index shifts never create false diffs while
+/// viewport, clip, or layer edits that alter an item's ink are caught (#187).
+fn item_key(item: &Item, ctx: &ItemContext) -> String {
+    let viewport_id = item.viewport.map(|v| stable_object_id(ctx.objects, v));
+    let clip_outline = item
+        .clip_boundary
+        .and_then(|b| ctx.list.clip_boundaries.get(b));
+    let mut normalized = item.clone();
+    normalized.object = 0;
+    normalized.viewport = None;
+    normalized.clip_boundary = None;
+    let image_data = match &mut normalized.shape {
+        crate::draw::Shape::Image { image, .. } => {
+            let idx = *image;
+            *image = 0;
+            ctx.list.images.get(idx).map(|img| img.png_base64.as_str())
+        }
+        _ => None,
+    };
+    serde_json::to_string(&(viewport_id, clip_outline, image_data, normalized)).unwrap_or_default()
+}
+
 /// Of one object's items `after` a change and `before` it: the places of
 /// those after that draw otherwise than any before, and those before that
-/// draw otherwise than any after. An item is the same whatever its
-/// object's place, which a deletion before it moves.
-fn differ(after: &[(usize, &Item)], before: &[(usize, &Item)]) -> (Vec<usize>, Vec<Item>) {
-    let key = |item: &Item| {
-        let mut item = item.clone();
-        item.object = 0;
-        serde_json::to_string(&item).unwrap_or_default()
-    };
-    let counts = |items: &[(usize, &Item)]| {
+/// draw otherwise than any after. Items are matched by stable viewport ID and
+/// clip boundary rather than raw list indices (#187).
+fn differ(
+    after: &[(usize, &Item)],
+    after_ctx: &ItemContext,
+    before: &[(usize, &Item)],
+    before_ctx: &ItemContext,
+) -> (Vec<usize>, Vec<Item>) {
+    let counts = |items: &[(usize, &Item)], ctx: &ItemContext| {
         let mut counts: HashMap<String, usize> = HashMap::new();
         for (_, item) in items {
-            *counts.entry(key(item)).or_default() += 1;
+            *counts.entry(item_key(item, ctx)).or_default() += 1;
         }
         counts
     };
-    let taken = |counts: &mut HashMap<String, usize>, item: &Item| match counts.get_mut(&key(item))
+    let taken = |counts: &mut HashMap<String, usize>, item: &Item, ctx: &ItemContext| match counts
+        .get_mut(&item_key(item, ctx))
     {
         Some(n) if *n > 0 => {
             *n -= 1;
@@ -915,16 +1052,16 @@ fn differ(after: &[(usize, &Item)], before: &[(usize, &Item)]) -> (Vec<usize>, V
         }
         _ => false,
     };
-    let mut was = counts(before);
+    let mut was = counts(before, before_ctx);
     let new = after
         .iter()
-        .filter(|(_, item)| !taken(&mut was, item))
+        .filter(|(_, item)| !taken(&mut was, item, after_ctx))
         .map(|(i, _)| *i)
         .collect();
-    let mut now = counts(after);
+    let mut now = counts(after, after_ctx);
     let gone = before
         .iter()
-        .filter(|(_, item)| !taken(&mut now, item))
+        .filter(|(_, item)| !taken(&mut now, item, before_ctx))
         .map(|(_, item)| (*item).clone())
         .collect();
     (new, gone)
