@@ -196,7 +196,8 @@ impl Deadline {
 }
 
 /// Runs `agentdrafter serve`: listens, prints the line it starts with, and
-/// serves until it is stopped.
+/// serves until it is stopped. On Unix, SIGINT (Ctrl+C), SIGTERM and SIGHUP
+/// kill every running assistant agent's process group before exiting (#228).
 pub fn serve(args: Args) -> ExitCode {
     let (listener, guard) = match listen(args) {
         Ok(listening) => listening,
@@ -215,11 +216,141 @@ pub fn serve(args: Args) -> ExitCode {
     let settings = Settings::from_env();
     // The agents are looked for on the PATH as the server starts.
     let _ = assistant();
+    let stop = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    #[cfg(unix)]
+    unix_shutdown::install(address, Arc::clone(&stop), done_rx);
     // A connection that failed to open is passed over.
     for stream in listener.incoming().flatten() {
-        handle(stream, &guard, &settings, DEADLINE, None);
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        handle(stream, &guard, &settings, DEADLINE, Some(Arc::clone(&stop)));
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+    }
+    crate::assistant::shutdown();
+    #[cfg(unix)]
+    {
+        let _ = done_tx.send(());
+        let sig = unix_shutdown::stop_signal();
+        if sig != 0 {
+            return ExitCode::from((128 + sig) as u8);
+        }
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(unix)]
+mod unix_shutdown {
+    use std::ffi::c_int;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    const SIGHUP: c_int = 1;
+    const SIGINT: c_int = 2;
+    const SIGTERM: c_int = 15;
+    const SIG_IGN: usize = 1;
+
+    static STOP_SIGNAL: AtomicI32 = AtomicI32::new(0);
+    static SIGNAL_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+
+    extern "C" {
+        fn pipe(fds: *mut c_int) -> c_int;
+        fn read(fd: c_int, buf: *mut u8, count: usize) -> isize;
+        fn write(fd: c_int, buf: *const u8, count: usize) -> isize;
+        fn close(fd: c_int) -> c_int;
+        fn signal(sig: c_int, handler: usize) -> usize;
+    }
+
+    extern "C" fn on_signal(sig: c_int) {
+        if STOP_SIGNAL
+            .compare_exchange(0, sig, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let fd = SIGNAL_WRITE_FD.load(Ordering::SeqCst);
+            if fd >= 0 {
+                let byte: u8 = 1;
+                // SAFETY: `write(2)` is async-signal-safe and `fd` is the
+                // self-pipe write end, kept open for the life of `serve`.
+                unsafe {
+                    let _ = write(fd, &byte, 1);
+                }
+            }
+        }
+    }
+
+    pub(super) fn stop_signal() -> i32 {
+        STOP_SIGNAL.load(Ordering::SeqCst)
+    }
+
+    /// Installs SIGINT, SIGTERM and (when not ignored) SIGHUP handlers backed
+    /// by a self-pipe and a watcher thread that kills every running assistant
+    /// process group and wakes `listener.accept()` (#228).
+    pub(super) fn install(address: SocketAddr, stop: Arc<AtomicBool>, done_rx: mpsc::Receiver<()>) {
+        let mut fds: [c_int; 2] = [-1, -1];
+        // SAFETY: `fds` points to 2 valid `c_int` slots.
+        if unsafe { pipe(fds.as_mut_ptr()) } != 0 {
+            return;
+        }
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+        STOP_SIGNAL.store(0, Ordering::SeqCst);
+        SIGNAL_WRITE_FD.store(write_fd, Ordering::SeqCst);
+        let handler = on_signal as *const () as usize;
+        // SAFETY: `on_signal` is an `extern "C" fn(c_int)` using only
+        // async-signal-safe operations.
+        unsafe {
+            let _ = signal(SIGINT, handler);
+            let _ = signal(SIGTERM, handler);
+            let prev_hup = signal(SIGHUP, handler);
+            if prev_hup == SIG_IGN {
+                let _ = signal(SIGHUP, SIG_IGN);
+            }
+        }
+        let wake_addr = if address.ip().is_unspecified() {
+            SocketAddr::new(
+                if address.is_ipv4() {
+                    IpAddr::V4(Ipv4Addr::LOCALHOST)
+                } else {
+                    IpAddr::V6(Ipv6Addr::LOCALHOST)
+                },
+                address.port(),
+            )
+        } else {
+            address
+        };
+        let _ = std::thread::Builder::new()
+            .name("agentdrafter-signal".into())
+            .spawn(move || {
+                let mut byte = 0u8;
+                loop {
+                    // SAFETY: `read_fd` is owned exclusively by this thread.
+                    let n = unsafe { read(read_fd, &mut byte, 1) };
+                    if n >= 0 || STOP_SIGNAL.load(Ordering::SeqCst) != 0 {
+                        break;
+                    }
+                }
+                // SAFETY: closing our read end after waking.
+                unsafe {
+                    let _ = close(read_fd);
+                }
+                let sig = STOP_SIGNAL.load(Ordering::SeqCst);
+                if sig == 0 {
+                    return;
+                }
+                crate::assistant::shutdown();
+                stop.store(true, Ordering::SeqCst);
+                let _ = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(200));
+                if done_rx.recv_timeout(Duration::from_millis(300)).is_err() {
+                    crate::assistant::shutdown();
+                    std::process::exit(128 + sig);
+                }
+            });
+    }
 }
 
 /// An in-process local HTTP server for the desktop shell (`crates/agentdrafter-desktop`).
@@ -262,6 +393,7 @@ impl LocalServer {
     /// teardown if an in-flight request is slow.
     pub fn shutdown(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        crate::assistant::stop_all();
         // Wake the blocking `accept()` call on the server thread with a short timeout.
         let _ = TcpStream::connect_timeout(&self.address, Duration::from_millis(200));
         if let Some(done) = self.done.take() {

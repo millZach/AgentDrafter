@@ -136,6 +136,7 @@ fn run_probe(program: &Path, args: &[&str], limit: Duration) -> Result<ProbeOutp
     super::own_group(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let pid = child.id();
+    let _active = super::ActiveChild::track(pid);
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
     let read_pipe = |mut pipe: Box<dyn Read + Send>| {
@@ -649,6 +650,9 @@ pre_turn = [\"audit.sh\"]
 
     #[test]
     fn check_rejects_old_keyring_only_and_signed_out_codex() {
+        let _guard = super::super::CHILD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir =
             std::env::temp_dir().join(format!("agentdrafter-codex-check-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
