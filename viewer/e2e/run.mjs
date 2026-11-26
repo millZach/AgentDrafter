@@ -6001,7 +6001,7 @@ const checks = {
               tool: 'move',
               points: [
                 { object: { id: 'DP-LD-101/terminal-2' }, label: 'TB1-2' },
-                { at: { snap: { id: 'DP-LD-101/terminal-2', snap: 'insertion', which: 'position' } }, label: 'base point' },
+                { at: { snap: { id: 'DP-LD-101/terminal-2', snap: 'midpoint', which: 'objects[0].segments[3]' } }, label: 'base point' },
               ],
               completes: { op: 'move', target: { id: 'DP-LD-101/terminal-2' }, by: [0, -0.1, 0] },
             },
