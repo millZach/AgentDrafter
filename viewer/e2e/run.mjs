@@ -5774,6 +5774,23 @@ const checks = {
         await page.click('[data-g="close"]');
         await page.waitForFunction(() => !document.querySelector('.gbanner'), null, { timeout: 15000 });
 
+        // Second tab opened via the set's absolute path (while this tab used
+        // relative `demo-plant`): shares the conversation and keeps both the
+        // proposal card and the guide card via canonical set identity (#227).
+        {
+          const absSet = join(folder, 'demo-plant');
+          const { page: absPage, problems: absProblems } = await open(
+            context,
+            `${server.base}/?source=${encodeURIComponent(absSet)}&sheet=DP-LD-101`,
+            'DP-LD-101',
+          );
+          await live(absPage);
+          await absPage.waitForSelector('[data-pcc="1"][data-ended="kept"]', { timeout: 30000 });
+          await absPage.waitForSelector('[data-guide-card="1"]', { timeout: 30000 });
+          assert(absProblems.length === 0, absProblems.join('; '));
+          await absPage.close();
+        }
+
         // The picker: a new conversation on Codex.
         await page.selectOption('.agent select', 'codex');
         await page.waitForFunction(() => [...document.querySelectorAll('[data-chat] [data-kind="note"]')].some((n) => n.textContent.includes('Now on Codex')), null, { timeout: 30000 });

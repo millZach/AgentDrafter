@@ -353,9 +353,10 @@ function AssistantMessage({ index, item, ...props }: MessageProps) {
         )}
       </div>,
     );
-    const made = proposalMade(part, props.source);
+    const canonical = props.conversation?.canonical_set;
+    const made = proposalMade(part, props.source, canonical);
     if (made !== null) cards.push({ n: made, part });
-    const given = guideMade(part, props.source);
+    const given = guideMade(part, props.source, canonical);
     if (given !== null) cards.push({ n: given, part, guide: true });
   });
   flushLines();

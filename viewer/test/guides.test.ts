@@ -211,6 +211,11 @@ test('the chat’s card belongs to a guide the assistant gave on the set shown',
   assert.equal(guideMade(part, 'examples/demo-plant'), 3);
   assert.equal(guideMade(part, 'examples/demo-set'), null);
   assert.equal(guideMade({ ...part, command: 'propose' } as Part, 'examples/demo-plant'), null);
+  // Two spellings of the same set match via canonical_set (#227).
+  const canonical = '/work/examples/demo-plant';
+  const withCanonical = { ...part, canonical_set: canonical } as Part;
+  assert.equal(guideMade(withCanonical, canonical, canonical), 3);
+  assert.equal(guideMade(withCanonical, canonical, '/work/examples/other-plant'), null);
   assert.equal(cardWords('run', stepDone(startRun(guide), guide), 4), 'Running: step 2 of 4.');
   assert.equal(cardWords('end', stopRun(startRun(guide)), 4), 'Stopped.');
 });

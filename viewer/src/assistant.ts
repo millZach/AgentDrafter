@@ -56,6 +56,8 @@ export interface CommandPart {
   /** Null while it runs. */
   reply: CommandReply | null;
   ok: boolean | null;
+  /** Canonical path of the drawing set named in `input.set` or `reply.result.set`, resolved by `serve` (#227). */
+  canonical_set?: string | null;
 }
 
 export interface WordsPart {
@@ -95,6 +97,8 @@ export type Item = NoteItem | DrafterItem | AssistantItem;
 /** One event of `/assistant/events`: the whole conversation. */
 export interface Conversation {
   set: string;
+  /** Canonical path of the conversation's drawing set, resolved by `serve` (#227). */
+  canonical_set?: string;
   /** The agent it runs on; null when none was found. */
   agent: string | null;
   /** A turn is running: the input waits. */
@@ -318,22 +322,32 @@ export function sameSet(a: string, b: string): boolean {
 }
 
 /**
+ * Matches a command part to the drawing set shown: prefers the canonical path
+ * resolved by `serve` so tabs opened under different spellings (relative vs
+ * absolute, symlinks) keep their chat cards (#227), falling back to normalized
+ * path text when canonical paths are absent.
+ */
+function partMatchesSet(part: CommandPart, set: string, canonicalSet?: string): boolean {
+  if (canonicalSet && part.canonical_set) return sameSet(part.canonical_set, canonicalSet);
+  const on = str(obj(part.input).set) ?? str(obj(part.reply?.result).set);
+  return !!on && sameSet(on, set);
+}
+
+/**
  * The proposal a part made on the drawing set `set`: a `propose` of that
  * set whose reply is ok, by its number; null for any other part, so a
  * proposal is matched by its set and its number, never its number alone.
  */
-export function proposalMade(part: Part, set: string): number | null {
+export function proposalMade(part: Part, set: string, canonicalSet?: string): number | null {
   if (part.kind !== 'command' || part.command !== 'propose' || !part.reply?.ok) return null;
-  const on = str(obj(part.input).set) ?? str(obj(part.reply.result).set);
-  if (!on || !sameSet(on, set)) return null;
+  if (!partMatchesSet(part, set, canonicalSet)) return null;
   return num(obj(part.reply.result).proposal) ?? null;
 }
 
 /** The guide the assistant gave on the set `set`, by its number, from its `guide` (#157); null for any other part. */
-export function guideMade(part: Part, set: string): number | null {
+export function guideMade(part: Part, set: string, canonicalSet?: string): number | null {
   if (part.kind !== 'command' || part.command !== 'guide' || !part.reply?.ok) return null;
-  const on = str(obj(part.input).set) ?? str(obj(part.reply.result).set);
-  if (!on || !sameSet(on, set)) return null;
+  if (!partMatchesSet(part, set, canonicalSet)) return null;
   return num(obj(part.reply.result).guide) ?? null;
 }
 
@@ -507,12 +521,12 @@ export function notSentWords(code: string, message: string, name: string | null)
 }
 
 /** The proposals a conversation's assistant made, by number, in the order it made them. */
-export function proposalsMade(items: readonly Item[], set: string): number[] {
+export function proposalsMade(items: readonly Item[], set: string, canonicalSet?: string): number[] {
   const out: number[] = [];
   for (const item of items) {
     if (item.kind !== 'assistant') continue;
     for (const part of item.parts) {
-      const n = proposalMade(part, set);
+      const n = proposalMade(part, set, canonicalSet);
       if (n !== null) out.push(n);
     }
   }
