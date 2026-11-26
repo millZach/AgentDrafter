@@ -6,6 +6,7 @@
 // in as they are.
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { finishSheetGesture, SheetClickGuard } from './sheet.ts';
 
 export type Snap = 'peek' | 'half' | 'full';
 
@@ -38,9 +39,10 @@ export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled, snap
   const peekBox = useRef<HTMLDivElement>(null);
   const [snap, setSnap] = useState<Snap>('peek');
   const drag = useRef<{ y0: number; s0: number; t: number; last: number; v: number; moved: boolean; tap: boolean; id: number; captured: boolean } | null>(null);
-  // A drag that began on one of the peek's buttons and moved: the click its
-  // lift would make is not the button's.
-  const swallowClick = useRef(0);
+  // A tap on the grab or a moved drag shifts the sheet during pointerup: its
+  // trailing synthetic click must not reach the journal list sliding up under
+  // the finger, nor anything uncovered as the sheet slides down (#204).
+  const clickGuard = useRef(new SheetClickGuard());
   const y = useRef(0);
   const settled = useRef<number | null>(null);
   const settle = useRef(onSettled);
@@ -118,6 +120,25 @@ export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled, snap
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asked?.key]);
 
+  // Mounted once so snap changes never create a gap between pointerup and the
+  // browser's trailing synthetic click (#204). A fresh pointerdown disarms the
+  // guard so a subsequent genuine tap is never blocked if a drag emitted no click.
+  useEffect(() => {
+    const clear = () => clickGuard.current.clear();
+    const click = (e: MouseEvent) => {
+      if (clickGuard.current.take(performance.now())) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    document.addEventListener('pointerdown', clear, true);
+    document.addEventListener('click', click, true);
+    return () => {
+      document.removeEventListener('pointerdown', clear, true);
+      document.removeEventListener('click', click, true);
+    };
+  }, []);
+
   useEffect(() => {
     const el = sheet.current;
     if (!el) return;
@@ -151,13 +172,14 @@ export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled, snap
       }
       place(clamp(d.s0 + e.clientY - d.y0, snapY('full'), snapY('peek')), false);
     };
-    const up = () => {
+    const up = (e: PointerEvent) => {
       const d = drag.current;
       if (!d) return;
       drag.current = null;
-      if (d.moved && !d.tap) swallowClick.current = performance.now();
+      const done = finishSheetGesture(d.moved, d.tap, e.type === 'pointercancel');
+      if (done.swallowClick) clickGuard.current.arm(performance.now());
       if (!d.moved) {
-        if (d.tap) snapTo(snap === 'peek' ? 'half' : 'peek');
+        if (done.toggle) snapTo(snap === 'peek' ? 'half' : 'peek');
         return;
       }
       const order: Snap[] = ['full', 'half', 'peek'];
@@ -168,21 +190,11 @@ export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled, snap
       if (Math.abs(d.v) > 0.5) best = order[clamp(order.indexOf(snap) + (d.v > 0 ? 1 : -1), 0, 2)] ?? best;
       snapTo(best);
     };
-    // The click a moved drag's lift makes on a peek's button is the drag's.
-    const click = (e: MouseEvent) => {
-      if (performance.now() - swallowClick.current < 400) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-      swallowClick.current = 0;
-    };
-    el.addEventListener('click', click, true);
     el.addEventListener('pointerdown', down);
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);
     el.addEventListener('pointercancel', up);
     return () => {
-      el.removeEventListener('click', click, true);
       el.removeEventListener('pointerdown', down);
       el.removeEventListener('pointermove', move);
       el.removeEventListener('pointerup', up);
