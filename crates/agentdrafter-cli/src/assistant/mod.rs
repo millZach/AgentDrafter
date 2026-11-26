@@ -486,6 +486,7 @@ impl Assistant {
         let talk = self.talk(&mut talks, key, key);
         let reply = Reply::from(Ok(json!({
             "set": talk.named,
+            "canonical_set": key,
             "agent": talk.agent.map(Agent::key),
             "busy": talk.busy,
             "items": talk.items,
@@ -933,27 +934,39 @@ impl Assistant {
             AgentEvent::Session(_) => {}
             AgentEvent::Words(text) => list.push(json!({ "kind": "words", "text": text })),
             AgentEvent::Started { id, tool, input } => {
+                let canonical_set = canonical_set_of(&input);
                 list.push(json!({
                     "kind": "command",
                     "command": tool,
                     "input": input,
                     "reply": null,
                     "ok": null,
+                    "canonical_set": canonical_set,
                 }));
                 parts.insert(id, list.len() - 1);
             }
             AgentEvent::Done { id, reply, ok } => match parts.get(&id) {
                 Some(&at) => {
+                    if list[at]["canonical_set"].is_null() {
+                        if let Some(canonical_set) = reply.get("result").and_then(canonical_set_of)
+                        {
+                            list[at]["canonical_set"] = json!(canonical_set);
+                        }
+                    }
                     list[at]["reply"] = reply;
                     list[at]["ok"] = json!(ok);
                 }
-                None => list.push(json!({
-                    "kind": "command",
-                    "command": "tool",
-                    "input": {},
-                    "reply": reply,
-                    "ok": ok,
-                })),
+                None => {
+                    let canonical_set = reply.get("result").and_then(canonical_set_of);
+                    list.push(json!({
+                        "kind": "command",
+                        "command": "tool",
+                        "input": {},
+                        "reply": reply,
+                        "ok": ok,
+                        "canonical_set": canonical_set,
+                    }));
+                }
             },
             AgentEvent::Failed(_) => {}
         }
@@ -978,6 +991,13 @@ impl Assistant {
         drop(talks);
         self.changed.notify_all();
     }
+}
+
+/// Resolves the canonical path of the `set` field on a command input or reply
+/// result when present and reachable on disk (#227).
+fn canonical_set_of(value: &Value) -> Option<PathBuf> {
+    let raw = value.get("set").and_then(Value::as_str)?;
+    std::fs::canonicalize(raw).ok()
 }
 
 /// The status a refusal the core gave is sent with: 400 for a wrong
@@ -1421,5 +1441,113 @@ FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
         let now = utc_now();
         assert_eq!(now.len(), 20, "{now}");
         assert!(now.starts_with("20") && now.ends_with('Z'), "{now}");
+    }
+
+    #[test]
+    fn conversation_snapshot_and_command_parts_carry_canonical_set_identity() {
+        let folder =
+            std::env::temp_dir().join(format!("agentdrafter-canonical-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        let set_dir = folder.join("demo-plant");
+        let other_dir = folder.join("other-plant");
+        std::fs::create_dir_all(&set_dir).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let canonical = std::fs::canonicalize(&set_dir).unwrap();
+        let other_canonical = std::fs::canonicalize(&other_dir).unwrap();
+        // A differently spelled path to the same set (`demo-plant/../demo-plant`).
+        let alt_spelling = set_dir.join("..").join("demo-plant");
+
+        let assistant = Assistant {
+            found: Mutex::new(Vec::new()),
+            talks: Mutex::new(HashMap::new()),
+            changed: Condvar::new(),
+            own: vec!["agentdrafter".into()],
+        };
+        {
+            let mut talks = assistant.lock();
+            talks.insert(
+                canonical.clone(),
+                Talk {
+                    named: alt_spelling.clone(),
+                    agent: Some(Agent::Claude),
+                    session: None,
+                    busy: true,
+                    items: vec![
+                        json!({"kind": "drafter", "text": "move it"}),
+                        json!({"kind": "assistant", "parts": [], "done": false, "error": null}),
+                    ],
+                    version: 1,
+                },
+            );
+        }
+        let turn = Turn {
+            set: canonical.clone(),
+            agent: Agent::Claude,
+            program: PathBuf::from("claude"),
+            session: None,
+            prompt: String::new(),
+            looking_at: json!({"ok": true}),
+            item: 1,
+            limit: Duration::from_secs(5),
+        };
+        let mut parts = HashMap::new();
+        // 1. `propose` naming the alternate spelling in `input.set` resolves to `canonical`.
+        assistant.apply(
+            &turn,
+            &mut parts,
+            AgentEvent::Started {
+                id: "t1".into(),
+                tool: "propose".into(),
+                input: json!({"set": alt_spelling}),
+            },
+        );
+        assistant.apply(
+            &turn,
+            &mut parts,
+            AgentEvent::Done {
+                id: "t1".into(),
+                reply: json!({"ok": true, "result": {"proposal": 1}}),
+                ok: true,
+            },
+        );
+        // 2. `guide` whose `set` appears only in `reply.result.set` resolves to `canonical`.
+        assistant.apply(
+            &turn,
+            &mut parts,
+            AgentEvent::Started {
+                id: "t2".into(),
+                tool: "guide".into(),
+                input: json!({}),
+            },
+        );
+        assistant.apply(
+            &turn,
+            &mut parts,
+            AgentEvent::Done {
+                id: "t2".into(),
+                reply: json!({"ok": true, "result": {"guide": 2, "set": alt_spelling}}),
+                ok: true,
+            },
+        );
+        // 3. A command naming another set gets that other set's canonical path.
+        assistant.apply(
+            &turn,
+            &mut parts,
+            AgentEvent::Started {
+                id: "t3".into(),
+                tool: "propose".into(),
+                input: json!({"set": other_dir}),
+            },
+        );
+
+        let (_, line) = assistant.snapshot(&canonical);
+        let parsed: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["result"]["canonical_set"], json!(canonical));
+        let recorded = parsed["result"]["items"][1]["parts"].as_array().unwrap();
+        assert_eq!(recorded[0]["canonical_set"], json!(canonical));
+        assert_eq!(recorded[1]["canonical_set"], json!(canonical));
+        assert_eq!(recorded[2]["canonical_set"], json!(other_canonical));
+
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

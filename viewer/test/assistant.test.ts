@@ -208,6 +208,21 @@ test('which proposal a part made: a propose whose reply is ok', () => {
   assert.deepEqual(proposalsMade(items, 'examples/other-plant'), []);
   assert.equal(hasMessages(items), true);
   assert.equal(hasMessages([{ kind: 'note', text: 'On Claude Code', at: '' }]), false);
+
+  // Two spellings of the same set (relative vs absolute path) match on canonical identity (#227).
+  const canonical = '/work/examples/demo-plant';
+  const withCanonical = { ...made, canonical_set: canonical };
+  assert.equal(proposalMade(withCanonical, canonical, canonical), 4, 'absolute tab keeps card for relative-path propose');
+  assert.equal(proposalMade(withCanonical, 'examples/demo-plant', canonical), 4, 'relative tab keeps card');
+  assert.equal(proposalMade(withCanonical, canonical, '/work/examples/other-plant'), null, 'different canonical set drops card');
+  assert.deepEqual(
+    proposalsMade(
+      [{ kind: 'assistant', agent: 'claude', name: 'Claude Code', at: '', parts: [withCanonical], done: true, error: null }],
+      canonical,
+      canonical,
+    ),
+    [4],
+  );
 });
 
 test('a proposal’s card: its sheets, its words, and how it ended, from the journal', () => {
