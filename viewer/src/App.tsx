@@ -87,7 +87,9 @@ import {
   toggleFor,
   barNote,
   barWarning,
+  dismissToastOnToolStart,
   switchingAway,
+  toastDuration,
   canToolUndo,
   isUndoKey,
   rightClickText,
@@ -1051,10 +1053,11 @@ function DrawingWorkspace({
     },
     [log],
   );
-  // A toast goes after a while.
+  // A toast goes after a while: routine landing toasts clear in 3 s, while
+  // warnings, errors, assistant proposals and guides stay for 6 s (#257).
   useEffect(() => {
     if (!toast) return;
-    const gone = setTimeout(() => setToast((t) => (t?.key === toast.key ? null : t)), 6000);
+    const gone = setTimeout(() => setToast((t) => (t?.key === toast.key ? null : t)), toastDuration(toast));
     return () => clearTimeout(gone);
   }, [toast]);
 
@@ -1979,6 +1982,7 @@ function DrawingWorkspace({
     setToolsOpen(false);
     setTaken(null);
     setSnapMenu(null);
+    if (dismissToastOnToolStart(toast)) setToast(null);
     const picked = fromSelection && pickedPlace !== null ? [pickedPlace] : [];
     if (at !== null) {
       // The set as it was is read-only: the tool starts on the set as it
