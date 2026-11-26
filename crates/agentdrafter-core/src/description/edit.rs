@@ -2120,7 +2120,9 @@ impl RecordFile {
         operation: usize,
     ) -> Vec<String> {
         self.state(list);
+        let deleted_id = self.objects(list).get(index).map(|l| l.id.to_lowercase());
         let mut kept = Vec::new();
+        let mut relinked: Vec<usize> = Vec::new();
         if let Ok(items) = self.items_mut(list) {
             items.remove(index);
             for (i, item) in items.iter_mut().enumerate().skip(index) {
@@ -2141,6 +2143,42 @@ impl RecordFile {
                     }
                 }
             }
+            // If the deleted object was the source of a copy family, promote the
+            // first surviving copy to be the new family head (removing its
+            // `copy_of`) and repoint any remaining copies to it so a later
+            // unrelated object reusing the deleted ID cannot join the family (#241).
+            if let Some(deleted_id) = deleted_id {
+                let survivors: Vec<usize> = items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, item)| {
+                        let (_, Some(keys)) = object_parts(item) else {
+                            return None;
+                        };
+                        let copy_of = scalar_of(keys, COPY_OF_KEY)?;
+                        (copy_of.to_lowercase() == deleted_id).then_some(i)
+                    })
+                    .collect();
+                if let Some((&head, rest)) = survivors.split_first() {
+                    let head_id = object_parts(&items[head])
+                        .1
+                        .and_then(|keys| scalar_of(keys, ID_KEY))
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| list.place(head));
+                    if let Some(keys) = object_keys_mut(&mut items[head]) {
+                        keys.retain(|e| e.key != COPY_OF_KEY);
+                        relinked.push(head);
+                    }
+                    for &other in rest {
+                        if let Some(keys) = object_keys_mut(&mut items[other]) {
+                            if let Some(entry) = keys.iter_mut().find(|e| e.key == COPY_OF_KEY) {
+                                entry.value = Node::scalar(head_id.clone());
+                                relinked.push(other);
+                            }
+                        }
+                    }
+                }
+            }
         }
         let state = self.list_state(list);
         state.items.remove(index);
@@ -2149,6 +2187,12 @@ impl RecordFile {
             item.edited = true;
             item.touches
                 .push((operation, Touch::Keys(vec![ID_KEY.to_owned()])));
+        }
+        for i in relinked {
+            let item = &mut state.items[i];
+            item.edited = true;
+            item.touches
+                .push((operation, Touch::Keys(vec![COPY_OF_KEY.to_owned()])));
         }
         kept.into_iter().map(|(_, place)| place).collect()
     }
@@ -3255,12 +3299,17 @@ impl RecordFile {
             };
             let entry = entries.iter().find(|e| e.key == name).ok_or_else(missing)?;
             let source = entry.value.source.ok_or_else(missing)?;
+            let key_column = if in_flow {
+                entry.key_at.column.saturating_sub(1)
+            } else {
+                self.entry_line_start_and_indent(entry).1
+            };
             let edit = ValueEdit {
                 row,
                 name: name.to_owned(),
                 source,
                 key_end: entry.key_end,
-                key_column: entry.key_at.column.saturating_sub(1),
+                key_column,
                 in_flow,
             };
             self.values.push(edit);
@@ -3457,10 +3506,7 @@ impl RecordFile {
                     splices.push((close, close, with.join(", ")));
                 }
                 (Some(ValueAnchor::Before(j)), _) => {
-                    let indent = entries[j].key_at.column.saturating_sub(1);
-                    let start = self.text[..entries[j].key_end]
-                        .rfind('\n')
-                        .map_or(0, |p| p + 1);
+                    let (start, indent) = self.entry_line_start_and_indent(&entries[j]);
                     let with: String = added
                         .iter()
                         .map(|e| {
@@ -3476,7 +3522,7 @@ impl RecordFile {
                     splices.push((start, start, with));
                 }
                 (Some(ValueAnchor::After(j)), false) => {
-                    let indent = entries[j].key_at.column.saturating_sub(1);
+                    let (_, indent) = self.entry_line_start_and_indent(&entries[j]);
                     let end = self.value_end(row, &entries[j]).ok_or_else(lost)?;
                     // The end of its line: after a comment on it, before the
                     // line break.
@@ -3501,6 +3547,46 @@ impl RecordFile {
             }
         }
         Ok(())
+    }
+
+    /// The byte offset of the start of `entry`'s first line and its leading
+    /// space indentation, handling YAML explicit-key syntax (`? KEY` or
+    /// `?\n  KEY`) so insertions align with the mapping rather than the key
+    /// token after `? ` (#241).
+    fn entry_line_start_and_indent(&self, entry: &Entry) -> (usize, usize) {
+        let mut start = self.text[..entry.key_end].rfind('\n').map_or(0, |p| p + 1);
+        let prefix = self.text[start..entry.key_end].trim_start_matches(' ');
+        if !prefix.starts_with('?') && start > 0 {
+            let mut cursor = start;
+            while cursor > 0 {
+                let prev_end = if self.text.as_bytes()[cursor - 1] == b'\n' {
+                    if cursor >= 2 && self.text.as_bytes()[cursor - 2] == b'\r' {
+                        cursor - 2
+                    } else {
+                        cursor - 1
+                    }
+                } else {
+                    cursor
+                };
+                let prev_start = self.text[..prev_end].rfind('\n').map_or(0, |p| p + 1);
+                let trimmed = self.text[prev_start..prev_end].trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    cursor = prev_start;
+                    continue;
+                }
+                if trimmed == "?"
+                    || (trimmed.starts_with("? ") && trimmed[1..].trim().starts_with('#'))
+                {
+                    start = prev_start;
+                }
+                break;
+            }
+        }
+        let indent = self.text[start..]
+            .bytes()
+            .take_while(|&b| b == b' ')
+            .count();
+        (start, indent)
     }
 
     /// Where the file wrote the value `entry` of row `row` ends, before an

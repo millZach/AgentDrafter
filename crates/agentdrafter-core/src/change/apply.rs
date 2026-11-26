@@ -2953,31 +2953,60 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         // Of the values a whole text matched to its parts sets, those whose
         // text the edit does not change are dropped: they are neither held
         // to a locked layer, nor made a copy's own, nor written. Each is
-        // compared as the matcher reads it: the parts joined with the
-        // sheet's row values as they stand, split as the text sent is, so
-        // an mtext's last value written as a block of lines, whose last
-        // line break the text shows without, is the same.
+        // compared directly against the object's existing row bindings (with
+        // mtext trailing line breaks stripped across parts as `shown_mtext`
+        // shows them) so an ambiguous current joined text never prevents
+        // recognizing an unchanged part (#241).
         let mut sets = sets;
         if let (FromRow::Parts(held), Some(_)) = (&written, &matched) {
             let row = files.rows[k].index;
             let (rows, _) = at.row_record(k);
-            let joined: String = held
+            let mut shown_parts: Vec<(Option<&str>, String)> = held
                 .iter()
                 .map(|part| match part {
-                    parts::Part::Text(text) => text.clone(),
-                    parts::Part::Row(name) => rows.row_value(row, name).unwrap_or_default(),
+                    parts::Part::Text(text) => (
+                        None,
+                        if is_mtext {
+                            text.replace("\r\n", "\n")
+                        } else {
+                            text.clone()
+                        },
+                    ),
+                    parts::Part::Row(name) => {
+                        let raw = rows.row_value(row, name).unwrap_or_default();
+                        (
+                            Some(name.as_str()),
+                            if is_mtext {
+                                raw.replace("\r\n", "\n")
+                            } else {
+                                raw
+                            },
+                        )
+                    }
                 })
                 .collect();
-            let now = if is_mtext {
-                parts::split(&parts::shown_mtext_parts(held), &shown_mtext(&joined))
-            } else {
-                parts::split(held, &joined)
-            };
-            if let Ok(now) = now {
-                sets.retain(|(name, value)| {
-                    now.iter().find(|(n, _)| n == name).map(|(_, v)| v) != Some(value)
-                });
+            if is_mtext {
+                for (_, text) in shown_parts.iter_mut().rev() {
+                    let kept = text.trim_end_matches(['\n', '\r']).len();
+                    let emptied = kept == 0;
+                    text.truncate(kept);
+                    if !emptied {
+                        break;
+                    }
+                }
             }
+            sets.retain(|(name, value)| {
+                let mut saw = false;
+                for (part_name, shown) in &shown_parts {
+                    if *part_name == Some(name.as_str()) {
+                        saw = true;
+                        if shown != value {
+                            return true;
+                        }
+                    }
+                }
+                !saw
+            });
         }
         let mut created: Vec<String> = Vec::new();
         let mut refused_on = refused_on;
@@ -6782,14 +6811,34 @@ fn keyed(mut applied: Applied, op: &Operation, key: &str) -> Applied {
     applied
 }
 
-/// The id a copy of `listed` is given before its number: its source's id,
-/// or, for one whose ID is its place, such as `objects[2]`, its type.
-fn copy_base(listed: &Listed) -> String {
-    if listed.written && !listed.id.contains('[') && listed.id.len() + 8 <= LONGEST_ID {
-        listed.id.clone()
-    } else {
-        listed.kind.clone()
+/// The first free local ID for a copy of `listed` on every sheet in `on`:
+/// its source's written ID with `-{n}` while that fits within [`LONGEST_ID`],
+/// falling back to its object type when the ID is positional or the actual
+/// suffixed ID would exceed [`LONGEST_ID`] (#241).
+fn next_copy_id(
+    listed: &Listed,
+    on: &[usize],
+    taken: &BTreeMap<usize, BTreeSet<String>>,
+) -> String {
+    let free = |id: &str| {
+        let lower = id.to_lowercase();
+        on.iter().all(|s| !taken[s].contains(&lower))
+    };
+    if listed.written && !listed.id.contains('[') {
+        for n in 1usize.. {
+            let candidate = format!("{}-{n}", listed.id);
+            if candidate.len() > LONGEST_ID {
+                break;
+            }
+            if free(&candidate) {
+                return candidate;
+            }
+        }
     }
+    (1usize..)
+        .map(|n| format!("{}-{n}", listed.kind))
+        .find(|id| free(id))
+        .expect("a free number")
 }
 
 /// The objects `targets` names, each with its key in the operation, all
@@ -7438,12 +7487,12 @@ fn apply_copy(
             spacing,
             align,
         } => {
-            let (id, curves) = match path_curves(at, op, path, k, &found, settings) {
+            let (id, curves, closed) = match path_curves(at, op, path, k, &found, settings) {
                 Ok(found) => found,
                 Err(applied) => return *applied,
             };
             path_id = Some(id);
-            match array::along(&curves, *count, *spacing, *align) {
+            match array::along(&curves, closed, *count, *spacing, *align) {
                 Ok(places) => places,
                 Err(why) => {
                     let key = if spacing.is_some() { "spacing" } else { "path" };
@@ -7529,14 +7578,7 @@ fn apply_copy(
                 Ok(record) => record,
                 Err(e) => return fail(reach, e),
             };
-            let base = copy_base(&record.objects(f.list)[f.index]);
-            let local = (1..)
-                .map(|n| format!("{base}-{n}"))
-                .find(|id| {
-                    let id = id.to_lowercase();
-                    on.iter().all(|s| !taken[s].contains(&id))
-                })
-                .expect("a free number");
+            let local = next_copy_id(&record.objects(f.list)[f.index], &on, &taken);
             for s in &on {
                 taken
                     .get_mut(s)
@@ -12604,7 +12646,7 @@ fn path_curves(
     k: usize,
     found: &[(Found, &str)],
     settings: &Settings,
-) -> Result<(String, Vec<Curve>), Box<Applied>> {
+) -> Result<(String, Vec<Curve>, Option<bool>), Box<Applied>> {
     let files = at.files;
     let err = |sheets: Vec<usize>, code: ErrorCode, message: String| {
         Box::new(Applied {
@@ -12677,13 +12719,12 @@ fn path_curves(
             format!("the path `{}` is not on sheet `{}`", on.id, files.name(k)),
         ));
     };
-    match object {
-        Object::Line(_)
-        | Object::Polyline(_)
-        | Object::Arc(_)
-        | Object::Circle(_)
-        | Object::Ellipse(_)
-        | Object::Spline(_) => {}
+    let closed = match object {
+        Object::Line(_) | Object::Arc(_) => Some(false),
+        Object::Circle(_) => Some(true),
+        Object::Ellipse(e) => Some((e.end_angle - e.start_angle).abs() >= 360.0 - 1e-9),
+        Object::Polyline(p) => p.closed.then_some(true),
+        Object::Spline(_) => None,
         other => {
             let what = other.type_name();
             return Err(err(
@@ -12697,9 +12738,9 @@ fn path_curves(
                 ),
             ));
         }
-    }
+    };
     let curves = reader.curves(object).into_iter().map(|(_, c)| c).collect();
-    Ok((on.id, curves))
+    Ok((on.id, curves, closed))
 }
 
 /// Reads sheet `k` from the records in memory and builds it, adding what

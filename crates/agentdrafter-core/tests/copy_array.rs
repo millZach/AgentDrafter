@@ -1407,3 +1407,166 @@ fn an_unchanged_block_of_lines_at_the_end_of_an_mtext_is_not_split() {
     );
     assert!(before.contains("      NOTES: |\n        LINE ONE\n        LINE TWO\n"));
 }
+
+#[test]
+fn path_array_on_far_open_line_uses_open_spacing() {
+    let rows = ROWS.replace(
+        "      - circle: {id: hole, center: [100, 60, 0], radius: 3}\n",
+        "      - circle: {id: hole, center: [600000000, 0, 0], radius: 0.1}\n      - line: {id: far, from: [600000000, 0, 0], to: [600000000.5, 0, 0]}\n",
+    );
+    let set = strip_set_with("far-line", TEMPLATE, &rows);
+    let report = lands(
+        &set,
+        json!([{"op": "arraypath", "target": {"id": "ARR-001/hole"}, "path": {"id": "ARR-001/far"}, "count": 2, "align": false}]),
+    );
+    assert_eq!(report.operations[0].copies.len(), 1);
+    assert_eq!(report.operations[0].copies[0].by, [0.5, 0.0, 0.0]);
+}
+
+#[test]
+fn long_source_id_keeps_id_prefix_while_suffix_fits_longest_id() {
+    // 253-character ID: `-1`..`-9` are 255 chars (fit LONGEST_ID), `-10` is 256 (falls back to type).
+    let long_id = "a".repeat(253);
+    let rows = ROWS.replace(
+        "      - circle: {id: hole, center: [100, 60, 0], radius: 3}\n",
+        &format!("      - circle: {{id: {long_id}, center: [50, 50, 0], radius: 2}}\n"),
+    );
+    let set = strip_set_with("long-id", TEMPLATE, &rows);
+    let offsets: Vec<Value> = (1..=10).map(|i| json!([i * 10, 0, 0])).collect();
+    let report = lands(
+        &set,
+        json!([{"op": "copy", "target": {"id": format!("ARR-001/{long_id}")}, "offsets": offsets}]),
+    );
+    let ids: Vec<&str> = report.operations[0]
+        .copies
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(ids[0], format!("ARR-001/{long_id}-1"));
+    assert_eq!(ids[8], format!("ARR-001/{long_id}-9"));
+    assert_eq!(ids[9], "ARR-001/circle-1");
+}
+
+#[test]
+fn deleting_copy_family_source_prevents_reused_id_from_joining_family() {
+    let rows = ROWS
+        .replace(
+            "values: {TITLE: STRIP ONE}",
+            "values: {TITLE: STRIP ONE, TAG: T1}",
+        )
+        .replace(
+            "values: {TITLE: STRIP TWO}",
+            "values: {TITLE: STRIP TWO, TAG: T2}",
+        );
+    let set = labelled_set(
+        "reused-source-id",
+        "  - text: {id: label, contents: {row: TAG}, position: [10, 100, 0], height: 3}\n",
+        &rows,
+    );
+    // Copy `label` to `label-1`, delete `label`, then add an unrelated text
+    // with `id: label` in the template (actually via template edit or row, and
+    // verify `label-1` no longer holds `copy_of: label`).
+    lands(
+        &set,
+        json!([
+            {"op": "copy", "target": {"id": "ARR-001/label"}, "offsets": [[0, -10, 0], [0, -20, 0]]},
+            {"op": "delete", "target": {"id": "ARR-001/label"}},
+        ]),
+    );
+    let template_text = fs::read_to_string(set.join("templates/strip.yaml")).unwrap();
+    assert!(
+        !template_text.contains("copy_of: label\n") && !template_text.contains("copy_of: label}"),
+        "dangling copy_of: label remained in template:\n{template_text}"
+    );
+    assert!(
+        template_text.contains("copy_of: label-1"),
+        "surviving second copy should point to promoted head label-1:\n{template_text}"
+    );
+    // Delete `label-2` too, leaving sole survivor `label-1` with no `copy_of`.
+    lands(
+        &set,
+        json!([{"op": "delete", "target": {"id": "ARR-001/label-2"}}]),
+    );
+    // Manually add an unrelated object in the template reusing `id: label` and
+    // referencing `{row: TAG}`, then edit `label-1`: since `label-1` is no
+    // longer linked to `label`, it does not wrongly split `TAG`.
+    let mut tpl = fs::read_to_string(set.join("templates/strip.yaml")).unwrap();
+    tpl.push_str("  - text: {id: label, contents: {row: TAG}, position: [10, 40, 0], height: 3}\n");
+    fs::write(set.join("templates/strip.yaml"), tpl).unwrap();
+    let report = lands(
+        &set,
+        json!([{"op": "change", "target": {"id": "ARR-001/label-1"}, "set": {"contents": "T9"}}]),
+    );
+    assert!(
+        report.operations[0].created_row_values.is_empty(),
+        "sole survivor must not split against unrelated reused id `label`: {:?}",
+        report.operations[0].created_row_values
+    );
+}
+
+#[test]
+fn explicit_key_block_scalar_in_rows_keeps_mapping_indent_for_inserted_value() {
+    let rows = ROWS
+        .replace(
+            "values: {TITLE: STRIP ONE}",
+            "values:\n      TITLE: STRIP ONE\n      TAG: T1\n      ? NOTES\n      : |\n        LINE ONE\n        LINE TWO\n",
+        )
+        .replace(
+            "values: {TITLE: STRIP TWO}",
+            "values: {TITLE: STRIP TWO, TAG: T2, NOTES: N2}",
+        );
+    let set = labelled_set(
+        "explicit-key-notes",
+        "  - mtext: {id: label, contents: [{row: TAG}, ' | ', {row: NOTES}], position: [10, 100, 0], height: 3}\n",
+        &rows,
+    );
+    let report = lands(
+        &set,
+        json!([
+            {"op": "copy", "target": {"id": "ARR-001/label"}, "by": [0, -10, 0]},
+            {"op": "change", "target": {"id": "ARR-001/label-1"}, "set": {"contents": "T9 | LINE ONE\nLINE TWO"}},
+        ]),
+    );
+    assert_eq!(report.operations[1].created_row_values, ["TAG-label-1"]);
+    let after = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    assert!(
+        after.contains("      TAG-label-1: T9\n      ? NOTES\n      : |\n"),
+        "expected 6-space indent before `? NOTES`, got:\n{after}"
+    );
+}
+
+#[test]
+fn ambiguous_current_label_text_still_skips_unchanged_locked_part() {
+    let rows = ROWS
+        .replace(
+            "values: {TITLE: STRIP ONE}",
+            "values: {TITLE: STRIP ONE, TAG: T1 / ALT}",
+        )
+        .replace(
+            "values: {TITLE: STRIP TWO}",
+            "values: {TITLE: STRIP TWO, TAG: T2}",
+        );
+    let set = labelled_set(
+        "ambiguous-locked-part",
+        "  - text: {id: label, contents: [{row: TITLE}, ' / ', {row: TAG}], position: [10, 100, 0], height: 3}\n",
+        &rows,
+    );
+    // Current text is `STRIP ONE / T1 / ALT`, which splits ambiguously into
+    // `[{row: TITLE}, ' / ', {row: TAG}]`. Editing only TAG to `T2` must
+    // recognize TITLE as unchanged from existing bindings and not hit TITLE's lock.
+    let report = lands(
+        &set,
+        json!([{"op": "change", "target": {"id": "ARR-001/label"}, "set": {"contents": "STRIP ONE / T2"}}]),
+    );
+    let set_values: Vec<&str> = report.operations[0]
+        .row_values
+        .iter()
+        .map(|v| v.value.as_str())
+        .collect();
+    assert_eq!(set_values, ["TAG"]);
+    let objects = recorded(&set);
+    let Object::Text(text) = &objects["ARR-001/label"] else {
+        panic!("expected text label");
+    };
+    assert_eq!(text.contents, "STRIP ONE / T2");
+}
