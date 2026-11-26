@@ -845,6 +845,21 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
 .inst b { font-size: 12px; }
 .inst code { font: 12px var(--mono); color: #cfe3ff; overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
 .inst a { font-size: 11.5px; color: #7fc0ff; }
+/* Found on PATH but failed preflight checks (#229). */
+.unavail { display: grid; gap: 3px; background: #241c1f; border: 1px solid #6b3535; border-radius: 4px; padding: 7px 8px; }
+.unavail b { font-size: 12px; color: #ffd4d4; }
+.unavail span { font-size: 12px; color: #ecd7d7; overflow-wrap: anywhere; }
+.agnotice {
+  border: 1px solid #7d6229; border-left: 3px solid var(--warn); border-radius: 5px;
+  background: #2b271e; padding: 8px 9px; font-size: 12px; color: #f1e3c4;
+  display: grid; gap: 6px; line-height: 1.4; margin-bottom: 8px;
+}
+.agnotice-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.agnotice-body { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.agnotice-body b { color: #fff; }
+.agnotice-x { background: none; border: 0; color: #cbb994; font-size: 16px; line-height: 1; padding: 0 3px; flex: none; }
+.agnotice-x:hover { color: #fff; }
+.agnotice-acts { display: flex; gap: 8px; align-items: center; }
 /* The input, and the chip that says what the next message carries. */
 .composer { flex: none; border-top: 1px solid #3c4553; padding: 6px 8px 8px; background: #262d37; display: grid; gap: 5px; }
 .ctxrow { display: flex; gap: 6px; align-items: center; min-width: 0; flex-wrap: wrap; }

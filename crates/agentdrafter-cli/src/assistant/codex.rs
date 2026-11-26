@@ -16,12 +16,18 @@
 //! (`--disable`), so it has no tool that reads a file beyond the set. The next message resumes
 //! the thread the first one's lines named (`exec resume <thread>`).
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use super::{AgentEvent, McpServer, SERVER};
+
+/// How long one preflight probe (`exec --help`, `--version`, `login status`)
+/// may run before it is stopped (#229).
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The features of Codex the assistant runs without: its shell, and those
 /// that reach beyond its MCP server. Codex 0.171's names.
@@ -36,6 +42,151 @@ const DISABLED: [&str; 9] = [
     "view_image",
     "image_generation",
 ];
+
+/// Checks that `program` is a Codex build that can run an assistant turn
+/// under `--ignore-user-config` (supports the flag and is signed in without
+/// relying on a user-configured credential store such as `keyring`, #229).
+pub(super) fn check(program: &Path) -> Result<(), String> {
+    let has_api_key = std::env::var_os("CODEX_API_KEY").is_some_and(|v| !v.is_empty());
+    check_with_api_key(program, has_api_key)
+}
+
+fn check_with_api_key(program: &Path, has_api_key: bool) -> Result<(), String> {
+    let help = run_probe(program, &["exec", "--help"], PROBE_TIMEOUT).map_err(|_| {
+        "Codex could not be checked (`codex exec --help` failed). Update or reinstall Codex and look again."
+            .to_owned()
+    })?;
+    if !help.success {
+        return Err(
+            "Codex could not be checked (`codex exec --help` failed). Update or reinstall Codex and look again."
+                .to_owned(),
+        );
+    }
+    if !help.output.contains("--ignore-user-config") {
+        let label = version_label(program);
+        return Err(format!(
+            "{label} does not support --ignore-user-config, which AgentDrafter needs to keep your other MCP servers off. Update Codex (`npm install -g @openai/codex`) and look again."
+        ));
+    }
+    if has_api_key {
+        return Ok(());
+    }
+    let file_login = run_probe(
+        program,
+        &[
+            "login",
+            "status",
+            "-c",
+            "cli_auth_credentials_store=\"file\"",
+        ],
+        PROBE_TIMEOUT,
+    )
+    .map_err(|_| {
+        "Codex sign-in could not be checked. Run `codex login status` to check it, then look again."
+            .to_owned()
+    })?;
+    if file_login.success {
+        return Ok(());
+    }
+    if let Ok(default_login) = run_probe(program, &["login", "status"], PROBE_TIMEOUT) {
+        if default_login.success {
+            return Err(
+                "Codex is signed in only through its user-configured credential store (such as keyring), which --ignore-user-config ignores. Sign in with file credentials (`codex login -c cli_auth_credentials_store=file`) or set CODEX_API_KEY, then look again."
+                    .to_owned(),
+            );
+        }
+    }
+    Err(
+        "Codex is not signed in. Run `codex login` (or set CODEX_API_KEY) and look again."
+            .to_owned(),
+    )
+}
+
+fn version_label(program: &Path) -> String {
+    let Ok(out) = run_probe(program, &["--version"], PROBE_TIMEOUT) else {
+        return "This Codex".to_owned();
+    };
+    if !out.success {
+        return "This Codex".to_owned();
+    }
+    let Some(line) = out.output.lines().find(|l| !l.trim().is_empty()) else {
+        return "This Codex".to_owned();
+    };
+    let token = line
+        .split_whitespace()
+        .find(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .map(|part| part.trim_start_matches('v'));
+    match token {
+        Some(ver) => format!("Codex {ver}"),
+        None => "This Codex".to_owned(),
+    }
+}
+
+struct ProbeOutput {
+    success: bool,
+    output: String,
+}
+
+fn run_probe(program: &Path, args: &[&str], limit: Duration) -> Result<ProbeOutput, String> {
+    let mut cmd = super::program(program);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    super::own_group(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let pid = child.id();
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let read_pipe = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                if buf.len() < 1 << 18 {
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        })
+    };
+    let out_handle = read_pipe(Box::new(stdout));
+    let err_handle = read_pipe(Box::new(stderr));
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if started.elapsed() >= limit {
+                    super::kill_tree(pid);
+                    let _ = child.wait();
+                    break Err("timed out".to_owned());
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => {
+                super::kill_tree(pid);
+                let _ = child.wait();
+                break Err(e.to_string());
+            }
+        }
+    }?;
+    let mut output = out_handle.join().unwrap_or_default();
+    let err = err_handle.join().unwrap_or_default();
+    if !err.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&err);
+    }
+    Ok(ProbeOutput {
+        success: status.success(),
+        output,
+    })
+}
 
 /// Checks Codex's system configuration directories for system MCP servers,
 /// hooks, or requirements that `--ignore-user-config` still loads (#230).
@@ -492,6 +643,73 @@ pre_turn = [\"audit.sh\"]
         assert!(warnings[0].contains("managed_config.toml") && warnings[0].contains("MCP servers"));
         assert!(warnings[1].contains("managed_config.toml") && warnings[1].contains("hooks"));
         assert!(warnings[2].contains("requirements.toml"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_rejects_old_keyring_only_and_signed_out_codex() {
+        let dir =
+            std::env::temp_dir().join(format!("agentdrafter-codex-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fake-agent")
+            .join("fake_agent.py");
+        let make_shim = |name: &str, envs: &[(&str, &str)]| -> PathBuf {
+            if cfg!(windows) {
+                let shim = dir.join(format!("{name}.cmd"));
+                let mut body = String::from("@setlocal\r\n");
+                for (k, v) in envs {
+                    body.push_str(&format!("@set {k}={v}\r\n"));
+                }
+                body.push_str(&format!("@python \"{}\" codex %*\r\n", script.display()));
+                std::fs::write(&shim, body).unwrap();
+                shim
+            } else {
+                let shim = dir.join(name);
+                let mut body = String::from("#!/bin/sh\n");
+                for (k, v) in envs {
+                    body.push_str(&format!("export {k}={v}\n"));
+                }
+                body.push_str(&format!(
+                    "exec python3 \"{}\" codex \"$@\"\n",
+                    script.display()
+                ));
+                std::fs::write(&shim, body).unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+                shim
+            }
+        };
+
+        let ok_shim = make_shim("codex-ok", &[("FAKE_CODEX_AUTH", "file")]);
+        assert_eq!(check_with_api_key(&ok_shim, false), Ok(()));
+
+        let old_shim = make_shim("codex-old", &[("FAKE_CODEX_OLD", "0.120.0")]);
+        let err = check_with_api_key(&old_shim, false).unwrap_err();
+        assert!(
+            err.contains("Codex 0.120.0") && err.contains("--ignore-user-config"),
+            "{err}"
+        );
+
+        let keyring_shim = make_shim("codex-keyring", &[("FAKE_CODEX_AUTH", "keyring")]);
+        let err = check_with_api_key(&keyring_shim, false).unwrap_err();
+        assert!(
+            err.contains("keyring") && err.contains("cli_auth_credentials_store=file"),
+            "{err}"
+        );
+
+        let signed_out_shim = make_shim("codex-none", &[("FAKE_CODEX_AUTH", "none")]);
+        let err = check_with_api_key(&signed_out_shim, false).unwrap_err();
+        assert!(err.contains("codex login"), "{err}");
+        // CODEX_API_KEY lets exec run without file credentials.
+        assert_eq!(check_with_api_key(&signed_out_shim, true), Ok(()));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -36,6 +36,7 @@ import {
   peekAskWords,
   spaceIsEnter,
   typedRoute,
+  unavailableAgents,
   chatCardActs,
   type AgentsReport,
   type Conversation,
@@ -3181,7 +3182,7 @@ function DrawingWorkspace({
       onUndo={() => void undo(undoable)}
       onAccept={() => void askAccept()}
       ask={{
-        words: peekAskWords(runningAgent, !!conversation?.busy, !!agents),
+        words: peekAskWords(runningAgent, !!conversation?.busy, !!agents, unavailableAgents(agents).length > 0),
         agent: runningAgent,
         none: !!agents && !runningAgent,
         onAsk: () => {

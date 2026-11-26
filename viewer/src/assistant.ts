@@ -19,6 +19,8 @@ export interface AgentInfo {
   found: boolean;
   /** Warnings about administrator-managed or system-level configuration that the agent still loads (#230). */
   warnings?: string[];
+  /** Present when the binary was found on PATH but failed preflight checks and cannot run a turn (#229). */
+  unavailable?: string;
 }
 
 /** How to install an agent, as the panel says it when none is found. */
@@ -498,7 +500,26 @@ export function lookedFor(report: AgentsReport): string {
   return `${listed(names)}, and found ${names.length === 2 ? 'neither' : 'none of them'}`;
 }
 
+/** Agents found on the PATH that cannot run a turn, with why (#229). */
+export interface UnavailableAgent {
+  agent: string;
+  name: string;
+  command: string;
+  reason: string;
+}
+
+export function unavailableAgents(report: AgentsReport | null): UnavailableAgent[] {
+  if (!report) return [];
+  return report.agents
+    .filter((a): a is AgentInfo & { unavailable: string } => !a.found && typeof a.unavailable === 'string' && a.unavailable.length > 0)
+    .map((a) => ({ agent: a.agent, name: a.name, command: a.command, reason: a.unavailable }));
+}
+
 export function noAgentWords(report: AgentsReport): string {
+  const unavailable = unavailableAgents(report);
+  if (unavailable.length > 0) {
+    return 'The assistant runs on an agent you already have, signed in as you are now: no API key goes in AgentDrafter.';
+  }
   return `The assistant runs on an agent you already have, signed in as you are now: no API key goes in AgentDrafter. When it started, AgentDrafter looked on your PATH for ${lookedFor(report)}.`;
 }
 
@@ -509,9 +530,9 @@ export function inputPlaceholder(name: string | null, busy: boolean): string {
 }
 
 /** What a phone's peek offers, to open the chat. */
-export function peekAskWords(name: string | null, busy: boolean, known: boolean): string {
+export function peekAskWords(name: string | null, busy: boolean, known: boolean, hasUnavailable = false): string {
   if (!known) return 'Ask the assistant…';
-  if (!name) return 'No agent found: how to install one ›';
+  if (!name) return hasUnavailable ? 'No usable agent: see why ›' : 'No agent found: how to install one ›';
   return busy ? `${name} is working…` : 'Ask the assistant…';
 }
 

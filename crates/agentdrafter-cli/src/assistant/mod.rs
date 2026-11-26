@@ -111,6 +111,16 @@ impl Agent {
             Agent::Codex => codex::managed_warnings(),
         }
     }
+
+    /// Preflight check that the binary found at `path` can actually run a turn
+    /// (#229). Returns `Err(reason)` when the binary is on the PATH but cannot
+    /// be used.
+    fn check(self, path: &Path) -> Result<(), String> {
+        match self {
+            Agent::Claude => Ok(()),
+            Agent::Codex => codex::check(path),
+        }
+    }
 }
 
 /// What a line of an agent's output says, as its adapter reads it.
@@ -248,9 +258,33 @@ struct FoundAgent {
     warnings: Vec<String>,
 }
 
+/// One agent found on the PATH that cannot run a turn, and why (#229).
+#[derive(Clone, Debug)]
+struct UnavailableAgent {
+    agent: Agent,
+    reason: String,
+}
+
+/// The result of scanning the PATH: usable agents and any found-but-unusable
+/// agents with their reasons (#229).
+#[derive(Clone, Debug, Default)]
+struct AgentScan {
+    usable: Vec<FoundAgent>,
+    unavailable: Vec<UnavailableAgent>,
+}
+
+impl AgentScan {
+    fn unavailable_reason(&self, agent: Agent) -> Option<&str> {
+        self.unavailable
+            .iter()
+            .find(|u| u.agent == agent)
+            .map(|u| u.reason.as_str())
+    }
+}
+
 /// The assistant of this `serve`: the agents found and every conversation.
 pub(crate) struct Assistant {
-    found: Mutex<Vec<FoundAgent>>,
+    found: Mutex<AgentScan>,
     talks: Mutex<HashMap<PathBuf, Talk>>,
     changed: Condvar,
     /// The command that runs AgentDrafter, which the agent starts its MCP
@@ -298,18 +332,24 @@ fn own_command() -> Vec<OsString> {
     }
 }
 
-/// Each agent found on the PATH, with where and any managed-config warnings.
-fn find_agents() -> Vec<FoundAgent> {
-    Agent::ALL
-        .into_iter()
-        .filter_map(|agent| {
-            on_path(agent.command()).map(|path| FoundAgent {
+/// Each agent found on the PATH, checked for usability (#229) and managed-config
+/// warnings (#230).
+fn find_agents() -> AgentScan {
+    let mut scan = AgentScan::default();
+    for agent in Agent::ALL {
+        let Some(path) = on_path(agent.command()) else {
+            continue;
+        };
+        match agent.check(&path) {
+            Ok(()) => scan.usable.push(FoundAgent {
                 agent,
                 path,
                 warnings: agent.managed_warnings(),
-            })
-        })
-        .collect()
+            }),
+            Err(reason) => scan.unavailable.push(UnavailableAgent { agent, reason }),
+        }
+    }
+    scan
 }
 
 /// Where `name` is on the PATH: an executable file of that name, or on
@@ -385,17 +425,17 @@ impl Assistant {
         self.talks.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn found(&self) -> Vec<FoundAgent> {
+    fn found(&self) -> AgentScan {
         self.found.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// The agents, found or not, and how to install each: `GET /assistant`.
     pub(crate) fn agents(&self) -> Value {
-        let found = self.found();
+        let scan = self.found();
         let agents: Vec<Value> = Agent::ALL
             .into_iter()
             .map(|agent| {
-                let entry = found.iter().find(|f| f.agent == agent);
+                let entry = scan.usable.iter().find(|f| f.agent == agent);
                 let mut map = serde_json::Map::new();
                 map.insert("agent".into(), json!(agent.key()));
                 map.insert("name".into(), json!(agent.name()));
@@ -403,6 +443,9 @@ impl Assistant {
                 map.insert("found".into(), json!(entry.is_some()));
                 if let Some(found) = entry.filter(|f| !f.warnings.is_empty()) {
                     map.insert("warnings".into(), json!(found.warnings));
+                }
+                if let Some(reason) = scan.unavailable_reason(agent) {
+                    map.insert("unavailable".into(), json!(reason));
                 }
                 Value::Object(map)
             })
@@ -426,7 +469,7 @@ impl Assistant {
         self.apply_found(find_agents())
     }
 
-    fn apply_found(&self, found: Vec<FoundAgent>) -> Value {
+    fn apply_found(&self, found: AgentScan) -> Value {
         *self.found.lock().unwrap_or_else(|e| e.into_inner()) = found.clone();
         let mut talks = self.lock();
         for talk in talks.values_mut() {
@@ -483,8 +526,8 @@ impl Assistant {
         set: &Path,
     ) -> &'a mut Talk {
         talks.entry(key.to_owned()).or_insert_with(|| {
-            let found = self.found();
-            let agent = found.first().map(|f| f.agent);
+            let scan = self.found();
+            let agent = scan.usable.first().map(|f| f.agent);
             let mut talk = Talk {
                 named: set.to_owned(),
                 agent,
@@ -495,7 +538,7 @@ impl Assistant {
             };
             if let Some(agent) = agent {
                 talk.note(started_words(agent, set));
-                note_managed_warnings(&mut talk, &found, agent);
+                note_managed_warnings(&mut talk, &scan.usable, agent);
             }
             talk
         })
@@ -544,9 +587,9 @@ impl Assistant {
                 )),
             )
         })?;
-        let found = self.found();
-        if !found.iter().any(|f| f.agent == agent) {
-            return Err(no_agent(Some(agent)));
+        let scan = self.found();
+        if !scan.usable.iter().any(|f| f.agent == agent) {
+            return Err(no_agent_in(&scan, Some(agent)));
         }
         let mut talks = self.lock();
         let talk = self.talk(&mut talks, &key, &choice.set);
@@ -560,7 +603,7 @@ impl Assistant {
                 "Now {} A new conversation.",
                 started_words(agent, &talk.named).replacen("On ", "on ", 1)
             ));
-            note_managed_warnings(talk, &found, agent);
+            note_managed_warnings(talk, &scan.usable, agent);
         }
         drop(talks);
         self.changed.notify_all();
@@ -603,19 +646,20 @@ impl Assistant {
         let (agent, path, session, first, named) = {
             let mut talks = self.lock();
             let talk = self.talk(&mut talks, &key, &message.set);
+            let scan = self.found();
             let Some(agent) = talk.agent else {
-                return Err(no_agent(None));
+                return Err(no_agent_in(&scan, None));
             };
             if talk.busy {
                 return Err(busy(talk));
             }
-            let Some(path) = self
-                .found()
-                .into_iter()
+            let Some(path) = scan
+                .usable
+                .iter()
                 .find(|f| f.agent == agent)
-                .map(|f| f.path)
+                .map(|f| f.path.clone())
             else {
-                return Err(no_agent(Some(agent)));
+                return Err(no_agent_in(&scan, Some(agent)));
             };
             let first = talk.session.is_none();
             (agent, path, talk.session.clone(), first, talk.named.clone())
@@ -644,8 +688,9 @@ impl Assistant {
             }
             // Another client may have rescanned or switched the agent while
             // `record` ran without the lock held (#232).
-            if talk.agent != Some(agent) || !self.found().iter().any(|f| f.agent == agent) {
-                return Err(no_agent(Some(agent)));
+            let scan = self.found();
+            if talk.agent != Some(agent) || !scan.usable.iter().any(|f| f.agent == agent) {
+                return Err(no_agent_in(&scan, Some(agent)));
             }
             talk.items.push(json!({
                 "kind": "drafter",
@@ -1029,12 +1074,14 @@ impl Assistant {
     }
 }
 
-/// Brings an idle conversation's agent into line with `found`: a conversation
-/// with no agent takes the first one found, and one whose agent is gone
-/// switches to another (or none) as a new conversation (#232).
-fn reconcile_talk(talk: &mut Talk, found: &[FoundAgent]) {
-    let first = found.first().map(|f| f.agent);
-    let gone = talk.agent.filter(|a| !found.iter().any(|f| f.agent == *a));
+/// Brings an idle conversation's agent into line with `scan`: a conversation
+/// with no agent takes the first usable one found, and one whose agent is gone
+/// or unusable switches to another (or none) as a new conversation (#232, #229).
+fn reconcile_talk(talk: &mut Talk, scan: &AgentScan) {
+    let first = scan.usable.first().map(|f| f.agent);
+    let gone = talk
+        .agent
+        .filter(|a| !scan.usable.iter().any(|f| f.agent == *a));
     if talk.busy || (talk.agent.is_some() && gone.is_none()) {
         return;
     }
@@ -1044,7 +1091,13 @@ fn reconcile_talk(talk: &mut Talk, found: &[FoundAgent]) {
     talk.agent = first;
     talk.session = None;
     let looked = match gone {
-        Some(gone) => format!("Looked on the PATH again: {} is gone.", gone.name()),
+        Some(gone) => match scan.unavailable_reason(gone) {
+            Some(reason) => format!(
+                "Looked on the PATH again: {} can't be used ({reason})",
+                gone.name()
+            ),
+            None => format!("Looked on the PATH again: {} is gone.", gone.name()),
+        },
         None => "Looked on the PATH again.".to_owned(),
     };
     let now = match first {
@@ -1056,7 +1109,7 @@ fn reconcile_talk(talk: &mut Talk, found: &[FoundAgent]) {
     };
     talk.note(now);
     if let Some(agent) = first {
-        note_managed_warnings(talk, found, agent);
+        note_managed_warnings(talk, &scan.usable, agent);
     }
 }
 
@@ -1175,14 +1228,25 @@ fn busy(talk: &Talk) -> Refusal {
     )
 }
 
-fn no_agent(agent: Option<Agent>) -> Refusal {
+fn no_agent_in(scan: &AgentScan, agent: Option<Agent>) -> Refusal {
     let message = match agent {
-        Some(agent) => format!(
-            "{} was not found on the PATH when AgentDrafter looked",
-            agent.name()
-        ),
-        None => "no agent was found on the PATH: install Claude Code or Codex, then look again"
-            .to_owned(),
+        Some(agent) => match scan.unavailable_reason(agent) {
+            Some(reason) => reason.to_owned(),
+            None => format!(
+                "{} was not found on the PATH when AgentDrafter looked",
+                agent.name()
+            ),
+        },
+        None => match scan.unavailable.as_slice() {
+            [only] => only.reason.clone(),
+            many if !many.is_empty() => many
+                .iter()
+                .map(|u| u.reason.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => "no agent was found on the PATH: install Claude Code or Codex, then look again"
+                .to_owned(),
+        },
     };
     (422, Error::new(ErrorCode::NoAgent, message))
 }
@@ -1536,7 +1600,7 @@ FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
         let alt_spelling = set_dir.join("..").join("demo-plant");
 
         let assistant = Assistant {
-            found: Mutex::new(Vec::new()),
+            found: Mutex::new(AgentScan::default()),
             talks: Mutex::new(HashMap::new()),
             changed: Condvar::new(),
             own: vec!["agentdrafter".into()],
@@ -1648,18 +1712,21 @@ FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
 
         // 1. Active agent disappears during turn, another agent (Codex) remains.
         let assistant = Assistant {
-            found: Mutex::new(vec![
-                FoundAgent {
-                    agent: Agent::Claude,
-                    path: PathBuf::from("/bin/claude"),
-                    warnings: Vec::new(),
-                },
-                FoundAgent {
-                    agent: Agent::Codex,
-                    path: PathBuf::from("/bin/codex"),
-                    warnings: Vec::new(),
-                },
-            ]),
+            found: Mutex::new(AgentScan {
+                usable: vec![
+                    FoundAgent {
+                        agent: Agent::Claude,
+                        path: PathBuf::from("/bin/claude"),
+                        warnings: Vec::new(),
+                    },
+                    FoundAgent {
+                        agent: Agent::Codex,
+                        path: PathBuf::from("/bin/codex"),
+                        warnings: Vec::new(),
+                    },
+                ],
+                unavailable: Vec::new(),
+            }),
             talks: Mutex::new(HashMap::new()),
             changed: Condvar::new(),
             own: vec!["agentdrafter".into()],
@@ -1671,11 +1738,14 @@ FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
         }
 
         // Rescan while both turns are busy: Claude is gone, Codex remains.
-        assistant.apply_found(vec![FoundAgent {
-            agent: Agent::Codex,
-            path: PathBuf::from("/bin/codex"),
-            warnings: Vec::new(),
-        }]);
+        assistant.apply_found(AgentScan {
+            usable: vec![FoundAgent {
+                agent: Agent::Codex,
+                path: PathBuf::from("/bin/codex"),
+                warnings: Vec::new(),
+            }],
+            unavailable: Vec::new(),
+        });
         {
             let talks = assistant.lock();
             assert_eq!(
@@ -1718,7 +1788,7 @@ FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
             let mut talks = assistant.lock();
             talks.insert(set_c.clone(), make_talk(&set_c, Agent::Codex, "sess-3"));
         }
-        assistant.apply_found(Vec::new());
+        assistant.apply_found(AgentScan::default());
         assistant.finish(&set_c, 1, None);
         {
             let talks = assistant.lock();
@@ -1739,18 +1809,21 @@ FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
         let claude_warning = "Claude Code has administrator-managed hooks in /etc/claude-code/managed-settings.json that disableAllHooks cannot turn off, so proposal-only cannot be guaranteed.";
         let codex_warning = "Codex has system MCP servers in /etc/codex/config.toml that --ignore-user-config cannot turn off, so proposal-only cannot be guaranteed.";
         let assistant = Assistant {
-            found: Mutex::new(vec![
-                FoundAgent {
-                    agent: Agent::Claude,
-                    path: PathBuf::from("/bin/claude"),
-                    warnings: vec![claude_warning.to_owned()],
-                },
-                FoundAgent {
-                    agent: Agent::Codex,
-                    path: PathBuf::from("/bin/codex"),
-                    warnings: Vec::new(),
-                },
-            ]),
+            found: Mutex::new(AgentScan {
+                usable: vec![
+                    FoundAgent {
+                        agent: Agent::Claude,
+                        path: PathBuf::from("/bin/claude"),
+                        warnings: vec![claude_warning.to_owned()],
+                    },
+                    FoundAgent {
+                        agent: Agent::Codex,
+                        path: PathBuf::from("/bin/codex"),
+                        warnings: Vec::new(),
+                    },
+                ],
+                unavailable: Vec::new(),
+            }),
             talks: Mutex::new(HashMap::new()),
             changed: Condvar::new(),
             own: vec!["agentdrafter".into()],
@@ -1781,11 +1854,14 @@ FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
         assert_eq!(items[1]["text"], format!("Warning: {claude_warning}"));
 
         // Switching to a warned Codex via rescan reconciles onto it and emits its warning note.
-        assistant.apply_found(vec![FoundAgent {
-            agent: Agent::Codex,
-            path: PathBuf::from("/bin/codex"),
-            warnings: vec![codex_warning.to_owned()],
-        }]);
+        assistant.apply_found(AgentScan {
+            usable: vec![FoundAgent {
+                agent: Agent::Codex,
+                path: PathBuf::from("/bin/codex"),
+                warnings: vec![codex_warning.to_owned()],
+            }],
+            unavailable: Vec::new(),
+        });
         let (_, line) = assistant.snapshot(&set);
         let snap: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(snap["result"]["agent"], "codex");
@@ -1793,6 +1869,57 @@ FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
         assert_eq!(
             items.last().unwrap()["text"],
             format!("Warning: {codex_warning}")
+        );
+    }
+
+    #[test]
+    fn unavailable_agent_reports_reason_and_reconciles_active_talk() {
+        let reason = "Codex 0.120.0 does not support --ignore-user-config";
+        let assistant = Assistant {
+            found: Mutex::new(AgentScan {
+                usable: vec![FoundAgent {
+                    agent: Agent::Codex,
+                    path: PathBuf::from("/bin/codex"),
+                    warnings: Vec::new(),
+                }],
+                unavailable: Vec::new(),
+            }),
+            talks: Mutex::new(HashMap::new()),
+            changed: Condvar::new(),
+            own: vec!["agentdrafter".into()],
+        };
+        let set = PathBuf::from("examples/demo-set");
+        let _ = assistant.snapshot(&set);
+
+        let report = assistant.apply_found(AgentScan {
+            usable: vec![FoundAgent {
+                agent: Agent::Claude,
+                path: PathBuf::from("/bin/claude"),
+                warnings: Vec::new(),
+            }],
+            unavailable: vec![UnavailableAgent {
+                agent: Agent::Codex,
+                reason: reason.to_owned(),
+            }],
+        });
+        let codex = report["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["agent"] == "codex")
+            .unwrap();
+        assert_eq!(codex["found"], false);
+        assert_eq!(codex["unavailable"], reason);
+
+        let (_, line) = assistant.snapshot(&set);
+        let snap: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(snap["result"]["agent"], "claude");
+        let last = snap["result"]["items"].as_array().unwrap().last().unwrap()["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            last.contains("Codex can't be used") && last.contains(reason),
+            "{last}"
         );
     }
 }
