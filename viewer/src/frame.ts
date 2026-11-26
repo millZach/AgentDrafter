@@ -707,10 +707,20 @@ export function previewIsCurrent(p: {
 }
 
 /**
+ * Whether a reply from the journal stream counts as having read the journal
+ * (#192): only a valid snapshot does. A failed response keeps an open preview
+ * stale and Change all off until a valid snapshot arrives.
+ */
+export function journalSnapshotValid(reply: { ok: boolean; result?: unknown } | null | undefined): boolean {
+  return Boolean(reply?.ok && reply.result != null);
+}
+
+/**
  * Whether a journal snapshot asks for an open preview to be drawn again: the
- * first valid one, which may already hold a change set that landed before
- * it was read, and so was never an event; later ones draw again only the
- * sheets their new entries touched, which the preview's version follows.
+ * first valid one (or the first after a failed response), which may already
+ * hold a change set that landed before it was read, and so was never an
+ * event; later ones draw again only the sheets their new entries touched,
+ * which the preview's version follows.
  */
 export function previewRedrawnOn(previewing: boolean, firstSnapshot: boolean): boolean {
   return previewing && firstSnapshot;
