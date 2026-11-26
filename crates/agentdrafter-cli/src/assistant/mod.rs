@@ -412,7 +412,9 @@ impl Assistant {
     /// The canonical path of the drawing set `set` names, which keys its
     /// conversation, begun on the first agent found if there is none yet.
     /// A folder that is not a drawing set's is refused, as the core's
-    /// `looking-at` refuses it.
+    /// `looking-at` refuses it; if `set` is a valid set whose optional
+    /// `.agentdrafter/looking-at.json` record is damaged, treat the damaged
+    /// record as absent so Chat stays available (#231).
     pub(crate) fn open(&self, set: &Path) -> Result<PathBuf, Refusal> {
         let command = find_command("looking-at").expect("the registry holds `looking-at`");
         let reply = command.run(
@@ -424,7 +426,14 @@ impl Assistant {
             let error = reply.error.unwrap_or_else(|| {
                 Error::new(ErrorCode::ReadFailed, "the drawing set could not be read")
             });
-            return Err((status_of(&error), error));
+            let damaged_record = error.code == ErrorCode::ReadFailed
+                && error
+                    .file
+                    .as_deref()
+                    .is_some_and(|f| Path::new(f) == set.join(".agentdrafter/looking-at.json"));
+            if !damaged_record {
+                return Err((status_of(&error), error));
+            }
         }
         let key = std::fs::canonicalize(set).map_err(|e| {
             let error = Error::new(

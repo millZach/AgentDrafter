@@ -629,6 +629,44 @@ fn each_route_takes_a_drawing_set_alone_and_one_set_has_one_conversation() {
 }
 
 #[test]
+fn a_damaged_looking_at_file_does_not_turn_chat_off_on_a_valid_set() {
+    let dir = scratch("damaged-looking-at");
+    demo_set(&dir);
+    let looking_at = dir
+        .join("demo-set")
+        .join(agentdrafter_core::LOOKING_AT_FILE);
+    fs::create_dir_all(looking_at.parent().unwrap()).unwrap();
+    fs::write(&looking_at, "{not valid json").unwrap();
+
+    let shims = shims(&dir, &["claude"]);
+    let serve = Serve::start(&dir, &path_with(&shims), &[]);
+    // Opening the conversation stream succeeds despite the malformed file (#231).
+    let mut conversation = serve.conversation("demo-set");
+    let state = conversation.next(Duration::from_secs(10));
+    assert_eq!(state["set"], "demo-set");
+
+    // Sending a message with looking_at left off succeeds without reading the damaged file.
+    let (status, reply) = serve.post(
+        "/assistant/messages",
+        json!({"set": "demo-set", "text": "hello", "looking_at": null}),
+    );
+    assert_eq!(status, 200, "{reply}");
+    let state = conversation.settled(3);
+    assert!(words_of(&state["items"][2]).contains("You said: hello"));
+
+    // Sending a message with looking_at repairs the file atomically.
+    let (status, reply) = serve.post(
+        "/assistant/messages",
+        json!({"set": "demo-set", "text": "what do I see", "looking_at": {"sheet": "DEMO-001", "selected": []}}),
+    );
+    assert_eq!(status, 200, "{reply}");
+    let _ = conversation.settled(5);
+    let repaired = cli(&["looking-at", "demo-set"], &dir);
+    assert_eq!(repaired["ok"], true, "{repaired}");
+    assert_eq!(repaired["result"]["sheet"], "DEMO-001");
+}
+
+#[test]
 fn looking_again_follows_the_agents_on_the_path() {
     let dir = scratch("look-again");
     demo_set(&dir);
