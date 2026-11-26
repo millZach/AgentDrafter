@@ -21,15 +21,179 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Condvar, Mutex, OnceLock};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::build::is_same_file;
+use crate::build::{file_id_of_path, is_same_file, FileId};
 use crate::description::RowsFile;
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
+use crate::original::rename_no_replace_keep_src;
 use crate::set::SET_SETTINGS_FILE;
 use crate::stamp::{self, SourceKind};
+
+/// How long a build, plot or change waits for another process writing or
+/// cleaning the same output folder to finish (#238).
+#[cfg(not(target_arch = "wasm32"))]
+const OUTPUT_LOCK_WAIT: Duration = Duration::from_secs(30);
+
+/// Holds an exclusive lock on a set's output folder across writing and
+/// leftover cleanup so concurrent builds, plots or changes on the same output
+/// folder never race each other (#238). Stored in the system temp folder so no
+/// lock file ever appears inside the set or its output folder.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct OutputLock {
+    _file: fs::File,
+    _in_process: InProcessOutputLock,
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) struct OutputLock;
+
+#[cfg(not(target_arch = "wasm32"))]
+struct InProcessLocks {
+    held: Mutex<HashSet<String>>,
+    changed: Condvar,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static IN_PROCESS_OUTPUT_LOCKS: OnceLock<InProcessLocks> = OnceLock::new();
+
+#[cfg(not(target_arch = "wasm32"))]
+struct InProcessOutputLock {
+    key: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for InProcessOutputLock {
+    fn drop(&mut self) {
+        if let Some(locks) = IN_PROCESS_OUTPUT_LOCKS.get() {
+            let mut held = locks.held.lock().unwrap_or_else(|e| e.into_inner());
+            held.remove(&self.key);
+            locks.changed.notify_all();
+        }
+    }
+}
+
+/// Acquires an exclusive in-process and cross-process lock for `output`,
+/// waiting up to [`OUTPUT_LOCK_WAIT`] for another build, plot or change to
+/// release it (#238).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn lock_output(output: &Path) -> Result<OutputLock, Error> {
+    let canonical = fs::canonicalize(output)
+        .or_else(|_| std::path::absolute(output))
+        .unwrap_or_else(|_| output.to_path_buf());
+    let key = stamp::fingerprint(canonical.as_os_str().as_encoded_bytes());
+    let started = Instant::now();
+    let failed = |why: String| {
+        Error::new(
+            ErrorCode::WriteFailed,
+            format!("could not lock the set's output folder: {why}"),
+        )
+        .in_file(output)
+    };
+
+    // 1. In-process mutual exclusion (since advisory OS locks may be shared
+    //    within one process on some platforms).
+    let locks = IN_PROCESS_OUTPUT_LOCKS.get_or_init(|| InProcessLocks {
+        held: Mutex::new(HashSet::new()),
+        changed: Condvar::new(),
+    });
+    let in_process = {
+        let mut held = locks.held.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if held.insert(key.clone()) {
+                break InProcessOutputLock { key: key.clone() };
+            }
+            let Some(left) = OUTPUT_LOCK_WAIT.checked_sub(started.elapsed()) else {
+                return Err(failed(format!(
+                    "another build or plot has held the output folder for {} seconds",
+                    OUTPUT_LOCK_WAIT.as_secs()
+                )));
+            };
+            let (guard, _) = locks
+                .changed
+                .wait_timeout(held, left)
+                .unwrap_or_else(|e| e.into_inner());
+            held = guard;
+        }
+    };
+
+    // 2. Cross-process OS lock on a per-output-folder lock file in temp dir.
+    let lock_dir = output_lock_dir();
+    create_lock_dir(&lock_dir).map_err(|e| failed(e.to_string()))?;
+    let lock_path = lock_dir.join(format!("output-{key}.lock"));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| failed(e.to_string()))?;
+    loop {
+        match file.try_lock() {
+            Ok(()) => {
+                return Ok(OutputLock {
+                    _file: file,
+                    _in_process: in_process,
+                })
+            }
+            Err(fs::TryLockError::WouldBlock) if started.elapsed() < OUTPUT_LOCK_WAIT => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(failed(format!(
+                    "another process has held the output folder for {} seconds",
+                    OUTPUT_LOCK_WAIT.as_secs()
+                )))
+            }
+            Err(fs::TryLockError::Error(e)) => return Err(failed(e.to_string())),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn lock_output(_output: &Path) -> Result<OutputLock, Error> {
+    Ok(OutputLock)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn output_lock_dir() -> PathBuf {
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        // SAFETY: `geteuid(2)` takes no arguments and never fails.
+        let uid = unsafe { geteuid() };
+        std::env::temp_dir().join(format!("agentdrafter-locks-{uid}"))
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join("agentdrafter-locks")
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn create_lock_dir(dir: &Path) -> io::Result<()> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
+}
 
 /// The folder in a set's output folder that cleaning moves leftover
 /// outputs into.
@@ -108,12 +272,24 @@ pub(crate) struct Scan {
     pub error: Option<Error>,
 }
 
+/// One leftover candidate recorded during [`find`] with the file identity it
+/// had when examined, so [`clean_up`] refuses to move it if another process
+/// replaced it in the meantime (#238).
+struct Candidate {
+    leftover: Leftover,
+    id: Option<FileId>,
+}
+
 /// Looks for the leftover outputs of a set in its output folder, and moves
 /// them into [`SUPERSEDED_FOLDER`] when `clean` asks.
 pub(crate) fn leftovers(set: &SetOutputs, clean: bool) -> Scan {
     match find(set) {
         Ok(found) => Scan {
-            leftovers: Some(if clean { clean_up(set, found) } else { found }),
+            leftovers: Some(if clean {
+                clean_up(set, found)
+            } else {
+                found.into_iter().map(|c| c.leftover).collect()
+            }),
             error: None,
         },
         Err(error) => Scan {
@@ -163,7 +339,7 @@ pub(crate) fn scan_error(
 /// The files of the output folder no row writes that AgentDrafter made for
 /// the set, or that could not be read to tell, in the byte order of their
 /// names. An error when the folder cannot be listed to the end.
-fn find(set: &SetOutputs) -> Result<Vec<Leftover>, Error> {
+fn find(set: &SetOutputs) -> Result<Vec<Candidate>, Error> {
     let not_listed = |e: io::Error| {
         Error::new(
             ErrorCode::ReadFailed,
@@ -174,7 +350,7 @@ fn find(set: &SetOutputs) -> Result<Vec<Leftover>, Error> {
         )
         .in_file(set.output)
     };
-    let mut written = Written::new(set);
+    let written = Written::new(set);
     let mut found = Vec::new();
     for entry in fs::read_dir(set.output).map_err(not_listed)? {
         let entry = entry.map_err(not_listed)?;
@@ -190,22 +366,25 @@ fn find(set: &SetOutputs) -> Result<Vec<Leftover>, Error> {
             continue;
         }
         let path = entry.path();
-        let unreadable = |e: io::Error| Leftover {
-            file: path.display().to_string(),
-            kind,
-            sheet: sheet.to_owned(),
-            unreadable: true,
-            moved_to: None,
-            error: Some(
-                Error::new(
-                    ErrorCode::ReadFailed,
-                    format!(
-                        "could not read the file to tell whether AgentDrafter made it for the \
-                         set: {e}; it was not moved"
-                    ),
-                )
-                .in_file(&path),
-            ),
+        let unreadable = |e: io::Error| Candidate {
+            leftover: Leftover {
+                file: path.display().to_string(),
+                kind,
+                sheet: sheet.to_owned(),
+                unreadable: true,
+                moved_to: None,
+                error: Some(
+                    Error::new(
+                        ErrorCode::ReadFailed,
+                        format!(
+                            "could not read the file to tell whether AgentDrafter made it for the \
+                             set: {e}; it was not moved"
+                        ),
+                    )
+                    .in_file(&path),
+                ),
+            },
+            id: None,
         };
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
@@ -224,16 +403,20 @@ fn find(set: &SetOutputs) -> Result<Vec<Leftover>, Error> {
         if written.writes(&path, &sheet) {
             continue;
         }
+        let id = file_id_of_path(&path);
         match is_sets(set, kind, &path) {
             Ok(true) => found.push((
                 name,
-                Leftover {
-                    file: path.display().to_string(),
-                    kind,
-                    sheet: sheet.to_owned(),
-                    unreadable: false,
-                    moved_to: None,
-                    error: None,
+                Candidate {
+                    leftover: Leftover {
+                        file: path.display().to_string(),
+                        kind,
+                        sheet: sheet.to_owned(),
+                        unreadable: false,
+                        moved_to: None,
+                        error: None,
+                    },
+                    id,
                 },
             )),
             Ok(false) => {}
@@ -241,20 +424,17 @@ fn find(set: &SetOutputs) -> Result<Vec<Leftover>, Error> {
         }
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(found.into_iter().map(|(_, leftover)| leftover).collect())
+    Ok(found.into_iter().map(|(_, candidate)| candidate).collect())
 }
 
 /// What the set's rows write in its output folder: each output's file
-/// name, and, worked out only when a file of the folder is not named so,
-/// which files they are.
+/// name, checked live against current row outputs so a file replaced under
+/// its own name mid-run is never mistaken for a leftover (#238).
 struct Written<'a> {
     output: &'a Path,
     sheets: &'a [&'a str],
-    /// `<sheet>.dwg` and `<sheet>.pdf` for each row.
+    /// `<sheet>.dwg`, `<sheet>.dxf` and `<sheet>.pdf` for each row.
     names: HashSet<String>,
-    /// The files at the rows' output paths that are there, by what the
-    /// file system tells them by; worked out the first time it is needed.
-    files: Option<Vec<FileId>>,
 }
 
 impl<'a> Written<'a> {
@@ -274,60 +454,31 @@ impl<'a> Written<'a> {
             output: set.output,
             sheets: &set.sheets,
             names,
-            files: None,
         }
     }
 
     /// Whether the file at `path`, named for `sheet`, is one a row writes:
-    /// the very file at a row's output path, as the file system tells it.
-    /// Where that cannot be told, by its name in any letter case, the safe
-    /// way round: the file is then taken to be the row's, and left alone.
-    fn writes(&mut self, path: &Path, sheet: &str) -> bool {
-        let output = self.output;
-        let sheets = self.sheets;
-        let files = self.files.get_or_insert_with(|| {
-            sheets
+    /// the very file at a row's output path right now, as the file system
+    /// tells it. Where that cannot be told, by its name in any letter case,
+    /// the safe way round: the file is then taken to be the row's, and left
+    /// alone.
+    fn writes(&self, path: &Path, sheet: &str) -> bool {
+        is_current_output(self.output, self.sheets, path, sheet)
+    }
+}
+
+/// Live check whether `path` (named for `sheet`) is currently one of the
+/// set's row outputs (#238). Never relies on a stale snapshot of `FileId`s.
+fn is_current_output(output: &Path, sheets: &[&str], path: &Path, sheet: &str) -> bool {
+    if let Some(id) = file_id_of_path(path) {
+        return sheets.iter().any(|row_sheet| {
+            ["dwg", "dxf", "pdf"]
                 .iter()
-                .flat_map(|sheet| {
-                    ["dwg", "dxf", "pdf"].map(|e| output.join(format!("{sheet}.{e}")))
-                })
-                .filter_map(|path| file_id(&path))
-                .collect()
+                .any(|ext| file_id_of_path(&output.join(format!("{row_sheet}.{ext}"))) == Some(id))
         });
-        match file_id(path) {
-            Some(id) => files.contains(&id),
-            None => {
-                let folded = sheet.to_lowercase();
-                sheets.iter().any(|s| s.to_lowercase() == folded)
-            }
-        }
     }
-}
-
-/// What the file system tells a file by: its device and number on Unix,
-/// and elsewhere its full path as the system resolves it, in the letter
-/// case the folder holds it in.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum FileId {
-    #[cfg(unix)]
-    Node(u64, u64),
-    #[cfg(not(unix))]
-    Resolved(PathBuf),
-}
-
-/// What the file system tells the file at `path` by, if it is there and
-/// can be told.
-fn file_id(path: &Path) -> Option<FileId> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = fs::metadata(path).ok()?;
-        Some(FileId::Node(metadata.dev(), metadata.ino()))
-    }
-    #[cfg(not(unix))]
-    {
-        fs::canonicalize(path).ok().map(FileId::Resolved)
-    }
+    let folded = sheet.to_lowercase();
+    sheets.iter().any(|s| s.to_lowercase() == folded)
 }
 
 /// Whether `metadata`, read without following links, is of a plain file:
@@ -426,64 +577,74 @@ fn set_holding(path: &Path) -> Option<PathBuf> {
 /// moved for that sheet is moved back so the pair is never split (#236). When
 /// `superseded/` is a link or a junction, or cannot be made, nothing is moved
 /// and each leftover carries the error.
-fn clean_up(set: &SetOutputs, found: Vec<Leftover>) -> Vec<Leftover> {
+fn clean_up(set: &SetOutputs, found: Vec<Candidate>) -> Vec<Leftover> {
     clean_up_with(
         found,
         &set.output.join(SUPERSEDED_FOLDER),
-        |kind, path| still_a_leftover(set, kind, path),
+        |kind, path, sheet, expected_id| still_a_leftover(set, kind, path, sheet, expected_id),
         supersede,
     )
 }
 
 fn clean_up_with<Check, Move>(
-    mut found: Vec<Leftover>,
+    mut found: Vec<Candidate>,
     folder: &Path,
     mut check: Check,
     mut mover: Move,
 ) -> Vec<Leftover>
 where
-    Check: FnMut(LeftoverKind, &Path) -> Result<(), Error>,
+    Check: FnMut(LeftoverKind, &Path, &str, Option<FileId>) -> Result<(), Error>,
     Move: FnMut(&Path, &str, &Path) -> Result<PathBuf, Error>,
 {
-    if found.iter().all(|leftover| leftover.unreadable) {
-        return found;
+    if found.iter().all(|c| c.leftover.unreadable) {
+        return found.into_iter().map(|c| c.leftover).collect();
     }
     let ready = superseded_folder(folder);
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-    for (idx, leftover) in found.iter().enumerate() {
-        if leftover.unreadable {
+    for (idx, candidate) in found.iter().enumerate() {
+        if candidate.leftover.unreadable {
             continue;
         }
-        if let Some((_, indices)) = groups.iter_mut().find(|(s, _)| s == &leftover.sheet) {
+        if let Some((_, indices)) = groups
+            .iter_mut()
+            .find(|(s, _)| s == &candidate.leftover.sheet)
+        {
             indices.push(idx);
         } else {
-            groups.push((leftover.sheet.clone(), vec![idx]));
+            groups.push((candidate.leftover.sheet.clone(), vec![idx]));
         }
     }
     for (sheet, indices) in groups {
         if let Err(err) = &ready {
             for idx in indices {
-                found[idx].error = Some(err.clone());
+                found[idx].leftover.error = Some(err.clone());
             }
             continue;
         }
         // Check every movable output of this sheet before moving any of them,
-        // so a changed or missing sibling leaves the whole sheet untouched.
+        // so a changed, replaced, current, or missing sibling leaves the whole
+        // sheet untouched (#236, #238).
         let mut first_failed: Option<String> = None;
         for &idx in &indices {
-            let path = PathBuf::from(&found[idx].file);
-            if let Err(err) = check(found[idx].kind, &path) {
+            let path = PathBuf::from(&found[idx].leftover.file);
+            if let Err(err) = check(
+                found[idx].leftover.kind,
+                &path,
+                &found[idx].leftover.sheet,
+                found[idx].id,
+            ) {
                 if first_failed.is_none() {
                     first_failed = Some(file_name_text(&path));
                 }
-                found[idx].error = Some(err);
+                found[idx].leftover.error = Some(err);
             }
         }
         if let Some(failed_name) = first_failed {
             for &idx in &indices {
-                if found[idx].error.is_none() {
-                    let path = PathBuf::from(&found[idx].file);
-                    found[idx].error = Some(held_together_error(&path, &sheet, &failed_name));
+                if found[idx].leftover.error.is_none() {
+                    let path = PathBuf::from(&found[idx].leftover.file);
+                    found[idx].leftover.error =
+                        Some(held_together_error(&path, &sheet, &failed_name));
                 }
             }
             continue;
@@ -493,15 +654,15 @@ where
         let mut moved: Vec<(usize, PathBuf, PathBuf)> = Vec::new();
         let mut failed: Option<(usize, String)> = None;
         for (pos, &idx) in indices.iter().enumerate() {
-            let path = PathBuf::from(&found[idx].file);
+            let path = PathBuf::from(&found[idx].leftover.file);
             let name = file_name_text(&path);
             match mover(folder, &name, &path) {
                 Ok(dest) => {
-                    found[idx].moved_to = Some(dest.display().to_string());
+                    found[idx].leftover.moved_to = Some(dest.display().to_string());
                     moved.push((idx, path, dest));
                 }
                 Err(err) => {
-                    found[idx].error = Some(err);
+                    found[idx].leftover.error = Some(err);
                     failed = Some((pos, name));
                     break;
                 }
@@ -511,12 +672,12 @@ where
             for (prev_idx, orig_path, dest_path) in moved.into_iter().rev() {
                 match move_without_replacing(&dest_path, &orig_path) {
                     Ok(()) => {
-                        found[prev_idx].moved_to = None;
-                        found[prev_idx].error =
+                        found[prev_idx].leftover.moved_to = None;
+                        found[prev_idx].leftover.error =
                             Some(held_together_error(&orig_path, &sheet, &failed_name));
                     }
                     Err(e) => {
-                        found[prev_idx].error = Some(
+                        found[prev_idx].leftover.error = Some(
                             Error::new(
                                 ErrorCode::WriteFailed,
                                 format!(
@@ -529,13 +690,13 @@ where
                 }
             }
             for &later_idx in &indices[failed_pos + 1..] {
-                let later_path = PathBuf::from(&found[later_idx].file);
-                found[later_idx].error =
+                let later_path = PathBuf::from(&found[later_idx].leftover.file);
+                found[later_idx].leftover.error =
                     Some(held_together_error(&later_path, &sheet, &failed_name));
             }
         }
     }
-    found
+    found.into_iter().map(|c| c.leftover).collect()
 }
 
 fn file_name_text(path: &Path) -> String {
@@ -584,9 +745,16 @@ fn superseded_folder(folder: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Refuses to move the file at `path` unless it is still a plain file the
-/// set made, as it was when it was found.
-fn still_a_leftover(set: &SetOutputs, kind: LeftoverKind, path: &Path) -> Result<(), Error> {
+/// Refuses to move the file at `path` unless it is still the same plain file
+/// examined during [`find`], is not a current output of the set, and still
+/// carries the set's build mark or stamp (#238).
+fn still_a_leftover(
+    set: &SetOutputs,
+    kind: LeftoverKind,
+    path: &Path,
+    sheet: &str,
+    expected_id: Option<FileId>,
+) -> Result<(), Error> {
     let changed = |why: String| {
         Error::new(
             ErrorCode::WriteFailed,
@@ -598,6 +766,14 @@ fn still_a_leftover(set: &SetOutputs, kind: LeftoverKind, path: &Path) -> Result
         .map_err(|e| changed(format!("could not be read again ({e})")))?;
     if !is_plain_file(&metadata) {
         return Err(changed("is no longer a plain file".to_owned()));
+    }
+    if let Some(expected) = expected_id {
+        if file_id_of_path(path) != Some(expected) {
+            return Err(changed("was replaced".to_owned()));
+        }
+    }
+    if is_current_output(set.output, &set.sheets, path, sheet) {
+        return Err(changed("became a current output of the set".to_owned()));
     }
     match is_sets(set, kind, path) {
         Ok(true) => Ok(()),
@@ -645,22 +821,54 @@ fn supersede(folder: &Path, name: &str, path: &Path) -> Result<PathBuf, Error> {
 
 /// Moves the file at `from` to `to`, failing with
 /// [`ErrorKind::AlreadyExists`] when anything is at `to`, and never
-/// replacing it, even should it appear while the move is made: the file is
-/// given its new name as a hard link, which the system refuses to make
-/// over another, then its old name is taken away. Where the file system
-/// has no hard links, its bytes are copied to a file made new at `to`,
-/// which the system refuses as well, and the old one is taken away once
-/// the copy is whole. Should the old name not go, the new one is taken
-/// away again, and the file stays where it was.
+/// replacing it, even should it appear while the move is made: uses an atomic
+/// no-replace rename (`MoveFileExW` on Windows, `renameat2 RENAME_NOREPLACE`
+/// on Linux, `renamex_np RENAME_EXCL` on macOS) so there is no link-then-unlink
+/// window where a concurrent replacement at `from` can be removed (#238).
+/// Falls back to copying only when the volume does not support same-device
+/// rename/link, re-checking `from`'s identity before removing it.
 fn move_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
-    match fs::hard_link(from, to) {
-        Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => return Err(e),
-        Err(_) => copy_new(from, to)?,
+    let before_id = file_id_of_path(from);
+    match rename_no_replace_keep_src(from, to) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(e),
+        Err(e) if is_cross_device_or_unsupported(&e) => {
+            copy_new(from, to)?;
+            if before_id.is_some() && file_id_of_path(from) != before_id {
+                let _ = fs::remove_file(to);
+                return Err(io::Error::other(
+                    "the leftover was replaced while copying it",
+                ));
+            }
+            fs::remove_file(from).inspect_err(|_| {
+                let _ = fs::remove_file(to);
+            })
+        }
+        Err(e) => Err(e),
     }
-    fs::remove_file(from).inspect_err(|_| {
-        let _ = fs::remove_file(to);
-    })
+}
+
+fn is_cross_device_or_unsupported(err: &io::Error) -> bool {
+    if matches!(
+        err.kind(),
+        ErrorKind::CrossesDevices | ErrorKind::Unsupported
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        // EXDEV = 18 on Linux and macOS.
+        matches!(err.raw_os_error(), Some(18))
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_INVALID_FUNCTION = 1, ERROR_NOT_SAME_DEVICE = 17.
+        matches!(err.raw_os_error(), Some(1 | 17))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
 }
 
 /// Copies the file at `from` to a file made new at `to`, failing with
@@ -822,13 +1030,16 @@ mod tests {
         fs::write(&dwg3, b"dwg-3").unwrap();
         fs::write(&pdf3, b"pdf-3").unwrap();
 
-        let item = |path: &Path, kind: LeftoverKind, sheet: &str| Leftover {
-            file: path.display().to_string(),
-            kind,
-            sheet: sheet.to_owned(),
-            unreadable: false,
-            moved_to: None,
-            error: None,
+        let item = |path: &Path, kind: LeftoverKind, sheet: &str| Candidate {
+            leftover: Leftover {
+                file: path.display().to_string(),
+                kind,
+                sheet: sheet.to_owned(),
+                unreadable: false,
+                moved_to: None,
+                error: None,
+            },
+            id: file_id_of_path(path),
         };
         let found = vec![
             item(&dwg2, LeftoverKind::Dwg, "DEMO-002"),
@@ -843,7 +1054,7 @@ mod tests {
         let out = clean_up_with(
             found,
             &sup,
-            |_, _| Ok(()),
+            |_, _, _, _| Ok(()),
             |folder, name, path| {
                 if name == "DEMO-002.pdf" {
                     return Err(
@@ -890,7 +1101,7 @@ mod tests {
                 item(&pdf2, LeftoverKind::Pdf, "DEMO-002"),
             ],
             &sup,
-            |kind, path| {
+            |kind, path, _, _| {
                 if kind == LeftoverKind::Pdf {
                     Err(Error::new(ErrorCode::WriteFailed, "changed").in_file(path))
                 } else {
@@ -904,6 +1115,52 @@ mod tests {
         assert_eq!(fs::read(&dwg2).unwrap(), b"dwg-2");
         assert_eq!(fs::read(&pdf2).unwrap(), b"pdf-2");
         assert!(!sup.join("DEMO-002.dwg").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn still_a_leftover_refuses_a_replaced_file_or_current_output() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentdrafter-leftover-replaced-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("OLD.dwg");
+        fs::write(&file, b"old").unwrap();
+        let old_id = file_id_of_path(&file);
+
+        // Replace OLD.dwg atomically via rename (giving it a new file identity).
+        let replacement = dir.join("OLD.dwg.new");
+        fs::write(&replacement, b"new").unwrap();
+        fs::rename(&replacement, &file).unwrap();
+
+        let set = SetOutputs {
+            folder: &dir,
+            output: &dir,
+            marked: None,
+            rows_files: &[],
+            sheets: vec!["CURRENT"],
+        };
+        let err = still_a_leftover(&set, LeftoverKind::Dwg, &file, "OLD", old_id).unwrap_err();
+        assert!(
+            err.message.contains("was replaced"),
+            "expected replaced error, got: {}",
+            err.message
+        );
+
+        // A file whose identity now matches a current sheet output is refused too.
+        let current = dir.join("CURRENT.pdf");
+        fs::write(&current, b"current").unwrap();
+        let current_id = file_id_of_path(&current);
+        let err =
+            still_a_leftover(&set, LeftoverKind::Pdf, &current, "CURRENT", current_id).unwrap_err();
+        assert!(
+            err.message.contains("current output"),
+            "expected current output error, got: {}",
+            err.message
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

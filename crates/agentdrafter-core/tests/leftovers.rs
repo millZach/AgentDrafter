@@ -645,3 +645,48 @@ fn a_locked_pdf_keeps_its_sheets_dwg_from_splitting_into_superseded() {
         assert!(l.moved_to.is_some() && l.error.is_none(), "{l:#?}");
     }
 }
+
+/// Concurrent builds and plots with `clean: true` serialize on the output
+/// folder lock so neither removes or moves a current output published by the
+/// other (#238).
+#[test]
+fn concurrent_builds_and_plots_with_clean_preserve_all_current_outputs() {
+    let set = demo_set(&scratch("concurrent-clean").join("demo-set"));
+    built(&set, None);
+    plotted(&set, None);
+    take_out(&set, "DEMO-003");
+
+    let mut handles = Vec::new();
+    for i in 0..4 {
+        let set_path = set.clone();
+        handles.push(std::thread::spawn(move || {
+            for _ in 0..2 {
+                if i % 2 == 0 {
+                    let reply = build(&set_path, Some(true));
+                    assert!(reply.ok, "build failed: {:#?}", reply.error);
+                } else {
+                    let reply = plot(&set_path, Some(true));
+                    assert!(reply.ok, "plot failed: {:#?}", reply.error);
+                }
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let dwg = set.join("dwg");
+    assert_eq!(
+        files_in(&dwg),
+        [
+            "DEMO-001.dwg",
+            "DEMO-001.pdf",
+            "DEMO-002.dwg",
+            "DEMO-002.pdf"
+        ]
+    );
+    assert_eq!(
+        files_in(&dwg.join(SUPERSEDED_FOLDER)),
+        ["DEMO-003.dwg", "DEMO-003.pdf"]
+    );
+}

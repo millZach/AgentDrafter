@@ -257,7 +257,7 @@ A reply with nothing left over has `"leftovers":[]`. One whose folder could not 
 {"ok":false,"result":{"set":"examples/demo-set","...":"...","leftovers_error":{"code":"read_failed","message":"could not list the set's output folder to look for leftover outputs, so none was looked for or moved: ...","file":"examples/demo-set/dwg"}},"error":{"code":"read_failed","...":"..."}}
 ```
 
-Moving a leftover is not a change set: it is not in the [journal](journal.md) and is not undone; the files are in `superseded/`, byte for byte, to be moved back by hand.
+Moving a leftover is not a change set: it is not in the [journal](journal.md) and is not undone; the files are in `superseded/`, byte for byte, to be moved back by hand. A set's build or plot holds an exclusive lock on its output folder across writing and leftover cleanup, re-checks each leftover's file identity and current-output status before moving it, and uses an atomic no-replace rename so concurrent builds or plots of the same set cannot remove a freshly published output (#238).
 
 ### The build mark names the set
 
