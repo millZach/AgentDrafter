@@ -245,7 +245,7 @@ pub fn serve(args: Args) -> ExitCode {
 
 #[cfg(unix)]
 mod unix_shutdown {
-    use std::ffi::c_int;
+    use std::ffi::{c_int, c_void};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
     use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
     use std::sync::{mpsc, Arc};
@@ -261,8 +261,8 @@ mod unix_shutdown {
 
     extern "C" {
         fn pipe(fds: *mut c_int) -> c_int;
-        fn read(fd: c_int, buf: *mut u8, count: usize) -> isize;
-        fn write(fd: c_int, buf: *const u8, count: usize) -> isize;
+        fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+        fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
         fn close(fd: c_int) -> c_int;
         fn signal(sig: c_int, handler: usize) -> usize;
     }
@@ -278,7 +278,7 @@ mod unix_shutdown {
                 // SAFETY: `write(2)` is async-signal-safe and `fd` is the
                 // self-pipe write end, kept open for the life of `serve`.
                 unsafe {
-                    let _ = write(fd, &byte, 1);
+                    let _ = write(fd, (&byte as *const u8).cast::<c_void>(), 1);
                 }
             }
         }
@@ -329,7 +329,7 @@ mod unix_shutdown {
                 let mut byte = 0u8;
                 loop {
                     // SAFETY: `read_fd` is owned exclusively by this thread.
-                    let n = unsafe { read(read_fd, &mut byte, 1) };
+                    let n = unsafe { read(read_fd, (&mut byte as *mut u8).cast::<c_void>(), 1) };
                     if n >= 0 || STOP_SIGNAL.load(Ordering::SeqCst) != 0 {
                         break;
                     }
