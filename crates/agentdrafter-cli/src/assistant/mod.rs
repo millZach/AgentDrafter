@@ -1407,7 +1407,7 @@ fn utc_now() -> String {
 }
 
 #[cfg(test)]
-pub(crate) static CHILD_TEST_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static CHILD_TEST_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 #[cfg(test)]
 mod tests {
@@ -1552,7 +1552,7 @@ mod tests {
 
     #[test]
     fn an_agent_that_ends_leaving_a_process_holding_its_pipes_ends_its_turn() {
-        let _guard = CHILD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CHILD_TEST_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let (folder, shim) = fake_claude("stray", "FAKE_AGENT_STRAY=1");
         let (answer, busy, took) = run_on(&folder, shim, Duration::from_secs(120));
         assert!(
@@ -1571,7 +1571,7 @@ mod tests {
 
     #[test]
     fn a_hung_agent_is_stopped_with_what_it_started_at_the_deadline() {
-        let _guard = CHILD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CHILD_TEST_LOCK.read().unwrap_or_else(|e| e.into_inner());
         // A shim that runs the fake agent hung, as Claude Code.
         let folder = std::env::temp_dir().join(format!("agentdrafter-hung-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
@@ -2006,7 +2006,7 @@ FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
 
     #[test]
     fn stop_all_kills_a_running_turn_and_clears_active_children() {
-        let _guard = CHILD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CHILD_TEST_LOCK.write().unwrap_or_else(|e| e.into_inner());
         let (folder, shim) = fake_claude("stop-all", "FAKE_AGENT_HANG=1");
         let set = folder.join("set");
         let assistant = assistant();

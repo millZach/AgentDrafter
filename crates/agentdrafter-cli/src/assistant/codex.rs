@@ -26,8 +26,9 @@ use serde_json::{json, Value};
 use super::{AgentEvent, McpServer, SERVER};
 
 /// How long one preflight probe (`exec --help`, `--version`, `login status`)
-/// may run before it is stopped (#229).
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// may run before it is stopped (#229). High enough to tolerate cold startup
+/// and antivirus scans on Windows while still bounding a hung binary.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The features of Codex the assistant runs without: its shell, and those
 /// that reach beyond its MCP server. Codex 0.171's names.
@@ -52,9 +53,10 @@ pub(super) fn check(program: &Path) -> Result<(), String> {
 }
 
 fn check_with_api_key(program: &Path, has_api_key: bool) -> Result<(), String> {
-    let help = run_probe(program, &["exec", "--help"], PROBE_TIMEOUT).map_err(|_| {
-        "Codex could not be checked (`codex exec --help` failed). Update or reinstall Codex and look again."
-            .to_owned()
+    let help = run_probe(program, &["exec", "--help"], PROBE_TIMEOUT).map_err(|why| {
+        format!(
+            "Codex could not be checked (`codex exec --help`: {why}). Update or reinstall Codex and look again."
+        )
     })?;
     if !help.success {
         return Err(
@@ -651,7 +653,7 @@ pre_turn = [\"audit.sh\"]
     #[test]
     fn check_rejects_old_keyring_only_and_signed_out_codex() {
         let _guard = super::super::CHILD_TEST_LOCK
-            .lock()
+            .read()
             .unwrap_or_else(|e| e.into_inner());
         let dir =
             std::env::temp_dir().join(format!("agentdrafter-codex-check-{}", std::process::id()));

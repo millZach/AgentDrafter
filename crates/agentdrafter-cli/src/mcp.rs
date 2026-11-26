@@ -28,6 +28,7 @@
 //! server gives in place of the live record.
 
 use std::io::{BufRead, Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use agentdrafter_core::{
@@ -413,8 +414,9 @@ impl Server {
 
     /// Refuses a call of the assistant's server bound to a set that names
     /// another set under `set`, the bound one alone, however it is spelled;
-    /// or a file outside it under `source` or `output`, which may name the
-    /// set or a file in it.
+    /// a file outside it under `source` or `output`, which may name the
+    /// set or a file in it; or an external file inside a `change_set`'s
+    /// operations or a `guide`'s steps (#226).
     fn within_set(&self, arguments: &Value) -> Result<(), Failure> {
         let Some(bound) = &self.set else {
             return Ok(());
@@ -431,18 +433,207 @@ impl Server {
                 }
             });
             if !inside {
-                return Err((
-                    -32602,
-                    format!(
-                        "Invalid params: the drafter's assistant works on the drawing set `{}` \
-                         alone, and `{key}` names `{named}`",
-                        bound.display()
-                    ),
-                ));
+                return Err(outside_set(bound, key, named));
+            }
+        }
+        if let Some(ops) = arguments
+            .get("change_set")
+            .and_then(|cs| cs.get("operations"))
+            .and_then(Value::as_array)
+        {
+            for (i, op) in ops.iter().enumerate() {
+                check_operation_paths(bound, op, &format!("change_set.operations[{i}]"))?;
+            }
+        }
+        if let Some(steps) = arguments
+            .get("guide")
+            .and_then(|g| g.get("steps"))
+            .and_then(Value::as_array)
+        {
+            for (i, step) in steps.iter().enumerate() {
+                if let Some(op) = step.get("completes") {
+                    check_operation_paths(bound, op, &format!("guide.steps[{i}].completes"))?;
+                }
             }
         }
         Ok(())
     }
+}
+
+fn outside_set(bound: &Path, where_path: &str, named: &str) -> Failure {
+    (
+        -32602,
+        format!(
+            "Invalid params: the drafter's assistant works on the drawing set `{}` \
+             alone, and `{where_path}` names `{named}`",
+            bound.display()
+        ),
+    )
+}
+
+/// Checks every filesystem path named inside a single change-set operation
+/// against the bound drawing set (#226).
+fn check_operation_paths(bound: &Path, op: &Value, prefix: &str) -> Result<(), Failure> {
+    let Some(map) = op.as_object() else {
+        return Ok(());
+    };
+    let mut base_dir = bound.to_path_buf();
+    if let Some(template) = map.get("template").and_then(Value::as_str) {
+        let resolved = resolve_within_set(bound, bound, template)
+            .ok_or_else(|| outside_set(bound, &format!("{prefix}.template"), template))?;
+        if let Some(parent) = resolved.parent() {
+            if parent.starts_with(bound) {
+                base_dir = parent.to_path_buf();
+            }
+        }
+    }
+    let Some(name) = map.get("op").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let kind = name.to_ascii_lowercase();
+    match kind.as_str() {
+        "import_blocks" | "adcenter" => {
+            if let Some(from) = map.get("from").and_then(Value::as_str) {
+                if resolve_within_set(bound, bound, from).is_none() {
+                    return Err(outside_set(bound, &format!("{prefix}.from"), from));
+                }
+            }
+            if let Some(library) = map.get("library").and_then(Value::as_str) {
+                if resolve_within_set(bound, bound, library).is_none() {
+                    return Err(outside_set(bound, &format!("{prefix}.library"), library));
+                }
+            }
+        }
+        "add_block" | "block" | "redefine_block" | "bedit" => {
+            if let Some(library) = map.get("library").and_then(Value::as_str) {
+                if resolve_within_set(bound, bound, library).is_none() {
+                    return Err(outside_set(bound, &format!("{prefix}.library"), library));
+                }
+            }
+            if let Some(objects) = map.get("objects").and_then(Value::as_array) {
+                for (j, item) in objects.iter().enumerate() {
+                    let Some(obj) = item.as_object() else {
+                        continue;
+                    };
+                    for key in ["image", "pdf_underlay"] {
+                        if let Some(path) = obj
+                            .get(key)
+                            .and_then(|v| v.get("path"))
+                            .and_then(Value::as_str)
+                        {
+                            if resolve_within_set(bound, &base_dir, path).is_none() {
+                                return Err(outside_set(
+                                    bound,
+                                    &format!("{prefix}.objects[{j}].{key}.path"),
+                                    path,
+                                ));
+                            }
+                        }
+                    }
+                    if let Some(file) = obj
+                        .get("shape")
+                        .and_then(|v| v.get("file"))
+                        .and_then(Value::as_str)
+                    {
+                        if looks_like_path(file)
+                            && resolve_within_set(bound, &base_dir, file).is_none()
+                        {
+                            return Err(outside_set(
+                                bound,
+                                &format!("{prefix}.objects[{j}].shape.file"),
+                                file,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        "attsync" => {
+            if let Some(library) = map.get("library").and_then(Value::as_str) {
+                if resolve_within_set(bound, bound, library).is_none() {
+                    return Err(outside_set(bound, &format!("{prefix}.library"), library));
+                }
+            }
+        }
+        "attach_xref" | "xattach" | "xref" | "add_image" | "imageattach" | "image"
+        | "add_pdf_underlay" | "pdfattach" | "pdfunderlay" => {
+            if let Some(path) = map.get("path").and_then(Value::as_str) {
+                if resolve_within_set(bound, &base_dir, path).is_none() {
+                    return Err(outside_set(bound, &format!("{prefix}.path"), path));
+                }
+            }
+        }
+        "add_shape" | "shape" => {
+            if let Some(file) = map.get("file").and_then(Value::as_str) {
+                if looks_like_path(file) && resolve_within_set(bound, &base_dir, file).is_none() {
+                    return Err(outside_set(bound, &format!("{prefix}.file"), file));
+                }
+            }
+        }
+        "change" => {
+            if let Some(set) = map.get("set").and_then(Value::as_object) {
+                if let Some(path) = set.get("path").and_then(Value::as_str) {
+                    if resolve_within_set(bound, &base_dir, path).is_none() {
+                        return Err(outside_set(bound, &format!("{prefix}.set.path"), path));
+                    }
+                }
+                if let Some(file) = set.get("file").and_then(Value::as_str) {
+                    if looks_like_path(file) && resolve_within_set(bound, &base_dir, file).is_none()
+                    {
+                        return Err(outside_set(bound, &format!("{prefix}.set.file"), file));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn looks_like_path(raw: &str) -> bool {
+    raw.contains('/') || raw.contains('\\') || raw == ".." || Path::new(raw).is_absolute()
+}
+
+/// Resolves `named` relative to `base` (when relative) and returns the
+/// resolved path only if it stays within the canonical `bound` directory,
+/// following symlinks on every existing prefix so neither `..` traversal nor
+/// symlinks can escape `bound` (#226).
+fn resolve_within_set(bound: &Path, base: &Path, named: &str) -> Option<PathBuf> {
+    if named.is_empty() {
+        return Some(base.to_path_buf());
+    }
+    let candidate = base.join(Path::new(named));
+    if let Ok(canon) = std::fs::canonicalize(&candidate) {
+        return canon.starts_with(bound).then_some(canon);
+    }
+    let mut cur = PathBuf::new();
+    for comp in candidate.components() {
+        match comp {
+            Component::Prefix(prefix) => cur.push(prefix.as_os_str()),
+            Component::RootDir => {
+                cur.push(comp.as_os_str());
+                if let Ok(canon) = std::fs::canonicalize(&cur) {
+                    cur = canon;
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if let Ok(canon) = std::fs::canonicalize(&cur) {
+                    cur = canon;
+                }
+                if !cur.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(part) => {
+                cur.push(part);
+                if let Ok(canon) = std::fs::canonicalize(&cur) {
+                    cur = canon;
+                }
+            }
+        }
+    }
+    cur.starts_with(bound).then_some(cur)
 }
 
 /// The answer to `server/discover`.
@@ -583,6 +774,164 @@ mod tests {
         assert!(server.within_set(&named("source", &nested)).is_ok());
         assert!(server.within_set(&named("source", &folder)).is_err());
         assert!(server.within_set(&named("set", &folder)).is_err());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn the_assistants_set_binding_refuses_external_drawings_inside_change_sets() {
+        let folder =
+            std::env::temp_dir().join(format!("agentdrafter-bound-ops-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        let set = folder.join("set");
+        let templates = set.join("templates");
+        let shared = set.join("shared");
+        let outside = folder.join("outside");
+        std::fs::create_dir_all(&templates).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(set.join("set.yaml"), "units: in\n").unwrap();
+        std::fs::write(set.join("blocks.yaml"), "blocks: {}\n").unwrap();
+        std::fs::write(templates.join("loop.yaml"), "units: in\nobjects: []\n").unwrap();
+        std::fs::write(shared.join("grid.dwg"), b"").unwrap();
+        std::fs::write(outside.join("secret.dwg"), b"").unwrap();
+        std::fs::write(outside.join("secret.png"), b"").unwrap();
+
+        let bound = std::fs::canonicalize(&set).unwrap();
+        let mut server = Server {
+            assistant: true,
+            set: Some(bound),
+            ..Server::default()
+        };
+
+        // `display-list` preview with `import_blocks` naming an external DWG (relative or absolute)
+        // is refused before the core opens it (#226).
+        for (op_name, from) in [
+            ("import_blocks", "../outside/secret.dwg".to_owned()),
+            (
+                "ADCENTER",
+                outside.join("secret.dwg").to_string_lossy().into_owned(),
+            ),
+            ("import_blocks", "../outside/nonexistent.dwg".to_owned()),
+        ] {
+            let call = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "display-list",
+                    "arguments": {
+                        "source": set.to_string_lossy(),
+                        "change_set": {
+                            "operations": [
+                                {"op": op_name, "from": from}
+                            ]
+                        }
+                    }
+                }
+            });
+            let answer = ask(&mut server, call).unwrap();
+            assert_eq!(
+                answer["error"]["code"], -32602,
+                "{op_name} {from}: {answer}"
+            );
+            let msg = answer["error"]["message"].as_str().unwrap();
+            assert!(msg.contains("change_set.operations[0].from"), "{msg}");
+        }
+
+        // An `import_blocks` drawing inside the set passes `within_set`.
+        let inside_import = json!({
+            "source": set.to_string_lossy(),
+            "change_set": {
+                "operations": [
+                    {"op": "import_blocks", "from": "shared/grid.dwg", "library": "blocks.yaml"}
+                ]
+            }
+        });
+        assert!(server.within_set(&inside_import).is_ok());
+
+        // `attach_xref`, `add_image`, `add_pdf_underlay`, `change`, `add_block`, and `guide`
+        // naming files outside the set are all refused.
+        for (label, args) in [
+            (
+                "attach_xref relative escape",
+                json!({
+                    "set": set.to_string_lossy(),
+                    "change_set": {"operations": [{"op": "attach_xref", "sheet": "S1", "name": "X", "path": "../outside/secret.dwg"}]}
+                }),
+            ),
+            (
+                "attach_xref template escape",
+                json!({
+                    "set": set.to_string_lossy(),
+                    "change_set": {"operations": [{"op": "XREF", "template": "templates/loop.yaml", "name": "X", "path": "../../outside/secret.dwg"}]}
+                }),
+            ),
+            (
+                "add_image escape",
+                json!({
+                    "set": set.to_string_lossy(),
+                    "change_set": {"operations": [{"op": "IMAGEATTACH", "sheet": "S1", "path": "../outside/secret.png"}]}
+                }),
+            ),
+            (
+                "add_pdf_underlay escape",
+                json!({
+                    "set": set.to_string_lossy(),
+                    "change_set": {"operations": [{"op": "add_pdf_underlay", "sheet": "S1", "path": "../outside/secret.pdf"}]}
+                }),
+            ),
+            (
+                "change set.path escape",
+                json!({
+                    "set": set.to_string_lossy(),
+                    "change_set": {"operations": [{"op": "change", "target": {"id": "S1/img"}, "set": {"path": "../outside/secret.png"}}]}
+                }),
+            ),
+            (
+                "add_block nested image escape",
+                json!({
+                    "set": set.to_string_lossy(),
+                    "change_set": {"operations": [{"op": "add_block", "name": "B", "objects": [{"image": {"path": "../outside/secret.png"}}]}]}
+                }),
+            ),
+            (
+                "import_blocks library escape",
+                json!({
+                    "set": set.to_string_lossy(),
+                    "change_set": {"operations": [{"op": "import_blocks", "from": "shared/grid.dwg", "library": "../outside/blocks.yaml"}]}
+                }),
+            ),
+            (
+                "guide step completes escape",
+                json!({
+                    "set": set.to_string_lossy(),
+                    "guide": {"steps": [{"completes": {"op": "import_blocks", "from": "../outside/secret.dwg"}}]}
+                }),
+            ),
+        ] {
+            let err = server.within_set(&args).unwrap_err();
+            assert_eq!(err.0, -32602, "{label}: {err:?}");
+        }
+
+        // Template-relative path that stays inside the set is allowed.
+        let inside_template_xref = json!({
+            "set": set.to_string_lossy(),
+            "change_set": {"operations": [{"op": "attach_xref", "template": "templates/loop.yaml", "name": "G", "path": "../shared/grid.dwg"}]}
+        });
+        assert!(server.within_set(&inside_template_xref).is_ok());
+
+        // Path array (`path` is an object target, not a filesystem path) and bare SHX names stay allowed.
+        let benign = json!({
+            "set": set.to_string_lossy(),
+            "change_set": {
+                "operations": [
+                    {"op": "ARRAYPATH", "target": {"id": "S1/a"}, "path": {"id": "S1/curve"}, "count": 3},
+                    {"op": "add_shape", "sheet": "S1", "file": "ltypeshp.shx", "position": [0, 0, 0], "size": 1}
+                ]
+            }
+        });
+        assert!(server.within_set(&benign).is_ok());
+
         let _ = std::fs::remove_dir_all(&folder);
     }
 
