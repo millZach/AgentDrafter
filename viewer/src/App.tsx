@@ -107,6 +107,7 @@ import {
   previewStep,
   previewTitle,
   onPreviewDrawing,
+  journalSnapshotValid,
   previewIsCurrent,
   previewRedrawnOn,
   reportGeneration,
@@ -921,9 +922,11 @@ function DrawingWorkspace({
   // The generation of the set the report was drawn on: a change landing
   // since makes it old until the preview is drawn again.
   const [previewGeneration, setPreviewGeneration] = useState('');
-  // Whether the journal's first snapshot has come: a preview opened before
-  // it is drawn again on it, and is not current until then.
+  // Whether a valid journal snapshot has come: a preview opened before it
+  // (or after a failed response) is drawn again on the next valid snapshot,
+  // and is not current until then (#192).
   const [journalRead, setJournalRead] = useState(false);
+  const journalReadNow = useRef(false);
   const previewOpen = useRef(false);
   previewOpen.current = !!preview;
   const previewKeys = useRef(0);
@@ -1416,6 +1419,7 @@ function DrawingWorkspace({
   // single YAML sheets have no set journal).
   useEffect(() => {
     if (isSheet) {
+      journalReadNow.current = true;
       setJournalRead(true);
       setJournal(null);
       setNoJournal('single sheet descriptions have no journal');
@@ -1423,18 +1427,25 @@ function DrawingWorkspace({
       void check(null);
       return;
     }
+    journalReadNow.current = false;
+    setJournalRead(false);
     const stop = watch(
       source,
       token,
       (text) => {
         const replied = JSON.parse(text) as { ok: boolean; result?: JournalReport; error?: { message: string } };
-        // Heard from, even when it cannot be read: a preview waits for no more.
-        setJournalRead(true);
-        if (!replied.ok || !replied.result) {
+        // Only a valid snapshot counts as the journal having been read: a
+        // failed response keeps any open preview stale and Change all off (#192).
+        if (!journalSnapshotValid(replied) || !replied.result) {
+          journalReadNow.current = false;
+          setJournalRead(false);
           setNoJournal(replied.error?.message ?? 'there is no journal');
           setJournal(null);
           return;
         }
+        const wasRead = journalReadNow.current;
+        journalReadNow.current = true;
+        setJournalRead(true);
         const report = replied.result;
         setNoJournal(null);
         setJournal(report);
@@ -1461,9 +1472,10 @@ function DrawingWorkspace({
           const n = report.entries.length;
           log(`Journal read: ${n} entr${n === 1 ? 'y' : 'ies'}.`);
         }
-        // An open preview is drawn again on the first snapshot, which may
-        // hold a change set that landed before the page read the journal.
-        if (previewRedrawnOn(previewOpen.current, before === null)) redrawPreview();
+        // An open preview is drawn again on the first valid snapshot (and
+        // after a failed response), which may hold a change set that landed
+        // before the page read the journal.
+        if (previewRedrawnOn(previewOpen.current, !wasRead)) redrawPreview();
         const checkTarget = isDwg ? (latestActiveRevision(report, source, originalShaRef.current)?.path ?? source) : source;
         if (before === null || replaced) {
           if (replaced) {

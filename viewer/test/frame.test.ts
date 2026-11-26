@@ -47,6 +47,7 @@ import {
   previewStep,
   previewSummary,
   onPreviewDrawing,
+  journalSnapshotValid,
   previewIsCurrent,
   previewRedrawnOn,
   reportGeneration,
@@ -261,6 +262,30 @@ test('a preview opened before the journal is read waits for it, and is drawn aga
   // Drawn again on it: the version moved on, and the report follows the new reply.
   assert.equal(previewIsCurrent({ ...shown, journalRead: true, now: '0:*:1' }), false);
   assert.equal(previewIsCurrent({ ...shown, journalRead: true, reply: { preview: true, generation: '0:*:1' }, reportedAt: '0:*:1', now: '0:*:1' }), true);
+});
+
+test('a failed first journal response keeps the preview stale and Change all off (#192)', () => {
+  const shown = { previewing: true, reported: true, reply: { preview: true, generation: '0:*:0' }, reportedAt: '0:*:0', now: '0:*:0' };
+  const failed = { ok: false, error: { message: 'journal unreadable' } };
+  const empty = { ok: true };
+  const valid = { ok: true, result: { entries: [] } };
+
+  // First response fails: journalRead stays false, Change all stays off.
+  assert.equal(journalSnapshotValid(failed), false);
+  assert.equal(journalSnapshotValid(empty), false);
+  assert.equal(previewIsCurrent({ ...shown, journalRead: journalSnapshotValid(failed) }), false);
+  assert.equal(previewIsCurrent({ ...shown, journalRead: journalSnapshotValid(empty) }), false);
+
+  // A valid snapshot arrives later: triggers redraw, then enables Change all once redrawn.
+  const wasRead = false;
+  const nowRead = journalSnapshotValid(valid);
+  assert.equal(nowRead, true);
+  assert.equal(previewRedrawnOn(true, !wasRead), true);
+  assert.equal(previewIsCurrent({ ...shown, journalRead: nowRead, now: '0:*:1' }), false);
+  assert.equal(previewIsCurrent({ ...shown, journalRead: nowRead, reply: { preview: true, generation: '0:*:1' }, reportedAt: '0:*:1', now: '0:*:1' }), true);
+
+  // A subsequent failure again marks the preview stale until another valid snapshot arrives.
+  assert.equal(previewIsCurrent({ ...shown, journalRead: journalSnapshotValid(failed) }), false);
 });
 
 test("Enter is refused on a preview's drawing, an empty one too, which would repeat the last tool", () => {
