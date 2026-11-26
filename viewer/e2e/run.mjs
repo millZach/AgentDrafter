@@ -3217,6 +3217,7 @@ const checks = {
         { timeout: 30000 },
       );
       await fitAll(page);
+      await still(page);
       const { place, box } = await page.evaluate((wanted) => {
         const p = window.agentdrafterViewer;
         const at = p.summary.objects.findIndex((o) => o.id === wanted);
@@ -3224,6 +3225,10 @@ const checks = {
       }, id);
       assert(place >= 0 && box.length === 4, `${id} is on the sheet`);
       const [x0, y0, x1, y1] = box;
+      const mid = [(x0 + x1) / 2, (y0 + y1) / 2];
+      if ((await page.evaluate(([x, y]) => window.agentdrafterViewer.pickAt(x, y, 16), mid)) === place) {
+        return { place, box, at: await onPage(page, mid) };
+      }
       for (let j = 1; j < 8; j++) {
         for (let i = 1; i < 12; i++) {
           const at = [x0 + ((x1 - x0) * i) / 12, y0 + ((y1 - y0) * j) / 8];
@@ -3559,11 +3564,20 @@ const checks = {
         await page.tap('.ribbon [data-toggle="osnap"]');
         let before = journal().length;
         await page.tap('.rb[data-tool="array"]', { force: true });
+        await page.waitForFunction(
+          () => !document.querySelector('.ribbonwrap.open') && (document.querySelector('.cmdbar')?.textContent ?? '').includes('Tap the objects to array'),
+          null,
+          { timeout: 15000 },
+        );
         assert((await bar(page)).includes('Tap the objects to array'), `the phone's words: ${await bar(page)}`);
         let target = await pointOn(page, 'DP-LD-101/device');
+        await clearAt(page, target.at);
         await page.touchscreen.tap(...target.at);
-        await sleep(300);
-        assert((await bar(page)).includes('1 object picked'), `the device is picked: ${await bar(page)}`);
+        await page
+          .waitForFunction(() => (document.querySelector('.cmdbar')?.textContent ?? '').includes('1 object picked'), null, { timeout: 10000 })
+          .catch(async () => {
+            throw new Error(`the device is picked: ${await bar(page)}`);
+          });
         await page.tap('.opt[data-opt="tool:done"]');
         await page.waitForSelector('[data-arraypanel].arr.docked');
         await sleep(600);
@@ -3580,6 +3594,7 @@ const checks = {
         assert(journal().length === before && !(await page.$('[data-arraypanel]')), 'Cancel sends nothing');
         // Again, from the selection: 2 by 2, the total toggled, then Array.
         target = await pointOn(page, 'DP-LD-101/device');
+        await clearAt(page, target.at);
         await page.touchscreen.tap(...target.at);
         await sleep(300);
         await page.tap('.opt[data-opt="array-objects"]');
@@ -3601,13 +3616,25 @@ const checks = {
         assert(op.rows === 2 && op.columns === 2 && op.row_spacing === -1.2 && op.column_spacing === 1.5, `one array: ${JSON.stringify(op)}`);
         seen.phone.rectangular = entry.entry;
         await shot(page, 'array-phone-2-landed.png', true);
-        // Polar, its centre typed with ⌨ Type.
+        // Polar, its centre typed with ⌨ Type. Start Array and let the Tools
+        // drawer close and view settle before computing tap coordinates (#313).
         before = journal().length;
-        target = await pointOn(page, tickId);
         await page.tap('.toolsbtn');
         await page.tap('.rb[data-tool="array"]', { force: true });
+        await page.waitForFunction(
+          () => !document.querySelector('.ribbonwrap.open') && (document.querySelector('.cmdbar')?.textContent ?? '').includes('Tap the objects to array'),
+          null,
+          { timeout: 15000 },
+        );
+        await frames(page);
+        target = await pointOn(page, tickId);
+        await clearAt(page, target.at);
         await page.touchscreen.tap(...target.at);
-        await sleep(300);
+        await page
+          .waitForFunction(() => (document.querySelector('.cmdbar')?.textContent ?? '').includes('1 object picked'), null, { timeout: 10000 })
+          .catch(async () => {
+            throw new Error(`the tick is picked: ${await bar(page)}`);
+          });
         await page.tap('.opt[data-opt="tool:done"]');
         await page.waitForSelector('[data-arraypanel].arr.docked');
         await page.tap('[data-arraypanel] [data-kind="polar"]');
@@ -3628,11 +3655,22 @@ const checks = {
         seen.phone.polar = entry.entry;
         // terminal-2: the warning, the band in the command bar's place, Change all.
         before = journal().length;
-        target = await pointOn(page, 'DP-LD-101/terminal-2');
         await page.tap('.toolsbtn');
         await page.tap('.rb[data-tool="array"]', { force: true });
+        await page.waitForFunction(
+          () => !document.querySelector('.ribbonwrap.open') && (document.querySelector('.cmdbar')?.textContent ?? '').includes('Tap the objects to array'),
+          null,
+          { timeout: 15000 },
+        );
+        await frames(page);
+        target = await pointOn(page, 'DP-LD-101/terminal-2');
+        await clearAt(page, target.at);
         await page.touchscreen.tap(...target.at);
-        await sleep(300);
+        await page
+          .waitForFunction(() => (document.querySelector('.cmdbar')?.textContent ?? '').includes('1 object picked'), null, { timeout: 10000 })
+          .catch(async () => {
+            throw new Error(`terminal-2 is picked: ${await bar(page)}`);
+          });
         await page.tap('.opt[data-opt="tool:done"]');
         await page.waitForSelector('[data-arraypanel].arr.docked');
         const warned = await page.textContent('[data-warning]');
