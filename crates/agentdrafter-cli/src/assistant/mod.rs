@@ -392,34 +392,17 @@ impl Assistant {
     /// Looks on the PATH again: `POST /assistant/find`. A conversation with
     /// no agent goes on the first one found, and one whose agent is gone on
     /// another, or none, as a new conversation, so the server and the page
-    /// agree on it. A conversation working on a message is left as it is.
+    /// agree on it. A conversation working on a message is left as it is
+    /// until its turn ends, when [`Self::finish`] reconciles it (#232).
     pub(crate) fn find_again(&self) -> Value {
-        let found = find_agents();
+        self.apply_found(find_agents())
+    }
+
+    fn apply_found(&self, found: Vec<(Agent, PathBuf)>) -> Value {
         *self.found.lock().unwrap_or_else(|e| e.into_inner()) = found.clone();
-        let first = found.first().map(|(agent, _)| *agent);
         let mut talks = self.lock();
         for talk in talks.values_mut() {
-            let gone = talk.agent.filter(|a| !found.iter().any(|(f, _)| f == a));
-            if talk.busy || (talk.agent.is_some() && gone.is_none()) {
-                continue;
-            }
-            if talk.agent.is_none() && first.is_none() {
-                continue;
-            }
-            talk.agent = first;
-            talk.session = None;
-            let looked = match gone {
-                Some(gone) => format!("Looked on the PATH again: {} is gone.", gone.name()),
-                None => "Looked on the PATH again.".to_owned(),
-            };
-            let now = match first {
-                Some(agent) => format!(
-                    "{looked} Now {} A new conversation.",
-                    started_words(agent, &talk.named).replacen("On ", "on ", 1)
-                ),
-                None => format!("{looked} No agent is found now."),
-            };
-            talk.note(now);
+            reconcile_talk(talk, &found);
         }
         drop(talks);
         self.changed.notify_all();
@@ -617,6 +600,11 @@ impl Assistant {
             let talk = self.talk(&mut talks, &key, &named);
             if talk.busy {
                 return Err(busy(talk));
+            }
+            // Another client may have rescanned or switched the agent while
+            // `record` ran without the lock held (#232).
+            if talk.agent != Some(agent) || !self.found().iter().any(|(a, _)| *a == agent) {
+                return Err(no_agent(Some(agent)));
             }
             talk.items.push(json!({
                 "kind": "drafter",
@@ -975,7 +963,9 @@ impl Assistant {
         self.changed.notify_all();
     }
 
-    /// Ends a message's run: done, and why it failed, if it did.
+    /// Ends a message's run: done, why it failed (if it did), and reconciles
+    /// the conversation's agent against the latest PATH scan in case a rescan
+    /// happened while the turn was running (#232).
     fn finish(&self, set: &Path, item: usize, error: Option<String>) {
         let mut talks = self.lock();
         if let Some(talk) = talks.get_mut(set) {
@@ -987,10 +977,43 @@ impl Assistant {
             }
             talk.busy = false;
             talk.version += 1;
+            // Read `found` while holding `talks` (same lock order as `send`)
+            // so a concurrent `apply_found` cannot slip between setting
+            // `busy = false` and checking whether `talk.agent` is still present.
+            let found = self.found();
+            reconcile_talk(talk, &found);
         }
         drop(talks);
         self.changed.notify_all();
     }
+}
+
+/// Brings an idle conversation's agent into line with `found`: a conversation
+/// with no agent takes the first one found, and one whose agent is gone
+/// switches to another (or none) as a new conversation (#232).
+fn reconcile_talk(talk: &mut Talk, found: &[(Agent, PathBuf)]) {
+    let first = found.first().map(|(agent, _)| *agent);
+    let gone = talk.agent.filter(|a| !found.iter().any(|(f, _)| f == a));
+    if talk.busy || (talk.agent.is_some() && gone.is_none()) {
+        return;
+    }
+    if talk.agent.is_none() && first.is_none() {
+        return;
+    }
+    talk.agent = first;
+    talk.session = None;
+    let looked = match gone {
+        Some(gone) => format!("Looked on the PATH again: {} is gone.", gone.name()),
+        None => "Looked on the PATH again.".to_owned(),
+    };
+    let now = match first {
+        Some(agent) => format!(
+            "{looked} Now {} A new conversation.",
+            started_words(agent, &talk.named).replacen("On ", "on ", 1)
+        ),
+        None => format!("{looked} No agent is found now."),
+    };
+    talk.note(now);
 }
 
 /// Resolves the canonical path of the `set` field on a command input or reply
@@ -1549,5 +1572,98 @@ FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
         assert_eq!(recorded[2]["canonical_set"], json!(other_canonical));
 
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn rescan_during_busy_turn_reconciles_agent_when_turn_finishes() {
+        let set_a = PathBuf::from("set-a");
+        let set_b = PathBuf::from("set-b");
+        let set_c = PathBuf::from("set-c");
+        let make_talk = |named: &Path, agent: Agent, session: &str| Talk {
+            named: named.to_owned(),
+            agent: Some(agent),
+            session: Some(session.to_owned()),
+            busy: true,
+            items: vec![
+                json!({"kind": "drafter", "text": "hello"}),
+                json!({"kind": "assistant", "parts": [], "done": false, "error": null}),
+            ],
+            version: 1,
+        };
+
+        // 1. Active agent disappears during turn, another agent (Codex) remains.
+        let assistant = Assistant {
+            found: Mutex::new(vec![
+                (Agent::Claude, PathBuf::from("/bin/claude")),
+                (Agent::Codex, PathBuf::from("/bin/codex")),
+            ]),
+            talks: Mutex::new(HashMap::new()),
+            changed: Condvar::new(),
+            own: vec!["agentdrafter".into()],
+        };
+        {
+            let mut talks = assistant.lock();
+            talks.insert(set_a.clone(), make_talk(&set_a, Agent::Claude, "sess-1"));
+            talks.insert(set_b.clone(), make_talk(&set_b, Agent::Codex, "sess-2"));
+        }
+
+        // Rescan while both turns are busy: Claude is gone, Codex remains.
+        assistant.apply_found(vec![(Agent::Codex, PathBuf::from("/bin/codex"))]);
+        {
+            let talks = assistant.lock();
+            assert_eq!(
+                talks[&set_a].agent,
+                Some(Agent::Claude),
+                "busy turn is left undisturbed until it finishes"
+            );
+            assert_eq!(talks[&set_a].items.len(), 2);
+        }
+
+        // Finishing set_a's turn reconciles it onto Codex and clears the stale session.
+        assistant.finish(&set_a, 1, None);
+        {
+            let talks = assistant.lock();
+            let talk = &talks[&set_a];
+            assert!(!talk.busy);
+            assert_eq!(talk.agent, Some(Agent::Codex));
+            assert_eq!(talk.session, None);
+            assert_eq!(talk.items[1]["done"], true);
+            let note = talk.items[2]["text"].as_str().unwrap();
+            assert!(
+                note.contains("Claude Code is gone") && note.contains("Codex"),
+                "reconcile note: {note}"
+            );
+        }
+
+        // Finishing set_b's turn (whose Codex is still present) keeps Codex and its session.
+        assistant.finish(&set_b, 1, None);
+        {
+            let talks = assistant.lock();
+            let talk = &talks[&set_b];
+            assert!(!talk.busy);
+            assert_eq!(talk.agent, Some(Agent::Codex));
+            assert_eq!(talk.session.as_deref(), Some("sess-2"));
+            assert_eq!(talk.items.len(), 2, "no spurious note when agent remains");
+        }
+
+        // 2. Active agent disappears during turn and no agents remain.
+        {
+            let mut talks = assistant.lock();
+            talks.insert(set_c.clone(), make_talk(&set_c, Agent::Codex, "sess-3"));
+        }
+        assistant.apply_found(Vec::new());
+        assistant.finish(&set_c, 1, None);
+        {
+            let talks = assistant.lock();
+            let talk = &talks[&set_c];
+            assert!(!talk.busy);
+            assert_eq!(talk.agent, None);
+            assert_eq!(talk.session, None);
+            let note = talk.items[2]["text"].as_str().unwrap();
+            assert!(
+                note.contains("Codex is gone") && note.contains("No agent is found now"),
+                "no-agent reconcile note: {note}"
+            );
+        }
     }
 }
