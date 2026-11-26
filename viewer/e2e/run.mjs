@@ -4000,6 +4000,87 @@ const checks = {
         assert(problems.length === 0, problems.join('; '));
         await context.close();
       }
+      // Circular viewport clipping (#188): a filled solid crossing a circular
+      // viewport's edge clips both its amber changed highlight and its faint
+      // old-place outline to the circular boundary, with nothing outside it.
+      {
+        const circ = join(folder, 'circular-vp');
+        mkdirSync(join(circ, 'templates'), { recursive: true });
+        writeFileSync(join(circ, 'set.yaml'), 'units: mm\noutput: dwg\nrows: rows.yaml\n');
+        writeFileSync(
+          join(circ, 'templates', 't.yaml'),
+          [
+            'units: mm',
+            'paper: ISO A4 landscape',
+            'layout: {name: Plan}',
+            'objects:',
+            '  - solid: {id: pad, corners: [[115, 50, 0], [160, 50, 0], [160, 160, 0], [115, 160, 0]]}',
+            '  - viewport: {id: round, space: paper, clip: {center: [150, 105, 0], radius: 45}, view_center: [150, 105, 0], scale: 1}',
+            '',
+          ].join('\n'),
+        );
+        writeFileSync(join(circ, 'rows.yaml'), 'rows:\n  - sheet: S-1\n    template: templates/t.yaml\n');
+        const built = agentIn(folder, 'build', 'circular-vp');
+        assert(built.ok, `built circular-vp: ${JSON.stringify(built)}`);
+        const proposed = await (
+          await fetch(`${server.base}/commands/propose`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              set: 'circular-vp',
+              change_set: { operations: [{ op: 'move', target: { id: 'S-1/pad' }, by: [15, 0, 0] }] },
+              by: 'Assistant',
+            }),
+          })
+        ).json();
+        assert(proposed.ok, `proposed on circular-vp: ${JSON.stringify(proposed)}`);
+        const context = await b.newContext(LAPTOP);
+        const { page, problems } = await open(context, `${server.base}/?source=circular-vp&sheet=S-1`, 'S-1');
+        await page.waitForSelector('[data-pcard="1"] [data-pc="show"]', { timeout: 30000 });
+        await page.click('[data-pcard="1"] [data-pc="show"]');
+        await shows(page, 'S-1');
+        await page.waitForSelector('[data-proposal="1"] [data-pv-summary]', { timeout: 30000 });
+        await page.click('[aria-label="Fit the sheet"]');
+        await sleep(600);
+        await frames(page);
+        const sample = async ([x0, y0, x1, y1], test) => {
+          const [l, t] = await onPage(page, [x0, y1]);
+          const [r, bottom] = await onPage(page, [x1, y0]);
+          const png = decodePng(
+            await page.screenshot({
+              clip: {
+                x: Math.floor(l),
+                y: Math.floor(t),
+                width: Math.max(1, Math.ceil(r - l)),
+                height: Math.max(1, Math.ceil(bottom - t)),
+              },
+            }),
+          );
+          let n = 0;
+          for (let i = 0; i < png.rgba.length; i += 4) {
+            if (test(png.rgba[i], png.rgba[i + 1], png.rgba[i + 2])) n += 1;
+          }
+          return n;
+        };
+        const isAmber = (r, g, b) => r > 180 && g > 100 && r - b > 100;
+        const isOldPlace = (r, g, b) => r > 55 && g > 62 && b > 70 && Math.abs(r - b) < 35;
+        // Circle center (150, 105) radius 45 (box [105..195, 60..150]).
+        // Moved pad right edge at x=175: inside circle at y=105 (d=25 < 45),
+        // outside circle at y=146 (d=sqrt(25^2+41^2)=48.0 > 45, inside box).
+        const amberInside = await sample([172, 100, 178, 110], isAmber);
+        const amberOutside = await sample([173, 144, 176.5, 148], isAmber);
+        // Old pad left edge at x=115: inside circle at y=105 (d=35 < 45),
+        // outside circle at y=146 (d=sqrt(35^2+41^2)=53.9 > 45, inside box).
+        const oldInside = await sample([112, 100, 118, 110], isOldPlace);
+        const oldOutside = await sample([113, 144, 117, 148], (r, g, b) => isAmber(r, g, b) || isOldPlace(r, g, b));
+        assert(amberInside > 10, `amber highlight draws inside circular viewport: ${amberInside}`);
+        assert(amberOutside === 0, `amber highlight clipped outside circular viewport: ${amberOutside}`);
+        assert(oldInside > 5, `old-place outline draws inside circular viewport: ${oldInside}`);
+        assert(oldOutside === 0, `old-place outline clipped outside circular viewport: ${oldOutside}`);
+        seen.circular = { amberInside, amberOutside, oldInside, oldOutside };
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
       return {
         ...seen,
         screenshots: ['preview-laptop-101.png', 'preview-laptop-301.png', 'preview-laptop-refused.png', 'preview-phone-101.png', 'preview-phone-302.png'],

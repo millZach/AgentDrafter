@@ -161,3 +161,49 @@ fn a_strike_crosses_its_box_and_dashes_break_a_line() {
         "too short to break"
     );
 }
+
+#[test]
+fn preview_preserves_old_clip_boundaries_and_resolves_viewport_clip_polygons() {
+    let circle = vec![[65.0, 40.0], [50.0, 55.0], [35.0, 40.0], [50.0, 25.0]];
+    let mut old_item = stroke(0, vec![vec![[38.0, 25.0], [56.0, 55.0]]]);
+    old_item.clip = Some(b([35.0, 25.0], [65.0, 55.0]));
+    old_item.clip_boundary = Some(0);
+    let mut rect_item = stroke(1, vec![vec![[10.0, 10.0], [20.0, 20.0]]]);
+    rect_item.clip = Some(b([5.0, 5.0], [25.0, 25.0]));
+    let paper_item = stroke(2, vec![vec![[0.0, 0.0], [10.0, 0.0]]]);
+
+    let drawn = list(vec![
+        old_item.clone(),
+        rect_item.clone(),
+        paper_item.clone(),
+    ]);
+    let ids = [
+        Some("S/pad".to_owned()),
+        Some("S/rect".to_owned()),
+        Some("S/paper".to_owned()),
+    ];
+    let reply = json!({
+        "change": {}, "objects": [],
+        "changed": [0],
+        "was": [{"id": "S/pad", "how": "changed", "items": [old_item]}],
+        "was_clip_boundaries": [circle]
+    });
+    let p = Preview::of(Some(&reply), &drawn, &ids).unwrap();
+    assert_eq!(p.was_clip_boundaries, vec![circle.clone()]);
+    assert_eq!(
+        clip_polygon(&p.was[0].items[0], &p.was_clip_boundaries),
+        Some(circle.clone()),
+        "non-rectangular clip_boundary takes precedence"
+    );
+    assert_eq!(
+        clip_polygon(&rect_item, &[]),
+        Some(vec![[5.0, 5.0], [25.0, 5.0], [25.0, 25.0], [5.0, 25.0],]),
+        "rectangular viewport falls back to clip bounds"
+    );
+    assert_eq!(clip_polygon(&paper_item, &p.was_clip_boundaries), None);
+
+    let fan = stencil_fan(&circle, &|x, y| (x * 2.0, y * 2.0));
+    assert_eq!(fan.len(), (circle.len() - 2) * 6, "two triangles for quad");
+    assert_eq!(&fan[0..6], &[130.0, 80.0, 100.0, 110.0, 70.0, 80.0]);
+    assert!(stencil_fan(&[[0.0, 0.0], [1.0, 0.0]], &|x, y| (x, y)).is_empty());
+}
