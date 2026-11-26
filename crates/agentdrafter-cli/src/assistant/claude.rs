@@ -9,7 +9,7 @@
 //! `disableAllHooks`). Its sign-in is the drafter's own. The next message
 //! resumes the session the first one's lines named (`--resume`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{json, Value};
@@ -55,6 +55,140 @@ pub(super) fn config(server: &McpServer) -> Value {
 /// The settings file's contents: none of the drafter's hooks runs.
 pub(super) fn settings() -> Value {
     json!({ "disableAllHooks": true })
+}
+
+/// Checks Claude Code's system managed-configuration locations for
+/// administrator-managed hooks or MCP servers that `--settings`
+/// (`disableAllHooks`) and `--strict-mcp-config` cannot disable (#230).
+pub(super) fn managed_warnings() -> Vec<String> {
+    let mut warnings = Vec::new();
+    for dir in managed_dirs() {
+        warnings.extend(managed_warnings_in(&dir));
+    }
+    warnings
+}
+
+fn managed_dirs() -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        vec![PathBuf::from("/Library/Application Support/ClaudeCode")]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        vec![PathBuf::from("/etc/claude-code")]
+    }
+    #[cfg(windows)]
+    {
+        let mut dirs = Vec::new();
+        let pf = std::env::var_os("ProgramFiles")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+        dirs.push(pf.join("ClaudeCode"));
+        if let Some(pd) = std::env::var_os("ProgramData") {
+            let candidate = PathBuf::from(pd).join("ClaudeCode");
+            if !dirs.contains(&candidate) {
+                dirs.push(candidate);
+            }
+        }
+        dirs
+    }
+}
+
+/// Inspects a single Claude Code managed-settings directory for hooks or MCP
+/// servers that could act outside proposal-only (#230).
+pub(super) fn managed_warnings_in(dir: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut settings_files = Vec::new();
+    let primary = dir.join("managed-settings.json");
+    if primary.exists() {
+        settings_files.push(primary);
+    }
+    let drop_in = dir.join("managed-settings.d");
+    if let Ok(entries) = std::fs::read_dir(&drop_in) {
+        let mut extra: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+            })
+            .collect();
+        extra.sort();
+        settings_files.extend(extra);
+    }
+    for path in settings_files {
+        match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        {
+            None => warnings.push(format!(
+                "Claude Code managed settings at {} could not be read, so proposal-only cannot be guaranteed.",
+                path.display()
+            )),
+            Some(value) => {
+                if value.get("hooks").is_some_and(has_non_empty_hooks) {
+                    warnings.push(format!(
+                        "Claude Code has administrator-managed hooks in {} that disableAllHooks cannot turn off, so proposal-only cannot be guaranteed.",
+                        path.display()
+                    ));
+                }
+                if value
+                    .get("mcpServers")
+                    .is_some_and(has_extra_mcp_servers)
+                {
+                    warnings.push(format!(
+                        "Claude Code has administrator-managed MCP servers in {} that --strict-mcp-config cannot turn off, so proposal-only cannot be guaranteed.",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+    let managed_mcp = dir.join("managed-mcp.json");
+    if managed_mcp.exists() {
+        match std::fs::read_to_string(&managed_mcp)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        {
+            None => warnings.push(format!(
+                "Claude Code managed MCP configuration at {} could not be read, so proposal-only cannot be guaranteed.",
+                managed_mcp.display()
+            )),
+            Some(value) => {
+                if value
+                    .get("mcpServers")
+                    .is_some_and(has_extra_mcp_servers)
+                {
+                    warnings.push(format!(
+                        "Claude Code has administrator-managed MCP servers in {} that --strict-mcp-config cannot turn off, so proposal-only cannot be guaranteed.",
+                        managed_mcp.display()
+                    ));
+                }
+            }
+        }
+    }
+    warnings
+}
+
+fn has_non_empty_hooks(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => map.values().any(|v| match v {
+            Value::Array(items) => !items.is_empty(),
+            Value::Object(inner) => !inner.is_empty(),
+            Value::Null | Value::Bool(false) => false,
+            _ => true,
+        }),
+        _ => false,
+    }
+}
+
+fn has_extra_mcp_servers(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|map| map.keys().any(|name| name != SERVER))
 }
 
 /// What one line of `claude`'s output says.
@@ -247,5 +381,48 @@ mod tests {
             json!({"agentdrafter": {"command": "/bin/agentdrafter", "args": ["mcp", "--assistant", "--set", "/sets/a"]}}),
             "the assistant's server alone"
         );
+    }
+
+    #[test]
+    fn managed_warnings_detect_hooks_mcp_servers_and_unreadable_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentdrafter-claude-managed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("managed-settings.d")).unwrap();
+
+        // Empty / benign managed settings produce no warnings.
+        std::fs::write(
+            dir.join("managed-settings.json"),
+            r#"{"hooks": {"PreToolUse": []}}"#,
+        )
+        .unwrap();
+        assert!(managed_warnings_in(&dir).is_empty());
+
+        // Managed hooks in drop-in file and managed MCP server both warn.
+        std::fs::write(
+            dir.join("managed-settings.d/10-hooks.json"),
+            r#"{"hooks": {"PreToolUse": [{"matcher": "*", "hooks": []}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("managed-mcp.json"),
+            r#"{"mcpServers": {"corp-fs": {"command": "fs-mcp"}}}"#,
+        )
+        .unwrap();
+        let warnings = managed_warnings_in(&dir);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("10-hooks.json") && warnings[0].contains("hooks"));
+        assert!(warnings[1].contains("managed-mcp.json") && warnings[1].contains("MCP servers"));
+
+        // Malformed JSON warns too.
+        std::fs::write(dir.join("managed-settings.json"), "not json").unwrap();
+        let warnings = managed_warnings_in(&dir);
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("managed-settings.json") && w.contains("could not be read")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
