@@ -16,7 +16,7 @@
 //! (`--disable`), so it has no tool that reads a file beyond the set. The next message resumes
 //! the thread the first one's lines named (`exec resume <thread>`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{json, Value};
@@ -36,6 +36,200 @@ const DISABLED: [&str; 9] = [
     "view_image",
     "image_generation",
 ];
+
+/// Checks Codex's system configuration directories for system MCP servers,
+/// hooks, or requirements that `--ignore-user-config` still loads (#230).
+pub(super) fn managed_warnings() -> Vec<String> {
+    let mut warnings = Vec::new();
+    for dir in system_dirs() {
+        warnings.extend(managed_warnings_in(&dir));
+    }
+    warnings
+}
+
+fn system_dirs() -> Vec<PathBuf> {
+    #[cfg(unix)]
+    {
+        vec![PathBuf::from("/etc/codex")]
+    }
+    #[cfg(windows)]
+    {
+        let pd = std::env::var_os("ProgramData")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        vec![pd.join("OpenAI").join("Codex")]
+    }
+}
+
+/// Inspects a single Codex system-configuration directory for MCP servers,
+/// hooks, or managed requirements that stay reachable with
+/// `--ignore-user-config` (#230).
+pub(super) fn managed_warnings_in(dir: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for name in ["config.toml", "managed_config.toml"] {
+        let path = dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::read_to_string(&path) {
+            Err(_) => warnings.push(format!(
+                "Codex system configuration at {} could not be read, so proposal-only cannot be guaranteed.",
+                path.display()
+            )),
+            Ok(text) => {
+                let found = scan_toml(&text);
+                if found.mcp_servers {
+                    warnings.push(format!(
+                        "Codex has system MCP servers in {} that --ignore-user-config still loads, so proposal-only cannot be guaranteed.",
+                        path.display()
+                    ));
+                }
+                if found.hooks {
+                    warnings.push(format!(
+                        "Codex has system hooks in {} that --ignore-user-config still loads, so proposal-only cannot be guaranteed.",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+    let requirements = dir.join("requirements.toml");
+    if requirements.exists() {
+        match std::fs::read_to_string(&requirements) {
+            Err(_) => warnings.push(format!(
+                "Codex system requirements at {} could not be read, so proposal-only cannot be guaranteed.",
+                requirements.display()
+            )),
+            Ok(text) => {
+                let found = scan_toml(&text);
+                if found.mcp_servers || found.hooks || found.managed_hooks_policy {
+                    warnings.push(format!(
+                        "Codex has system requirements in {} that may keep extra MCP servers or hooks active, so proposal-only cannot be guaranteed.",
+                        requirements.display()
+                    ));
+                }
+            }
+        }
+    }
+    warnings
+}
+
+#[derive(Default)]
+struct TomlFindings {
+    mcp_servers: bool,
+    hooks: bool,
+    managed_hooks_policy: bool,
+}
+
+/// Minimal TOML line scanner detecting system `[mcp_servers.*]` tables/keys
+/// (other than `agentdrafter`), `[hooks]` definitions, and managed-hook policy
+/// flags without adding a TOML parser dependency.
+fn scan_toml(text: &str) -> TomlFindings {
+    let mut found = TomlFindings::default();
+    let mut section = String::new();
+    for raw in text.lines() {
+        let line = strip_toml_comment(raw).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let is_array = line.starts_with("[[") && line.ends_with("]]");
+            let inner = if is_array {
+                &line[2..line.len() - 2]
+            } else {
+                &line[1..line.len() - 1]
+            }
+            .trim();
+            section = inner.to_owned();
+            if let Some(rest) = section.strip_prefix("mcp_servers.") {
+                let name = first_toml_segment(rest);
+                if name != SERVER {
+                    found.mcp_servers = true;
+                }
+            } else if is_array && (section == "hooks" || section.starts_with("hooks.")) {
+                found.hooks = true;
+            }
+            continue;
+        }
+        let Some((lhs, rhs)) = line.split_once('=') else {
+            continue;
+        };
+        let key = lhs.trim();
+        let val = rhs.trim();
+        if section == "mcp_servers" {
+            let name = first_toml_segment(key);
+            if name != SERVER && !is_empty_toml_container(val) {
+                found.mcp_servers = true;
+            }
+        } else if section.is_empty() {
+            if let Some(rest) = key.strip_prefix("mcp_servers.") {
+                let name = first_toml_segment(rest);
+                if name != SERVER {
+                    found.mcp_servers = true;
+                }
+            } else if key == "mcp_servers" && !is_empty_toml_container(val) {
+                found.mcp_servers = true;
+            } else if (key == "hooks" || key.starts_with("hooks.")) && !is_empty_toml_container(val)
+            {
+                found.hooks = true;
+            } else if key == "allow_managed_hooks_only" && val == "true" {
+                found.managed_hooks_policy = true;
+            }
+        } else if section == "hooks" || section.starts_with("hooks.") {
+            if !is_empty_toml_container(val) {
+                found.hooks = true;
+            }
+        } else if key == "allow_managed_hooks_only" && val == "true" {
+            found.managed_hooks_policy = true;
+        }
+    }
+    found
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if in_double {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
+        } else if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+        } else {
+            match ch {
+                '"' => in_double = true,
+                '\'' => in_single = true,
+                '#' => return &line[..idx],
+                _ => {}
+            }
+        }
+    }
+    line
+}
+
+fn first_toml_segment(path: &str) -> &str {
+    let trimmed = path.trim();
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        rest.split('"').next().unwrap_or("")
+    } else if let Some(rest) = trimmed.strip_prefix('\'') {
+        rest.split('\'').next().unwrap_or("")
+    } else {
+        trimmed.split('.').next().unwrap_or("").trim()
+    }
+}
+
+fn is_empty_toml_container(val: &str) -> bool {
+    let compact: String = val.chars().filter(|c| !c.is_whitespace()).collect();
+    compact == "{}" || compact == "[]"
+}
 
 /// The command that runs one message: `program` is where `codex` was found,
 /// `server` the assistant's MCP server, `thread` the thread to resume.
@@ -254,5 +448,51 @@ mod tests {
         assert!(args
             .contains(&"mcp_servers.agentdrafter.default_tools_approval_mode=approve".to_owned()));
         assert_eq!(&args[args.len() - 3..], ["resume", "th-1", "-"]);
+    }
+
+    #[test]
+    fn managed_warnings_detect_system_mcp_servers_hooks_and_requirements() {
+        let dir =
+            std::env::temp_dir().join(format!("agentdrafter-codex-managed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Comments and benign model/agentdrafter-only settings produce no warnings.
+        std::fs::write(
+            dir.join("config.toml"),
+            "\
+# [mcp_servers.commented_out]
+model = \"gpt-5\"
+[mcp_servers.agentdrafter]
+command = \"agentdrafter\"
+",
+        )
+        .unwrap();
+        assert!(managed_warnings_in(&dir).is_empty());
+
+        // System MCP server + system hooks + requirements policy all warn.
+        std::fs::write(
+            dir.join("managed_config.toml"),
+            "\
+[mcp_servers.\"corp-shell\"]
+command = \"shell-mcp\"
+
+[hooks]
+pre_turn = [\"audit.sh\"]
+",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("requirements.toml"),
+            "allow_managed_hooks_only = true\n",
+        )
+        .unwrap();
+        let warnings = managed_warnings_in(&dir);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings[0].contains("managed_config.toml") && warnings[0].contains("MCP servers"));
+        assert!(warnings[1].contains("managed_config.toml") && warnings[1].contains("hooks"));
+        assert!(warnings[2].contains("requirements.toml"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

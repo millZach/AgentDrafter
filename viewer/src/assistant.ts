@@ -17,6 +17,8 @@ export interface AgentInfo {
   name: string;
   command: string;
   found: boolean;
+  /** Warnings about administrator-managed or system-level configuration that the agent still loads (#230). */
+  warnings?: string[];
 }
 
 /** How to install an agent, as the panel says it when none is found. */
