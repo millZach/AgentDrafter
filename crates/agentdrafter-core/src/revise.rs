@@ -4909,27 +4909,28 @@ fn apply_revision_op(
                                 )
                             })?;
                             let path_obj = &record.record.sheet.objects[path_idx];
-                            if !matches!(
-                                path_obj,
-                                Object::Line(_)
-                                    | Object::Polyline(_)
-                                    | Object::Arc(_)
-                                    | Object::Circle(_)
-                                    | Object::Ellipse(_)
-                                    | Object::Spline(_)
-                            ) {
-                                return Err(op_error(
-                                    index,
-                                    op_name,
-                                    ErrorCode::BadValue,
-                                    format!(
-                                        "path `{}` is not a curve (only line, polyline, arc, \
-                                         circle, ellipse, and spline can be array paths)",
-                                        path_found.id
-                                    ),
-                                    "path",
-                                ));
-                            }
+                            let closed = match path_obj {
+                                Object::Line(_) | Object::Arc(_) => Some(false),
+                                Object::Circle(_) => Some(true),
+                                Object::Ellipse(e) => {
+                                    Some((e.end_angle - e.start_angle).abs() >= 360.0 - 1e-9)
+                                }
+                                Object::Polyline(p) => p.closed.then_some(true),
+                                Object::Spline(_) => None,
+                                _ => {
+                                    return Err(op_error(
+                                        index,
+                                        op_name,
+                                        ErrorCode::BadValue,
+                                        format!(
+                                            "path `{}` is not a curve (only line, polyline, arc, \
+                                             circle, ellipse, and spline can be array paths)",
+                                            path_found.id
+                                        ),
+                                        "path",
+                                    ));
+                                }
+                            };
                             let fonts = SheetFonts::find(&record.record.sheet, settings);
                             let reader = Reader {
                                 sheet: &record.record.sheet,
@@ -4940,9 +4941,9 @@ fn apply_revision_op(
                                 .into_iter()
                                 .map(|p| p.curve)
                                 .collect();
-                            array::along(&curves, *count, *spacing, *align).map_err(|why| {
-                                op_error(index, op_name, ErrorCode::BadValue, why, "path")
-                            })?
+                            array::along(&curves, closed, *count, *spacing, *align).map_err(
+                                |why| op_error(index, op_name, ErrorCode::BadValue, why, "path"),
+                            )?
                         }
                         Pattern::Rotate { .. } | Pattern::Scale { .. } | Pattern::Mirror { .. } => {
                             unreachable!()

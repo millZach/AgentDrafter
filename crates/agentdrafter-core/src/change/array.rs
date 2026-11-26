@@ -172,40 +172,106 @@ impl<'a> Path<'a> {
     }
 
     /// Whether it ends where it starts, as a circle or a closed polyline
-    /// does.
-    fn closed(&self) -> bool {
+    /// does. When `explicit` gives the path object's own closure, that wins;
+    /// otherwise endpoints are compared against a tolerance from the path's
+    /// own length rather than global coordinates (#241).
+    fn closed(&self, explicit: Option<bool>) -> bool {
+        if let Some(closed) = explicit {
+            return closed;
+        }
         let (Some(first), Some(last)) = (self.curves.first(), self.curves.last()) else {
             return false;
         };
+        if self.curves.len() == 1 && matches!(first, Curve::Segment { .. }) {
+            return false;
+        }
         let (a, b) = (first.start(), last.end());
-        let scale = a.iter().chain(&b).fold(1.0_f64, |m, c| m.max(c.abs()));
-        length_of(sub(a, b)) <= scale * 1e-9
+        length_of(sub(a, b)) <= self.length * 1e-9
     }
 
     /// The point `distance` along it, and its direction there, in radians
     /// anticlockwise from the X axis. A point where two curves meet takes
     /// the direction of the curve after it, and the path's end the last
-    /// curve's. A distance within a billionth of the path's length of the
-    /// end of a curve is at that end, so that the rounding of adding
-    /// lengths up does not put a point that falls where two curves meet
-    /// just inside the first, and turn it the first one's way.
+    /// curve's. The corner tolerance is capped to a small share of each
+    /// segment's own length so a short lead-in segment on a very long path
+    /// is never skipped (#241).
     fn at(&self, distance: f64) -> (P3, f64) {
         let n = self.curves.len();
-        let near = self.length * 1e-9;
-        let j = (0..n)
-            .find(|&j| {
-                let (start, length) = self.starts[j];
-                distance < start + length - near && length > 0.0
-            })
-            .or_else(|| (0..n).rev().find(|&j| self.starts[j].1 > 0.0))
-            .unwrap_or(0);
+        let j = if distance <= 0.0 {
+            (0..n).find(|&j| self.starts[j].1 > 0.0).unwrap_or(0)
+        } else {
+            (0..n)
+                .find(|&j| {
+                    let (start, length) = self.starts[j];
+                    if length <= 0.0 {
+                        return false;
+                    }
+                    let near = (self.length * 1e-9).min(length * 1e-6);
+                    distance < start + length - near
+                })
+                .or_else(|| (0..n).rev().find(|&j| self.starts[j].1 > 0.0))
+                .unwrap_or(0)
+        };
         let curve = &self.curves[j];
         let (start, length) = self.starts[j];
         let into = (distance - start).clamp(0.0, length);
         let t = parameter_at(curve, into, length);
-        let tangent = curve.tangent(t);
-        (curve.point(t), tangent[1].atan2(tangent[0]))
+        (curve.point(t), curve_direction(curve, t))
     }
+}
+
+/// Direction of `curve` at parameter `t`, in radians anticlockwise from +X.
+/// When the derivative vanishes (such as a spline with coincident start or
+/// end control points), takes the tangent of the first moving span (#241).
+fn curve_direction(curve: &Curve, t: f64) -> f64 {
+    let tangent = curve.tangent(t);
+    if tangent[0].hypot(tangent[1]) > 1e-12 {
+        return libm::atan2(tangent[1], tangent[0]);
+    }
+    let (a, b) = curve.domain();
+    let breaks = curve.breaks();
+    const STEPS: [f64; 9] = [0.0, 1e-9, 1e-7, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 0.5];
+    if t < b {
+        for pair in breaks.windows(2) {
+            let (s0, s1) = (pair[0], pair[1]);
+            if s1 <= t {
+                continue;
+            }
+            let u0 = s0.max(t);
+            if curve.length_between(u0, s1) <= 0.0 {
+                continue;
+            }
+            let span = s1 - u0;
+            for eps in STEPS {
+                let v = curve.tangent(u0 + span * eps);
+                let norm = v[0].hypot(v[1]);
+                if norm > 1e-12 && norm.is_finite() {
+                    return libm::atan2(v[1], v[0]);
+                }
+            }
+        }
+    }
+    if t > a {
+        for pair in breaks.windows(2).rev() {
+            let (s0, s1) = (pair[0], pair[1]);
+            if s0 >= t {
+                continue;
+            }
+            let u1 = s1.min(t);
+            if curve.length_between(s0, u1) <= 0.0 {
+                continue;
+            }
+            let span = u1 - s0;
+            for eps in STEPS {
+                let v = curve.tangent(u1 - span * eps);
+                let norm = v[0].hypot(v[1]);
+                if norm > 1e-12 && norm.is_finite() {
+                    return libm::atan2(v[1], v[0]);
+                }
+            }
+        }
+    }
+    libm::atan2(tangent[1], tangent[0])
 }
 
 /// The parameter `distance` along `curve`, whose length is `length`.
@@ -241,6 +307,7 @@ fn parameter_at(curve: &Curve, distance: f64, length: f64) -> f64 {
 /// end.
 pub(crate) fn along(
     curves: &[Curve],
+    closed: Option<bool>,
     count: usize,
     spacing: Option<f64>,
     align: bool,
@@ -263,7 +330,7 @@ pub(crate) fn along(
             }
             spacing
         }
-        None if path.closed() => path.length / count as f64,
+        None if path.closed(closed) => path.length / count as f64,
         None => path.length / (count - 1) as f64,
     };
     let (start, direction) = path.at(0.0);
@@ -342,7 +409,7 @@ mod tests {
                 b: [10.0, 10.0, 0.0],
             },
         ];
-        let even = along(&curves, 5, None, true).unwrap();
+        let even = along(&curves, None, 5, None, true).unwrap();
         let by: Vec<P3> = even.iter().map(|p| p.by).collect();
         assert_eq!(
             by,
@@ -357,7 +424,7 @@ mod tests {
         // The corner takes the next segment's direction.
         assert_eq!(turns, [0.0, 90.0, 90.0, 90.0]);
         assert_eq!(even[1].about, [10.0, 0.0, 0.0]);
-        let spaced = along(&curves, 3, Some(4.0), false).unwrap();
+        let spaced = along(&curves, None, 3, Some(4.0), false).unwrap();
         assert_eq!(spaced[1].by, [8.0, 0.0, 0.0]);
         assert_eq!(spaced[1].turn, 0.0);
         assert_eq!(
@@ -367,7 +434,7 @@ mod tests {
                 distance: 8.0
             }
         );
-        let too_far = along(&curves, 3, Some(11.0), true).unwrap_err();
+        let too_far = along(&curves, None, 3, Some(11.0), true).unwrap_err();
         assert!(
             too_far.contains("22 along the path, which is 20 long"),
             "{too_far}"
@@ -386,7 +453,7 @@ mod tests {
             segment([0.1, 0.0], [0.1, 0.2]),
             segment([0.1, 0.2], [0.3, 0.2]),
         ];
-        let places = along(&curves, 2, Some(0.3), true).unwrap();
+        let places = along(&curves, None, 2, Some(0.3), true).unwrap();
         assert_eq!(places[0].turn, 0.0);
         let near = |a: P3, b: P3| a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-12);
         assert!(
@@ -405,7 +472,7 @@ mod tests {
             start: 0.0,
             sweep: TAU,
         }];
-        let places = along(&circle, 4, None, true).unwrap();
+        let places = along(&circle, Some(true), 4, None, true).unwrap();
         assert_eq!(places[0].by, [-2.0, 2.0, 0.0]);
         assert_eq!(places[1].by, [-4.0, 0.0, 0.0]);
         assert_eq!(places[0].turn, 90.0);
@@ -417,7 +484,61 @@ mod tests {
             start: 0.0,
             sweep: PI / 2.0,
         }];
-        let places = along(&arc, 2, None, false).unwrap();
+        let places = along(&arc, Some(false), 2, None, false).unwrap();
         assert_eq!(places[0].by, [-1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn open_path_far_from_origin_is_not_treated_as_closed() {
+        let line = [Curve::Segment {
+            a: [600_000_000.0, 0.0, 0.0],
+            b: [600_000_000.5, 0.0, 0.0],
+        }];
+        for explicit in [Some(false), None] {
+            let places = along(&line, explicit, 2, None, false).unwrap();
+            assert_eq!(places[0].by, [0.5, 0.0, 0.0], "explicit={explicit:?}");
+        }
+    }
+
+    #[test]
+    fn degenerate_spline_start_uses_first_moving_spans_tangent() {
+        use crate::geometry::curve::BSpline;
+        // Vertical cubic B-spline with coincident first control points:
+        // derivative at u=0 is [0, 0, 0], while the curve runs straight up (+Y).
+        let spline = [Curve::Spline(BSpline::new(
+            3,
+            vec![
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 10.0, 0.0],
+                [0.0, 20.0, 0.0],
+            ],
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        ))];
+        let places = along(&spline, None, 3, None, true).unwrap();
+        // Aligned copies along a straight vertical spline must not turn 90°.
+        assert_eq!(places[0].turn, 0.0);
+        assert_eq!(places[1].turn, 0.0);
+    }
+
+    #[test]
+    fn short_first_segment_on_long_path_keeps_anchor_and_start_tangent() {
+        // 0.005-unit lead-in along +Y followed by a 10,000,000-unit segment along +X.
+        let curves = [
+            Curve::Segment {
+                a: [0.0, 0.0, 0.0],
+                b: [0.0, 0.005, 0.0],
+            },
+            Curve::Segment {
+                a: [0.0, 0.005, 0.0],
+                b: [10_000_000.0, 0.005, 0.0],
+            },
+        ];
+        let places = along(&curves, Some(false), 2, Some(100.0), true).unwrap();
+        // Start anchor is [0, 0, 0] (tangent +90°); at distance 100 along the path,
+        // the point is [99.995, 0.005, 0] (tangent 0° -> turn = -90° = 270°).
+        assert!((places[0].by[0] - 99.995).abs() < 1e-6, "{:?}", places[0]);
+        assert!((places[0].by[1] - 0.005).abs() < 1e-6, "{:?}", places[0]);
+        assert_eq!(places[0].turn, 270.0);
     }
 }
