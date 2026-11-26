@@ -307,9 +307,11 @@ fn clean(v: f64) -> f64 {
     }
 }
 
-/// Whether an angle to fill is a whole turn, either way round.
+/// Whether an angle to fill is an exact whole turn (±360°), matching the core's
+/// `angle.abs() >= 360.0` cutoff rather than pulling near-full partial arrays
+/// such as `359.999999°` into a whole turn (#259).
 pub fn whole_turn(fill: f64) -> bool {
-    (fill.abs() - 360.0).abs() < 1e-6
+    fill.abs() == 360.0
 }
 
 /// A length in words, to a thousandth.
@@ -588,7 +590,7 @@ impl Setup {
             }
             "angle_between" => {
                 self.angle_between = v;
-                self.whole_kept = whole_turn(v * self.items);
+                self.whole_kept = whole_turn(clean(v * self.items));
             }
             "angle_fill" => {
                 self.angle_fill = v;
@@ -717,7 +719,7 @@ impl Setup {
                     if self.angle_between == 0.0 {
                         return Some("The angle between items is other than 0.".to_owned());
                     }
-                    if !self.whole() && self.angle_fill.abs() > 360.0 + 1e-9 {
+                    if !self.whole() && self.angle_fill.abs() > 360.0 {
                         return Some(format!(
                             "{} items {}° apart fill {}°: more than a whole turn.",
                             self.items,

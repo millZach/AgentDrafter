@@ -2010,7 +2010,12 @@ function DrawingWorkspace({
   // goes, with nothing sent, the moment the tab is asked for, not when the
   // sheet comes; until then nothing of it can land (#66, review).
   const arrayStale = () =>
-    !!toolState?.array && switchingAway(wanted, wantedLayout, summary ? { sheet: summary.sheet, layout: summary.layout ?? null } : null);
+    !!toolState?.array &&
+    switchingAway(
+      wanted,
+      wantedLayout,
+      summary ? { sheet: summary.sheet, layout: summary.layout ?? null, layouts: summary.layouts } : null,
+    );
   useEffect(() => {
     if (arrayStale()) leaveTool();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2020,7 +2025,7 @@ function DrawingWorkspace({
   // nothing sent (#246). Returns true when a template edit opens the
   // Change all band, so the page stays on the sheet shown.
   const leaveToolFor = (sheet: string, layout: string | null): boolean => {
-    const shown = summary ? { sheet: summary.sheet, layout: summary.layout ?? null } : null;
+    const shown = summary ? { sheet: summary.sheet, layout: summary.layout ?? null, layouts: summary.layouts } : null;
     if (!switchingAway(sheet, layout, shown)) return false;
     return leaveTool();
   };
@@ -2030,7 +2035,11 @@ function DrawingWorkspace({
       return;
     }
     toolDid(renderer()?.tool_option(a) ?? '');
-    if (a === 'rectangular' || a === 'polar') requestAnimationFrame(() => drawing.current?.frameArray(true));
+    if (a === 'rectangular' || a === 'polar' || a === 'path') {
+      requestAnimationFrame(() => drawing.current?.frameArray(true));
+    } else if (toolRead.current?.array) {
+      requestAnimationFrame(() => drawing.current?.frameArray(false));
+    }
   };
   const arrayValue = (key: string, text: string) => {
     if (arrayStale()) return;
@@ -2099,7 +2108,13 @@ function DrawingWorkspace({
       leaveTool();
       return;
     }
+    const wasArray = !!toolState?.array;
     toolDid(v.tool_input(text));
+    // Typed spacing/counts in the command bar (e.g. `@0,-10`) reframe the view
+    // when ghosts move off screen, matching edits made in the panel (#259).
+    if (wasArray && toolRead.current?.array) {
+      requestAnimationFrame(() => drawing.current?.frameArray(false));
+    }
   };
   // Enter or Space away from the field: what it holds is entered.
   const enterTyped = () => {

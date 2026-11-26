@@ -201,3 +201,22 @@ fn ghost_runs_divides_segment_budget_evenly_across_copies() {
     assert_eq!(out.len(), 3);
     assert!(out.iter().all(|r| r.len() == 2));
 }
+
+#[test]
+fn ghost_runs_draws_single_point_dot_runs_for_every_copy() {
+    // A dot-only hatch pattern produces 1-point runs; each copy emits visible
+    // zero-length dot segments (drawn as square dots by `overlay::triangles`)
+    // within the per-copy budget (#259).
+    let d1 = [[1.0, 2.0]];
+    let d2 = [[3.0, 4.0]];
+    let runs: Vec<&[[f64; 2]]> = vec![&d1[..], &d2[..]];
+    let offsets = [[10.0, 0.0], [20.0, 0.0]];
+    let out = ghost_runs(&offsets, &runs, MOST_GHOST_SEGMENTS, |&[dx, dy], p| {
+        (p[0] + dx, p[1] + dy)
+    });
+    assert_eq!(out.len(), 4);
+    assert_eq!(out[0], vec![[11.0, 2.0, 11.0, 2.0]]);
+    assert_eq!(out[1], vec![[13.0, 4.0, 13.0, 4.0]]);
+    assert_eq!(out[2], vec![[21.0, 2.0, 21.0, 2.0]]);
+    assert_eq!(out[3], vec![[23.0, 4.0, 23.0, 4.0]]);
+}

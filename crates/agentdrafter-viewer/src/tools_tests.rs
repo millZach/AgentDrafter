@@ -2134,3 +2134,120 @@ fn typed_array_values_with_more_than_six_decimals_are_not_rounded_when_shown() {
     p.array_value("angle_between", "12.3456789");
     assert_eq!(field(&p, "angle_between"), "12.3456789");
 }
+
+#[test]
+fn polar_array_center_snap_stays_in_sync_when_snapped_object_moves_on_reload() {
+    use agentdrafter_core::{DisplaySnap, Point3};
+
+    let snap_of = |x: f64, y: f64| DisplaySnap {
+        snap: SnapKind::Center,
+        object: 1,
+        which: None,
+        with: None,
+        at: Point3::new(x, y, 0.0),
+    };
+    let mut ctx = context();
+    ctx.snaps = vec![snap_of(4.0, 5.0)];
+    let mut t = Tools::default();
+    t.load(ctx.clone());
+    t.start_word("ARRAYPOLAR", &[2]);
+    t.point(snapped(4.0, 5.0, SnapKind::Center, 1, None));
+    assert_eq!(t.band(None).arrayed.unwrap().1[0].about, [4.0, 5.0]);
+
+    // Another interface moves the snapped circle to (8, 9): ghost centre follows (#259).
+    let mut moved = ctx.clone();
+    moved.snaps = vec![snap_of(8.0, 9.0)];
+    t.load(moved);
+    assert_eq!(t.band(None).arrayed.unwrap().1[0].about, [8.0, 9.0]);
+    assert_eq!(t.state(false).points, vec![[8.0, 9.0]]);
+    let op = &operations(&t.clone().input("", None))[0];
+    assert_eq!(
+        op["center"],
+        json!({"snap": {"id": "DP-LD-101/title", "snap": "center"}})
+    );
+
+    // If the snapped feature vanishes on reload, drop the snap ref and keep the ghost's coordinates.
+    let mut gone = ctx;
+    gone.snaps = vec![DisplaySnap {
+        snap: SnapKind::Endpoint,
+        object: 0,
+        which: None,
+        with: None,
+        at: Point3::new(99.0, 99.0, 0.0),
+    }];
+    t.load(gone);
+    assert_eq!(t.band(None).arrayed.unwrap().1[0].about, [8.0, 9.0]);
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["center"], json!([8.0, 9.0, 0]));
+}
+
+#[test]
+fn near_full_polar_fill_is_not_refused_or_pulled_into_a_whole_turn() {
+    // 4 items 119.9999999° apart fill 359.9999997°: partial array, accepted (#259 item 7).
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    t.input("4,119.9999999", None);
+    assert!(t.state(false).array.as_ref().unwrap().ready);
+    let places = t.band(None).arrayed.unwrap().1;
+    assert_eq!(places.len(), 3);
+    assert!((places[2].turn - 359.9999997).abs() < 1e-6);
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["count"], json!(4));
+    assert_eq!(op["angle"], json!(359.9999997));
+
+    // 44 items 8.372093° apart fill 359.999999°: switching to Total must NOT pull it
+    // into a 360° whole turn (which would jump the last copy to ~351.82°) (#259 item 8).
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    t.input("44,8.372093", None);
+    let before_last = t.band(None).arrayed.unwrap().1.last().unwrap().turn;
+    assert!((before_last - 359.999999).abs() < 1e-6, "{before_last}");
+    t.option("total");
+    let after_last = t.band(None).arrayed.unwrap().1.last().unwrap().turn;
+    assert!(
+        (after_last - 359.999999).abs() < 1e-5,
+        "switching to Total kept partial fill: {after_last}"
+    );
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["angle"], json!(359.999999));
+}
+
+#[test]
+fn load_geometry_includes_patterned_hatch_boundaries() {
+    use agentdrafter_core::{Bounds, Color, DisplayList, Item, Shape};
+
+    let mut objects = vec![ObjectInfo {
+        id: Some("S/hatch".to_owned()),
+        kind: "hatch".to_owned(),
+        ..ObjectInfo::default()
+    }];
+    let list = DisplayList {
+        items: vec![Item {
+            object: 0,
+            part: None,
+            nested: Vec::new(),
+            cell: None,
+            viewport: None,
+            clip: None,
+            clip_boundary: None,
+            color: Color(7),
+            true_color: None,
+            plot_style: None,
+            transparency: 0,
+            shape: Shape::Stroke {
+                lineweight: 0.25,
+                runs: vec![vec![[1.0, 1.0], [2.0, 2.0]]],
+            },
+        }],
+        boundaries: vec![(
+            0,
+            Bounds {
+                min: [0.0, 0.0],
+                max: [10.0, 6.0],
+            },
+        )],
+        ..DisplayList::default()
+    };
+    load_geometry(&mut objects, &list);
+    assert_eq!(objects[0].bounds, Some([0.0, 0.0, 10.0, 6.0]));
+}

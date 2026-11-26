@@ -212,10 +212,17 @@ where
             }
             let room = per_copy - used;
             let mut pieces = Vec::new();
-            for pair in run.windows(2).take(room) {
-                let (x0, y0) = map(copy, pair[0]);
-                let (x1, y1) = map(copy, pair[1]);
-                pieces.push([x0, y0, x1, y1]);
+            if let [dot] = *run {
+                // A 1-point run (such as a dot-only hatch pattern or point
+                // entity) draws as a square dot in `overlay::triangles` (#259).
+                let (x, y) = map(copy, dot);
+                pieces.push([x, y, x, y]);
+            } else {
+                for pair in run.windows(2).take(room) {
+                    let (x0, y0) = map(copy, pair[0]);
+                    let (x1, y1) = map(copy, pair[1]);
+                    pieces.push([x0, y0, x1, y1]);
+                }
             }
             used += pieces.len();
             if !pieces.is_empty() {

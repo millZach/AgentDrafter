@@ -24,7 +24,7 @@
 //! names the sheets the template reaches, for the page to ask first.
 
 use crate::array::{self, ArrayKind, Field, Place, Setup, Spacing};
-use agentdrafter_core::{DisplaySnap, SnapKind};
+use agentdrafter_core::{DisplayList, DisplaySnap, Shape, SnapKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -248,6 +248,83 @@ impl ObjectInfo {
             }
         }
         self.block.clone().unwrap_or_else(|| self.kind.clone())
+    }
+}
+
+/// Populates `through_viewport`, `bounds` and `path` on each object from `list`.
+///
+/// Includes `list.boundaries` (the boundary boxes of patterned hatches, whose
+/// drawn lines may stop short of the boundary or draw none) so an unturned
+/// polar array's preview uses the same base box as the core's `extents_center`
+/// and `query extents` (#259).
+pub fn load_geometry(objects: &mut [ObjectInfo], list: &DisplayList) {
+    let mut path_runs: Vec<Vec<&[[f64; 2]]>> = vec![Vec::new(); objects.len()];
+    for item in &list.items {
+        let Some(o) = objects.get_mut(item.object) else {
+            continue;
+        };
+        if item.clip.is_some() {
+            o.through_viewport = true;
+        }
+        let own_image_runs: Vec<Vec<[f64; 2]>>;
+        let runs = match &item.shape {
+            Shape::Stroke { runs, .. } => {
+                if array::PathCurve::is_path_kind(&o.kind) {
+                    for run in runs {
+                        path_runs[item.object].push(run.as_slice());
+                    }
+                }
+                runs
+            }
+            Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
+            Shape::Image {
+                origin,
+                u_axis,
+                v_axis,
+                clip,
+                clip_inverted,
+                ..
+            } => {
+                own_image_runs = vec![Shape::image_outline(
+                    *origin,
+                    *u_axis,
+                    *v_axis,
+                    clip.as_deref(),
+                    *clip_inverted,
+                )];
+                &own_image_runs
+            }
+        };
+        for p in runs.iter().flatten() {
+            let b = o.bounds.get_or_insert([p[0], p[1], p[0], p[1]]);
+            *b = [
+                b[0].min(p[0]),
+                b[1].min(p[1]),
+                b[2].max(p[0]),
+                b[3].max(p[1]),
+            ];
+        }
+    }
+    for &(object, bounds) in &list.boundaries {
+        if let Some(o) = objects.get_mut(object) {
+            let b = o.bounds.get_or_insert([
+                bounds.min[0],
+                bounds.min[1],
+                bounds.max[0],
+                bounds.max[1],
+            ]);
+            *b = [
+                b[0].min(bounds.min[0]),
+                b[1].min(bounds.min[1]),
+                b[2].max(bounds.max[0]),
+                b[3].max(bounds.max[1]),
+            ];
+        }
+    }
+    for (o, runs) in objects.iter_mut().zip(&path_runs) {
+        if !runs.is_empty() {
+            o.path = array::PathCurve::from_runs(&o.kind, runs);
+        }
     }
 }
 
