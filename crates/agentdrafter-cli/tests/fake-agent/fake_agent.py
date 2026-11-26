@@ -60,7 +60,13 @@ def main():
         return
     if os.environ.get("FAKE_AGENT_HANG") == "1":
         print(json.dumps({"type": "system", "subtype": "init", "session_id": "hung"}), flush=True)
-        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        pid_file = os.environ.get("FAKE_AGENT_PID_FILE")
+        if pid_file:
+            tmp = f"{pid_file}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(f"{os.getpid()}\n{helper.pid}\n")
+            os.replace(tmp, pid_file)
         time.sleep(600)
         return
     server = Server(server_command(kind, args))

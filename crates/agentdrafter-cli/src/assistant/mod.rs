@@ -31,6 +31,7 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -306,6 +307,62 @@ struct Talk {
 }
 
 static ASSISTANT: OnceLock<Assistant> = OnceLock::new();
+
+/// Process IDs of currently running assistant agent turns and preflight probes
+/// so server shutdown (Ctrl+C / SIGTERM / desktop exit) can kill every process
+/// group they started (#228).
+static ACTIVE_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Set when `agentdrafter serve` is shutting down so a child that finishes
+/// spawning concurrently with shutdown is stopped immediately (#228).
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Tracks a spawned child process (running in its own process group on Unix)
+/// until it has been killed and reaped (#228).
+pub(super) struct ActiveChild {
+    pid: u32,
+}
+
+impl ActiveChild {
+    pub(super) fn track(pid: u32) -> Self {
+        let mut active = ACTIVE_PIDS.lock().unwrap_or_else(|e| e.into_inner());
+        if !active.contains(&pid) {
+            active.push(pid);
+        }
+        let stopping = SHUTTING_DOWN.load(Ordering::SeqCst);
+        drop(active);
+        if stopping {
+            kill_tree(pid);
+        }
+        Self { pid }
+    }
+}
+
+impl Drop for ActiveChild {
+    fn drop(&mut self) {
+        let mut active = ACTIVE_PIDS.lock().unwrap_or_else(|e| e.into_inner());
+        active.retain(|&p| p != self.pid);
+    }
+}
+
+/// Kills every currently running assistant agent (and any in-flight preflight
+/// probe) along with every process each started (#228).
+pub(crate) fn stop_all() {
+    let pids = ACTIVE_PIDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    for pid in pids {
+        kill_tree(pid);
+    }
+}
+
+/// Marks the process as shutting down and kills every running agent process
+/// group so nothing outlives `agentdrafter serve` (#228).
+pub(crate) fn shutdown() {
+    SHUTTING_DOWN.store(true, Ordering::SeqCst);
+    stop_all();
+}
 
 /// The assistant, which looks for the agents on the PATH the first time.
 pub(crate) fn assistant() -> &'static Assistant {
@@ -842,6 +899,7 @@ impl Assistant {
         // reads its prompt, never prints, or never ends is stopped, with
         // everything it started, at the deadline.
         let pid = child.id();
+        let active = ActiveChild::track(pid);
         let stdin = child.stdin.take();
         let prompt = turn.prompt.clone();
         // Each pipe is fed and read on a thread of its own, and none is
@@ -939,6 +997,7 @@ impl Assistant {
             self.read_line(turn, &line, &mut parts, &mut failed);
         }
         let status = status.unwrap_or_else(|| child.wait());
+        drop(active);
         let said = said.lock().unwrap_or_else(|e| e.into_inner()).clone();
         drop(files);
         if stopped {
@@ -1165,20 +1224,37 @@ fn own_group(command: &mut Command) {
 /// on Unix, its tree on Windows. Its pipes close with them, so what reads
 /// its output ends.
 fn kill_tree(pid: u32) {
-    let mut kill = if cfg!(windows) {
+    #[cfg(windows)]
+    {
         let mut kill = Command::new("taskkill");
         kill.args(["/T", "/F", "/PID", &pid.to_string()]);
-        kill
-    } else {
-        let mut kill = Command::new("kill");
-        kill.args(["-KILL", "--", &format!("-{pid}")]);
-        kill
-    };
-    let _ = kill
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        let _ = kill
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        // Every assistant child starts in its own process group (`own_group`),
+        // so `kill(-pid, SIGKILL)` stops it and every descendant without
+        // spawning an external binary or relying on PATH (#228).
+        if let Ok(pgid) = i32::try_from(pid) {
+            if pgid > 0 {
+                const SIGKILL: std::ffi::c_int = 9;
+                extern "C" {
+                    fn kill(pid: std::ffi::c_int, sig: std::ffi::c_int) -> std::ffi::c_int;
+                }
+                // SAFETY: `pgid > 0`, so `-pgid < -1` targets only the
+                // child's own process group (never 0 or -1).
+                unsafe {
+                    let _ = kill(-pgid, SIGKILL);
+                }
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = pid;
 }
 
 impl Talk {
@@ -1331,6 +1407,9 @@ fn utc_now() -> String {
 }
 
 #[cfg(test)]
+pub(crate) static CHILD_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1473,6 +1552,7 @@ mod tests {
 
     #[test]
     fn an_agent_that_ends_leaving_a_process_holding_its_pipes_ends_its_turn() {
+        let _guard = CHILD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (folder, shim) = fake_claude("stray", "FAKE_AGENT_STRAY=1");
         let (answer, busy, took) = run_on(&folder, shim, Duration::from_secs(120));
         assert!(
@@ -1491,6 +1571,7 @@ mod tests {
 
     #[test]
     fn a_hung_agent_is_stopped_with_what_it_started_at_the_deadline() {
+        let _guard = CHILD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // A shim that runs the fake agent hung, as Claude Code.
         let folder = std::env::temp_dir().join(format!("agentdrafter-hung-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
@@ -1921,5 +2002,83 @@ FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
             last.contains("Codex can't be used") && last.contains(reason),
             "{last}"
         );
+    }
+
+    #[test]
+    fn stop_all_kills_a_running_turn_and_clears_active_children() {
+        let _guard = CHILD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (folder, shim) = fake_claude("stop-all", "FAKE_AGENT_HANG=1");
+        let set = folder.join("set");
+        let assistant = assistant();
+        assistant.lock().insert(
+            set.clone(),
+            Talk {
+                named: set.clone(),
+                agent: Some(Agent::Claude),
+                session: None,
+                busy: true,
+                items: vec![
+                    json!({"kind": "drafter", "text": "hello"}),
+                    json!({"kind": "assistant", "parts": [], "done": false, "error": null}),
+                ],
+                version: 0,
+            },
+        );
+        let set_bg = set.clone();
+        let began = Instant::now();
+        let handle = std::thread::spawn(move || {
+            assistant.run(Turn {
+                set: set_bg,
+                agent: Agent::Claude,
+                program: shim,
+                session: None,
+                prompt: "hello\n".into(),
+                looking_at: json!({"ok": true}),
+                item: 1,
+                limit: Duration::from_secs(120),
+            });
+        });
+
+        let wait_start = Instant::now();
+        while ACTIVE_PIDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+        {
+            if handle.is_finished() {
+                let talks = assistant.lock();
+                panic!(
+                    "turn finished before registering an active child PID: {:?}",
+                    talks[&set].items
+                );
+            }
+            assert!(
+                wait_start.elapsed() < Duration::from_secs(15),
+                "turn never registered an active child PID"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        stop_all();
+        handle.join().unwrap();
+
+        let took = began.elapsed();
+        assert!(
+            took < Duration::from_secs(30),
+            "stop_all should stop the turn well before its 120s deadline: {took:?}"
+        );
+        assert!(
+            ACTIVE_PIDS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "active child PID list is empty after turn ends"
+        );
+        let talks = assistant.lock();
+        let talk = &talks[&set];
+        assert!(!talk.busy);
+        assert_eq!(talk.items[1]["done"], true);
+        drop(talks);
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

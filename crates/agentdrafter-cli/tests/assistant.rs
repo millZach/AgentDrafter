@@ -775,3 +775,87 @@ fn an_unusable_codex_is_left_out_of_the_picker_and_reports_why() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn stopping_serve_with_sigint_during_a_turn_kills_the_agent_and_its_helpers() {
+    let dir = scratch("sigint-mid-turn");
+    demo_set(&dir);
+    let shims = shims(&dir, &["claude"]);
+    let pid_file = dir.join("agent-pids.txt");
+    let mut serve = Serve::start(
+        &dir,
+        &path_with(&shims),
+        &[
+            ("FAKE_AGENT_HANG", "1".to_owned()),
+            ("FAKE_AGENT_PID_FILE", pid_file.display().to_string()),
+        ],
+    );
+    let _conversation = serve.conversation("demo-set");
+    let (status, reply) = serve.post(
+        "/assistant/messages",
+        json!({"set": "demo-set", "text": "hello", "looking_at": null}),
+    );
+    assert_eq!(status, 200, "{reply}");
+
+    // Wait until the hung agent and its helper child have both started.
+    let start = Instant::now();
+    let pids: Vec<i32> = loop {
+        if let Ok(text) = fs::read_to_string(&pid_file) {
+            let parsed: Vec<i32> = text
+                .lines()
+                .filter_map(|l| l.trim().parse::<i32>().ok())
+                .collect();
+            if parsed.len() == 2 {
+                break parsed;
+            }
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "hung agent never wrote its PID file"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    // Send SIGINT (Ctrl+C) to `agentdrafter serve`.
+    let serve_pid = serve.child.id();
+    let sent = Command::new("kill")
+        .args(["-INT", &serve_pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success(), "kill -INT {serve_pid}");
+
+    // `serve` exits promptly on SIGINT.
+    let wait_start = Instant::now();
+    loop {
+        if serve.child.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(
+            wait_start.elapsed() < Duration::from_secs(10),
+            "serve did not exit after SIGINT"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Neither the agent nor its helper child may still be alive (#228).
+    extern "C" {
+        fn kill(pid: std::ffi::c_int, sig: std::ffi::c_int) -> std::ffi::c_int;
+    }
+    let check_start = Instant::now();
+    for pid in pids {
+        loop {
+            let alive = unsafe { kill(pid, 0) } == 0;
+            if !alive {
+                break;
+            }
+            if check_start.elapsed() >= Duration::from_secs(5) {
+                unsafe {
+                    let _ = kill(pid, 9);
+                }
+                panic!("process {pid} survived SIGINT to agentdrafter serve");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
