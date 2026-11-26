@@ -13,6 +13,7 @@ import {
   PANELS,
   SNAPS,
   TOGGLES,
+  escapeEndsFromField,
   fieldKey,
   isUndoKey,
   letGoOnOptionPress,
@@ -259,6 +260,8 @@ export interface CommandBarProps {
   onTyping(text: string): void;
   /** Whether Space is a space: the text itself is being typed. */
   typingText: boolean;
+  /** Whether a drawing tool is running now (#248). */
+  toolRunning?: boolean;
   /** That the objects picked are part of the template, said while the tool runs. */
   warning: TemplateEdit | null;
   /** A change set shown before it lands: above the bar on a laptop, in its place on a phone. */
@@ -296,6 +299,7 @@ export function CommandBar({
   onEscape,
   onTyping,
   typingText,
+  toolRunning = false,
   warning,
   note,
   band = null,
@@ -411,12 +415,12 @@ export function CommandBar({
             } else if (e.key === 'Escape') {
               e.preventDefault();
               e.stopPropagation();
-              // Esc drops what is typed; with nothing typed, or a text's
-              // words, it ends the tool too.
+              // Esc drops what is typed; with nothing typed, a text's words,
+              // or a running tool, it ends the tool right away (#248).
               const typed = e.currentTarget.value;
               e.currentTarget.value = '';
               onTyped?.('');
-              if (!typed || typingText) onEscape();
+              if (escapeEndsFromField(typed, toolRunning, typingText)) onEscape();
             } else if (e.key !== 'F3' && e.key !== 'F7' && e.key !== 'F8') {
               // The page's own keys stay out of the field's typing.
               e.stopPropagation();

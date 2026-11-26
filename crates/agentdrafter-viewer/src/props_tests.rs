@@ -68,6 +68,7 @@ fn context() -> Context {
             object(None, "circle", false, json!({"radius": 1.0})),
             object(Some("border"), "polyline", true, Value::Null),
         ],
+        snaps: Vec::new(),
         template: Some(Reach {
             path: "templates/loop-2-wire.yaml".to_owned(),
             sheets: vec![

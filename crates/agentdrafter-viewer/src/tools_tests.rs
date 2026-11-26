@@ -36,6 +36,7 @@ fn context() -> Context {
                 ..ObjectInfo::default()
             },
         ],
+        snaps: Vec::new(),
         template: Some(Reach {
             path: "templates/loop-2-wire.yaml".to_owned(),
             sheets: vec![
@@ -1850,4 +1851,94 @@ fn switching_to_the_total_reads_a_whole_turn_from_the_angle_to_fill() {
     t.option("between");
     assert_eq!(turns(&t), [45.0, 90.0, 135.0, 180.0]);
     assert_eq!(operations(&t.input("", None))[0]["angle"], json!(180.0));
+}
+
+#[test]
+fn snapped_copy_and_move_ghosts_stay_in_sync_when_snapped_object_moves_on_reload() {
+    use agentdrafter_core::{DisplaySnap, Point3};
+
+    let snap_of = |object: usize, x: f64, y: f64| DisplaySnap {
+        snap: SnapKind::Endpoint,
+        object,
+        which: Some("objects[0].to".to_owned()),
+        with: None,
+        at: Point3::new(x, y, 0.0),
+    };
+    let mut ctx = context();
+    ctx.snaps = vec![snap_of(1, 10.0, 2.0)];
+    let mut t = Tools::default();
+    t.load(ctx.clone());
+    // Copy device (2) from (0, 0) to Endpoint of title (1) at (10, 2).
+    t.start(ToolKind::Copy, &[2]);
+    t.point(at(0.0, 0.0));
+    t.point(snapped(
+        10.0,
+        2.0,
+        SnapKind::Endpoint,
+        1,
+        Some("objects[0].to"),
+    ));
+    assert_eq!(t.band(None).placed.unwrap().1, [[10.0, 2.0]]);
+    // Another interface moves title so its endpoint is now at (15, 4).
+    let mut moved = ctx.clone();
+    moved.snaps = vec![snap_of(1, 15.0, 4.0)];
+    t.load(moved);
+    // The dashed ghost moves to (15, 4), matching where the snap lands (#248).
+    assert_eq!(t.band(None).placed.unwrap().1, [[15.0, 4.0]]);
+    let op = &operations(&t.clone().input("", None))[0];
+    assert_eq!(
+        op["to"],
+        json!({"snap": {"id": "DP-LD-101/title", "snap": "endpoint", "which": "objects[0].to"}})
+    );
+    // If a second copy is also placed, offsets use the updated (15, 4) coordinate too.
+    t.point(at(20.0, 0.0));
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["offsets"], json!([[15.0, 4.0, 0], [20.0, 0.0, 0]]));
+
+    // If the snapped feature disappears on reload, drop the snap ref and keep the ghost's coordinates.
+    let mut t = Tools::default();
+    t.load(ctx.clone());
+    t.start(ToolKind::Copy, &[2]);
+    t.point(at(0.0, 0.0));
+    t.point(snapped(
+        10.0,
+        2.0,
+        SnapKind::Endpoint,
+        1,
+        Some("objects[0].to"),
+    ));
+    let mut gone = ctx;
+    gone.snaps = vec![snap_of(0, 99.0, 99.0)];
+    t.load(gone);
+    assert_eq!(t.band(None).placed.unwrap().1, [[10.0, 2.0]]);
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["to"], json!([10.0, 2.0, 0]));
+}
+
+#[test]
+fn z_only_copy_and_move_displacements_are_accepted() {
+    // Copy from (0, 0, 0) to (0, 0, 5) must not be rejected as zero (#248).
+    let mut t = tools();
+    t.start(ToolKind::Copy, &[2]);
+    t.point(Taken::typed([0.0, 0.0], 0.0));
+    let out = t.point(Taken::typed([0.0, 0.0], 5.0));
+    assert!(t.state(false).error.is_none());
+    assert_eq!(t.state(false).placed, 1);
+    assert!(out.log[0].contains("5.0000"), "{:?}", out.log);
+    let op = &operations(&t.clone().input("", None))[0];
+    assert_eq!(op["from"], json!([0.0, 0.0, 0]));
+    assert_eq!(op["to"], json!([0.0, 0.0, 5.0]));
+    // Adding a second Z-only copy sends both offsets with dz.
+    t.point(Taken::typed([0.0, 0.0], -3.0));
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["offsets"], json!([[0.0, 0.0, 5.0], [0.0, 0.0, -3.0]]));
+
+    // Move from (0, 0, 0) to (0, 0, 5) is also accepted.
+    let mut t = tools();
+    t.start(ToolKind::Move, &[2]);
+    t.point(Taken::typed([0.0, 0.0], 0.0));
+    let out = t.point(Taken::typed([0.0, 0.0], 5.0));
+    let op = &operations(&out)[0];
+    assert_eq!(op["from"], json!([0.0, 0.0, 0]));
+    assert_eq!(op["to"], json!([0.0, 0.0, 5.0]));
 }

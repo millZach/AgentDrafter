@@ -279,9 +279,6 @@ const GUIDE: [f32; 4] = [
 /// The points a tool has taken, small squares in the frame's blue.
 const TAKEN: [f32; 4] = [0x4a as f32 / 255.0, 0xa3 as f32 / 255.0, 1.0, 1.0];
 
-/// The most segments of the objects a move would move drawn at once.
-const MOST_MOVED: usize = 50_000;
-
 const RECT_FRAGMENT: &str = r#"#version 300 es
 precision highp float;
 uniform vec4 u_color;
@@ -711,6 +708,7 @@ impl Viewer {
             sheet: sheet.sheet.clone(),
             units: sheet.units.clone(),
             objects,
+            snaps: snaps.clone(),
             template: sheet.template.clone(),
             editable_dwg,
             past: sheet.entry.is_some(),
@@ -1651,64 +1649,55 @@ impl Viewer {
             let (x1, y1) = device(b[0], b[1]);
             [x0, y0, x1, y1]
         };
-        // What the objects at `picked` draw, shifted by `by`: each run of
-        // each item, device pixels, for a ghost; up to MOST_MOVED pieces
-        // in all, so a big group does not stall a frame.
-        let shifted = |picked: &[usize], by: &[[f64; 2]]| -> Vec<Vec<Segment>> {
-            let mut out: Vec<Vec<Segment>> = Vec::new();
-            let mut count = 0;
-            for &[dx, dy] in by {
-                for item in sheet
-                    .list
-                    .items
-                    .iter()
-                    .filter(|i| picked.contains(&i.object))
-                {
-                    let own_runs: Vec<Vec<[f64; 2]>>;
-                    let runs = match &item.shape {
-                        Shape::Stroke { runs, .. } => runs,
-                        Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
-                        Shape::Image {
-                            origin,
-                            u_axis,
-                            v_axis,
-                            clip,
-                            clip_inverted,
-                            ..
-                        } => {
-                            let mut ring = Shape::image_outline(
-                                *origin,
-                                *u_axis,
-                                *v_axis,
-                                clip.as_deref(),
-                                *clip_inverted,
-                            );
-                            if let Some(&first) = ring.first() {
-                                ring.push(first);
-                            }
-                            own_runs = vec![ring];
-                            &own_runs
-                        }
-                    };
-                    for run in runs {
-                        let pieces: Vec<Segment> = run
-                            .windows(2)
-                            .map(|pair| {
-                                seg([
-                                    [pair[0][0] + dx, pair[0][1] + dy],
-                                    [pair[1][0] + dx, pair[1][1] + dy],
-                                ])
-                            })
-                            .collect();
-                        count += pieces.len();
-                        out.push(pieces);
+        // Collect the source runs of `picked` objects once, then divide the
+        // frame's ghost segment budget evenly across every copy so a large
+        // selection never starves later copies (#248).
+        let source_runs = |picked: &[usize]| {
+            let mut owned: Vec<Vec<[f64; 2]>> = Vec::new();
+            let mut borrowed: Vec<&[[f64; 2]]> = Vec::new();
+            for item in sheet
+                .list
+                .items
+                .iter()
+                .filter(|i| picked.contains(&i.object))
+            {
+                match &item.shape {
+                    Shape::Stroke { runs, .. } => {
+                        borrowed.extend(runs.iter().map(Vec::as_slice));
                     }
-                    if count > MOST_MOVED {
-                        return out;
+                    Shape::Fill { contours, .. } | Shape::Mask { contours } => {
+                        borrowed.extend(contours.iter().map(Vec::as_slice));
+                    }
+                    Shape::Image {
+                        origin,
+                        u_axis,
+                        v_axis,
+                        clip,
+                        clip_inverted,
+                        ..
+                    } => {
+                        let mut ring = Shape::image_outline(
+                            *origin,
+                            *u_axis,
+                            *v_axis,
+                            clip.as_deref(),
+                            *clip_inverted,
+                        );
+                        if let Some(&first) = ring.first() {
+                            ring.push(first);
+                        }
+                        owned.push(ring);
                     }
                 }
             }
-            out
+            (owned, borrowed)
+        };
+        let shifted = |picked: &[usize], by: &[[f64; 2]]| -> Vec<Vec<Segment>> {
+            let (owned, mut runs) = source_runs(picked);
+            runs.extend(owned.iter().map(Vec::as_slice));
+            ghosts::ghost_runs(by, &runs, ghosts::MOST_GHOST_SEGMENTS, |&[dx, dy], p| {
+                device(p[0] + dx, p[1] + dy)
+            })
         };
         // What a move would move, where it would go.
         if let Some((picked, by)) = &band.moving {
@@ -1736,54 +1725,12 @@ impl Viewer {
         // centre, dashed in the proposal's colour until Enter or Array
         // lands them; fainter while the centre follows the cursor.
         if let Some((picked, places, following)) = &band.arrayed {
-            let mut runs: Vec<Vec<Segment>> = Vec::new();
-            let mut count = 0;
-            'copies: for place in places {
-                for item in sheet
-                    .list
-                    .items
-                    .iter()
-                    .filter(|i| picked.contains(&i.object))
-                {
-                    let own_shape: Vec<Vec<[f64; 2]>>;
-                    let shape = match &item.shape {
-                        Shape::Stroke { runs, .. } => runs,
-                        Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
-                        Shape::Image {
-                            origin,
-                            u_axis,
-                            v_axis,
-                            clip,
-                            clip_inverted,
-                            ..
-                        } => {
-                            let mut ring = Shape::image_outline(
-                                *origin,
-                                *u_axis,
-                                *v_axis,
-                                clip.as_deref(),
-                                *clip_inverted,
-                            );
-                            if let Some(&first) = ring.first() {
-                                ring.push(first);
-                            }
-                            own_shape = vec![ring];
-                            &own_shape
-                        }
-                    };
-                    for run in shape {
-                        let pieces: Vec<Segment> = run
-                            .windows(2)
-                            .map(|pair| seg([place.apply(pair[0]), place.apply(pair[1])]))
-                            .collect();
-                        count += pieces.len();
-                        runs.push(pieces);
-                    }
-                    if count > MOST_MOVED {
-                        break 'copies;
-                    }
-                }
-            }
+            let (owned, mut src) = source_runs(picked);
+            src.extend(owned.iter().map(Vec::as_slice));
+            let runs = ghosts::ghost_runs(places, &src, ghosts::MOST_GHOST_SEGMENTS, |place, p| {
+                let q = place.apply(p);
+                device(q[0], q[1])
+            });
             let [r, g, b, a] = ghosts::PROPOSAL;
             let alpha = if *following { a * 0.55 } else { a };
             self.lines(

@@ -24,7 +24,7 @@
 //! names the sheets the template reaches, for the page to ask first.
 
 use crate::array::{self, ArrayKind, Field, Place, Setup, Spacing};
-use agentdrafter_core::SnapKind;
+use agentdrafter_core::{DisplaySnap, SnapKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -265,6 +265,9 @@ pub struct Context {
     /// Its unit, such as `in`; none when it states none.
     pub units: Option<String>,
     pub objects: Vec<ObjectInfo>,
+    /// The sheet's object snaps, used to keep snapped tool points in sync with
+    /// their ghosts when the sheet reloads (#248).
+    pub snaps: Vec<DisplaySnap>,
     /// Its template, on a drawing set's sheet: none for a sheet description
     /// or a DWG.
     pub template: Option<Reach>,
@@ -618,6 +621,28 @@ fn offset(from: &Taken, to: &Taken) -> [f64; 2] {
     [clean(to.at[0] - from.at[0]), clean(to.at[1] - from.at[1])]
 }
 
+/// 3D distance between two taken points, including Z (#248).
+fn distance3(from: &Taken, to: &Taken) -> f64 {
+    (to.at[0] - from.at[0])
+        .hypot(to.at[1] - from.at[1])
+        .hypot(to.z - from.z)
+}
+
+/// Whether `kind` is emitted as a `{"snap": ...}` reference rather than plain
+/// coordinates.
+fn is_sendable_snap(kind: SnapKind) -> bool {
+    matches!(
+        kind,
+        SnapKind::Endpoint
+            | SnapKind::Midpoint
+            | SnapKind::Center
+            | SnapKind::Quadrant
+            | SnapKind::Insertion
+            | SnapKind::Node
+            | SnapKind::Intersection
+    )
+}
+
 /// The length from `a` to `b`, and its angle in degrees from the X axis,
 /// from 0 to 360.
 fn length_angle(a: [f64; 2], b: [f64; 2]) -> (f64, f64) {
@@ -661,7 +686,44 @@ impl Tools {
                             s.with = Some(w);
                         }
                         // The point stays where it was taken.
-                        _ => t.snap = None,
+                        _ => {
+                            t.snap = None;
+                            return;
+                        }
+                    }
+                    // If the reloaded sheet carried snaps and this snap is sent
+                    // as a reference, sync `t.at`/`t.z` to where the snapped
+                    // point lives now so the dashed ghost always matches where
+                    // the copy or move will land; if that snap vanished, drop
+                    // the reference and keep the placed coordinates (#248).
+                    if !context.snaps.is_empty() && is_sendable_snap(s.snap) {
+                        let found = context
+                            .snaps
+                            .iter()
+                            .filter(|ds| {
+                                ds.snap == s.snap
+                                    && ds.which == s.which
+                                    && ((ds.object == s.object && ds.with == s.with)
+                                        || (s.with.is_some()
+                                            && ds.object == s.with.unwrap()
+                                            && ds.with == Some(s.object)))
+                            })
+                            .min_by(|a, b| {
+                                let da = (a.at.x - t.at[0])
+                                    .hypot(a.at.y - t.at[1])
+                                    .hypot(a.at.z - t.z);
+                                let db = (b.at.x - t.at[0])
+                                    .hypot(b.at.y - t.at[1])
+                                    .hypot(b.at.z - t.z);
+                                da.total_cmp(&db)
+                            });
+                        match found {
+                            Some(ds) => {
+                                t.at = [ds.at.x, ds.at.y];
+                                t.z = ds.at.z;
+                            }
+                            None => t.snap = None,
+                        }
                     }
                 }
             };
@@ -1273,7 +1335,7 @@ impl Tools {
                 })
             }
             Step::MoveSecond { picked, base } => {
-                if (point.at[0] - base.at[0]).hypot(point.at[1] - base.at[1]) < 1e-9 {
+                if distance3(&base, &point) < 1e-9 {
                     Some(Step::MoveSecond { picked, base })
                 } else {
                     self.last_point = Some((point.at, point.z));
@@ -1297,21 +1359,33 @@ impl Tools {
                 base,
                 mut placed,
             } => {
-                if (point.at[0] - base.at[0]).hypot(point.at[1] - base.at[1]) < 1e-9 {
+                if distance3(&base, &point) < 1e-9 {
                     self.error = Some(
                         "That is the base point: a copy there would sit on the original."
                             .to_owned(),
                     );
                 } else {
                     let [dx, dy] = offset(&base, &point);
+                    let dz = clean(point.z - base.z);
                     placed.push(point.clone());
-                    log.push(format!(
-                        "COPY {}: {}, {}{} from the base point, dashed until Enter",
-                        placed.len(),
-                        f4(dx),
-                        f4(dy),
-                        self.unit()
-                    ));
+                    if dz == 0.0 {
+                        log.push(format!(
+                            "COPY {}: {}, {}{} from the base point, dashed until Enter",
+                            placed.len(),
+                            f4(dx),
+                            f4(dy),
+                            self.unit()
+                        ));
+                    } else {
+                        log.push(format!(
+                            "COPY {}: {}, {}, {}{} from the base point, dashed until Enter",
+                            placed.len(),
+                            f4(dx),
+                            f4(dy),
+                            f4(dz),
+                            self.unit()
+                        ));
+                    }
                 }
                 Some(Step::CopySecond {
                     picked,
@@ -2036,16 +2110,7 @@ impl Tools {
     }
 
     fn snapped(&self, s: &SnapRef, template_edit: bool) -> Option<Value> {
-        if !matches!(
-            s.snap,
-            SnapKind::Endpoint
-                | SnapKind::Midpoint
-                | SnapKind::Center
-                | SnapKind::Quadrant
-                | SnapKind::Insertion
-                | SnapKind::Node
-                | SnapKind::Intersection
-        ) {
+        if !is_sendable_snap(s.snap) {
             return None;
         }
         let object = |place: usize| -> Option<&ObjectInfo> {

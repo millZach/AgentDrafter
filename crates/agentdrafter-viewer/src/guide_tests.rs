@@ -32,6 +32,7 @@ fn tools() -> Tools {
             object("line-1", "line", None),
             object("text-1", "text", None),
         ],
+        snaps: Vec::new(),
         template: Some(Reach {
             path: "templates/loop-2-wire.yaml".to_owned(),
             sheets: vec!["DP-LD-101".to_owned()],

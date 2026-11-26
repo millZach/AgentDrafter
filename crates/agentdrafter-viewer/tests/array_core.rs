@@ -64,6 +64,7 @@ fn tools() -> Tools {
             bounds: Some([1.5, 6.3, 2.5, 6.7]),
             ..ObjectInfo::default()
         }],
+        snaps: Vec::new(),
         template: Some(Reach {
             path: "templates/loop-2-wire.yaml".to_owned(),
             sheets: vec!["DP-LD-101".to_owned()],

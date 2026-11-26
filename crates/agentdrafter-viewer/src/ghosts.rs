@@ -179,6 +179,53 @@ pub fn dash_run(run: &[Segment], dash: f64, gap: f64) -> Vec<Segment> {
     out
 }
 
+/// The most segments drawn for a tool's moved, copied or arrayed ghosts in
+/// one frame, divided evenly across the copies so later copies never lose
+/// their geometry to earlier ones (#248).
+pub const MOST_GHOST_SEGMENTS: usize = 50_000;
+
+/// Per-copy segment budget when drawing `copies` ghosts within `budget`.
+pub fn copy_segment_budget(copies: usize, budget: usize) -> usize {
+    budget.checked_div(copies).map_or(0, |n| n.max(1))
+}
+
+/// Collects device-pixel segments for each copy in `copies` from `runs` (each
+/// run a polyline of `[x, y]` points), transforming each point with `map`,
+/// giving every copy an equal share of `budget` so a very large selection
+/// never starves later copies (#248).
+pub fn ghost_runs<C, F>(
+    copies: &[C],
+    runs: &[&[[f64; 2]]],
+    budget: usize,
+    mut map: F,
+) -> Vec<Vec<Segment>>
+where
+    F: FnMut(&C, [f64; 2]) -> (f64, f64),
+{
+    let per_copy = copy_segment_budget(copies.len(), budget);
+    let mut out = Vec::new();
+    for copy in copies {
+        let mut used = 0;
+        for &run in runs {
+            if used >= per_copy {
+                break;
+            }
+            let room = per_copy - used;
+            let mut pieces = Vec::new();
+            for pair in run.windows(2).take(room) {
+                let (x0, y0) = map(copy, pair[0]);
+                let (x1, y1) = map(copy, pair[1]);
+                pieces.push([x0, y0, x1, y1]);
+            }
+            used += pieces.len();
+            if !pieces.is_empty() {
+                out.push(pieces);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 #[path = "ghosts_tests.rs"]
 mod tests;
