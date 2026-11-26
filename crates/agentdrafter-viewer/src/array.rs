@@ -324,8 +324,8 @@ pub fn f1(v: f64) -> String {
     format!("{r}")
 }
 
-/// A value as a field shows it: as written when it has six decimals at
-/// most, such as `0.12345`; else to four, such as `0.6667` for two thirds.
+/// A worked-out value as a field shows it: as written when it has six decimals
+/// at most, such as `0.12345`; else to four, such as `0.6667` for two thirds.
 pub fn shown(v: f64) -> String {
     let v = if v == 0.0 { 0.0 } else { v };
     let plain = format!("{v}");
@@ -341,6 +341,13 @@ pub fn shown(v: f64) -> String {
         }
         _ => plain,
     }
+}
+
+/// A typed value shown without rounding away decimals beyond 6 places (#258),
+/// so what stays in the field after leaving it matches what is sent.
+fn shown_exact(v: f64) -> String {
+    let v = if v == 0.0 { 0.0 } else { v };
+    format!("{v}")
 }
 
 /// A number typed in a field: digits with a point and a sign, as the
@@ -392,6 +399,9 @@ pub struct Setup {
     /// The fields whose text does not read as a number, by key, with the
     /// text: shown as typed, and nothing lands until each reads.
     pub unread: Vec<(String, String)>,
+    /// Keys whose current value was explicitly typed by the drafter, so long
+    /// decimals stay shown as typed rather than rounded to 4 places (#258).
+    typed: Vec<String>,
     /// Whether a polar array's items go a whole turn, spread evenly: the
     /// panel's own state, set by the angle typed, kept as the number of
     /// items changes, so a count typed a digit at a time, `1` then `10`,
@@ -446,8 +456,19 @@ impl Setup {
             path_closed: false,
             objects: 1,
             unread: Vec::new(),
+            typed: Vec::new(),
             whole_kept: true,
         }
+    }
+
+    fn mark_typed(&mut self, key: &str) {
+        if !self.typed.iter().any(|k| k == key) {
+            self.typed.push(key.to_owned());
+        }
+    }
+
+    fn clear_typed(&mut self, key: &str) {
+        self.typed.retain(|k| k != key);
     }
 
     /// Records the picked path's arc length and closure, syncing `path_spacing`
@@ -463,6 +484,7 @@ impl Setup {
                 self.path_items - 1.0
             };
             self.path_spacing = clean(length / divisor);
+            self.clear_typed("path_spacing");
         }
     }
 
@@ -479,9 +501,11 @@ impl Setup {
             Spacing::Between => {
                 if self.rows > 1.0 {
                     self.row_total = clean(self.row_spacing * (self.rows - 1.0));
+                    self.clear_typed("row_total");
                 }
                 if self.columns > 1.0 {
                     self.column_total = clean(self.column_spacing * (self.columns - 1.0));
+                    self.clear_typed("column_total");
                 }
                 // A whole turn, either way; else to the last item, which may
                 // come to 360 or more, said as wrong, since the core spreads
@@ -492,14 +516,17 @@ impl Setup {
                     } else {
                         clean(self.angle_between * (self.items - 1.0))
                     };
+                    self.clear_typed("angle_fill");
                 }
             }
             Spacing::Total => {
                 if self.rows > 1.0 {
                     self.row_spacing = clean(self.row_total / (self.rows - 1.0));
+                    self.clear_typed("row_spacing");
                 }
                 if self.columns > 1.0 {
                     self.column_spacing = clean(self.column_total / (self.columns - 1.0));
+                    self.clear_typed("column_spacing");
                 }
                 if self.items >= 2.0 {
                     self.angle_between = if self.whole_kept {
@@ -507,6 +534,7 @@ impl Setup {
                     } else {
                         clean(self.angle_fill / (self.items - 1.0))
                     };
+                    self.clear_typed("angle_between");
                 }
                 if self.path_items >= 2.0 {
                     if let Some(len) = self.path_length {
@@ -516,6 +544,7 @@ impl Setup {
                             self.path_items - 1.0
                         };
                         self.path_spacing = clean(len / divisor);
+                        self.clear_typed("path_spacing");
                     }
                 }
             }
@@ -553,6 +582,7 @@ impl Setup {
                 // as it is typed.
                 if self.spacing == Spacing::Between && self.whole_kept && v >= 2.0 {
                     self.angle_between = clean(360f64.copysign(self.angle_between) / v);
+                    self.clear_typed("angle_between");
                 }
                 self.items = v;
             }
@@ -568,6 +598,7 @@ impl Setup {
             "path_spacing" => self.path_spacing = v,
             _ => return false,
         }
+        self.mark_typed(key);
         self.sync();
         true
     }
@@ -825,15 +856,22 @@ impl Setup {
     /// The panel's fields, `unit` the sheet's unit, such as `in`.
     pub fn fields(&self, unit: Option<&str>) -> Vec<Field> {
         let unit = unit.map(|u| format!(", {u}")).unwrap_or_default();
-        // A field whose text does not read shows it as typed.
+        // A field whose text does not read shows it as typed; one explicitly
+        // typed keeps its full decimals rather than rounding to 4 places (#258).
         let field =
             |key: &'static str, label: String, hint: Option<&'static str>, v: f64, whole: bool| {
-                let typed = self.unread.iter().find(|(k, _)| k == key);
+                let value = if let Some((_, t)) = self.unread.iter().find(|(k, _)| k == key) {
+                    t.clone()
+                } else if self.typed.iter().any(|k| k == key) {
+                    shown_exact(v)
+                } else {
+                    shown(v)
+                };
                 Field {
                     key,
                     label,
                     hint,
-                    value: typed.map_or_else(|| shown(v), |(_, t)| t.clone()),
+                    value,
                     whole,
                 }
             };
