@@ -5371,8 +5371,7 @@ const checks = {
         // The journal, raised: the kept proposal's entry and the discard's line.
         const history = () => page.evaluate(() => document.querySelector('.cmd')?.textContent ?? '');
         assert(!(await page.textContent('body')).includes('Showing entry'), `still live before the journal is raised: ${await history()}`);
-        // Dragged up, as a finger raises it: a tap's click would land on the
-        // list sliding up under it (a follow-up of its own).
+        // Dragged up, as a finger raises it.
         // The grip is found once the sheet is at rest: the peek just lost
         // its proposals' line, and the sheet follows its height. A finger
         // there may be steered to the peek's Ask button, which drags it too.
@@ -5397,6 +5396,21 @@ const checks = {
         await sideTab(page, 'journal', 'tap');
         await page.waitForSelector(`.va-journal [data-entry="${gone.entry}"]`, { timeout: 30000 });
         assert(!(await page.textContent('body')).includes('Showing entry'), `still live with the journal raised: ${await history()}`);
+        // Tapping the grab lowers and raises the sheet without its click
+        // landing on the journal list sliding up under the finger (#204).
+        await page.tap('.va-grab');
+        assert(await sheetAtRest(page, false), 'tapping the grab lowers the sheet to its peek');
+        const [tapX, tapY] = await page.evaluate(() => {
+          const r = document.querySelector('.va-grab').getBoundingClientRect();
+          return [r.left + r.width / 2, r.top + r.height / 2];
+        });
+        await page.touchscreen.tap(tapX, tapY);
+        assert(await sheetAtRest(page, true), 'tapping the grab raises the sheet to half');
+        await sleep(300);
+        assert(
+          !(await page.textContent('body')).includes('Showing entry') && (await page.evaluate(() => window.agentdrafterViewer.summary.entry === null)),
+          `tapping the grab opened no journal entry: ${await history()}`,
+        );
         assert((await journalLine(page, kept.entry)).includes('proposed by Assistant · kept by you'), 'J1 on a phone');
         assert((await journalLine(page, gone.entry)).includes('Discarded proposal 2'), 'the discard on a phone');
         await sleep(500);
