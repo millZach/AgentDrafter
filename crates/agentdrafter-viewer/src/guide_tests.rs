@@ -20,6 +20,7 @@ fn tools() -> Tools {
         from_template: Some(false),
         through_viewport: false,
         bounds: None,
+        path: None,
     };
     let mut tools = Tools::default();
     tools.load(Context {

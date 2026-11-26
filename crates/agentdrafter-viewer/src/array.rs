@@ -1,25 +1,27 @@
-//! The Array tool's values (#66): rows and columns, or items round a
-//! centre, as its panel and the command bar set them, and where each copy
-//! goes. Plain computation, tested natively through [`crate::tools`].
+//! The Array tool's values (#66, #256): rows and columns, items round a
+//! centre, or items along a path curve, as its panel and the command bar
+//! set them, and where each copy goes. Plain computation, tested natively
+//! through [`crate::tools`].
 //!
-//! The core's `array` operation takes the spacing between items, and a
-//! polar array's angle to fill (docs/change-sets.md, Copy and array). The
-//! drafter may give either the spacing between items or the total, first
-//! to last, divided evenly; whichever is held, the other follows, worked
-//! out here, so the page holds no drawing logic (ADR-0007). A value typed
-//! is kept as typed; one worked out is cleared of the noise dividing
-//! leaves, as Copy's offsets are.
+//! The core's `array` operation takes the spacing between items, a polar
+//! array's angle to fill, or a path array's curve and optional spacing
+//! (docs/change-sets.md, Copy and array). The drafter may give either the
+//! spacing between items or the total, first to last, divided evenly;
+//! whichever is held, the other follows, worked out here, so the page
+//! holds no drawing logic (ADR-0007). A value typed is kept as typed; one
+//! worked out is cleared of the noise dividing leaves, as Copy's offsets
+//! are.
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-/// The kinds the tool makes. A path array is the core's, for an agent;
-/// `ARRAYPATH` goes to the assistant.
+/// The kinds the tool makes: rectangular, polar and path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArrayKind {
     Rectangular,
     Polar,
+    Path,
 }
 
 impl ArrayKind {
@@ -28,20 +30,201 @@ impl ArrayKind {
         match self {
             ArrayKind::Rectangular => "ARRAYRECT",
             ArrayKind::Polar => "ARRAYPOLAR",
+            ArrayKind::Path => "ARRAYPATH",
         }
     }
 }
 
-/// The kind a word starts the tool as: `ARRAYRECT` and `ARRAYPOLAR`, in
-/// any case; none for `AR`, `ARRAY` or anything else.
+/// The kind a word starts the tool as: `ARRAYRECT`, `ARRAYPOLAR` and
+/// `ARRAYPATH`, in any case; none for `AR`, `ARRAY` or anything else.
 pub fn kind_for(word: &str) -> Option<ArrayKind> {
     let word = word.trim();
     if word.eq_ignore_ascii_case("ARRAYRECT") {
         Some(ArrayKind::Rectangular)
     } else if word.eq_ignore_ascii_case("ARRAYPOLAR") {
         Some(ArrayKind::Polar)
+    } else if word.eq_ignore_ascii_case("ARRAYPATH") {
+        Some(ArrayKind::Path)
     } else {
         None
+    }
+}
+
+/// A path curve sampled from an object's display-list strokes, used to
+/// preview a path array (#256) before the core resolves the exact curve.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PathCurve {
+    pub points: Vec<[f64; 2]>,
+    pub closed: bool,
+}
+
+impl PathCurve {
+    /// Whether an object of `kind` can serve as a path array's curve
+    /// (docs/change-sets.md, Copy and array).
+    pub fn is_path_kind(kind: &str) -> bool {
+        matches!(
+            kind,
+            "line" | "polyline" | "arc" | "circle" | "ellipse" | "spline"
+        )
+    }
+
+    /// Builds a path curve from an object's stroke runs in order. Returns
+    /// `None` when the kind is not a path curve or has no length.
+    pub fn from_runs(kind: &str, runs: &[&[[f64; 2]]]) -> Option<Self> {
+        if !Self::is_path_kind(kind) {
+            return None;
+        }
+        let mut points: Vec<[f64; 2]> = Vec::new();
+        for run in runs {
+            for &p in *run {
+                if !p[0].is_finite() || !p[1].is_finite() {
+                    continue;
+                }
+                if points
+                    .last()
+                    .is_some_and(|last| (p[0] - last[0]).hypot(p[1] - last[1]) <= 1e-12)
+                {
+                    continue;
+                }
+                points.push(p);
+            }
+        }
+        if points.len() < 2 {
+            return None;
+        }
+        // A dashed circle's stroke ends slightly before its start: close it so
+        // its circumference matches the core's circle length.
+        if kind == "circle" {
+            let first = points[0];
+            let last = *points.last().unwrap();
+            if (first[0] - last[0]).hypot(first[1] - last[1]) > 1e-12 {
+                points.push(first);
+            }
+        }
+        let length: f64 = points
+            .windows(2)
+            .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
+            .sum();
+        if length <= 0.0 || !length.is_finite() {
+            return None;
+        }
+        let closed = match kind {
+            "circle" => true,
+            "line" | "arc" => false,
+            _ => {
+                points.len() >= 3
+                    && (points[0][0] - points.last().unwrap()[0])
+                        .hypot(points[0][1] - points.last().unwrap()[1])
+                        <= length * 1e-6
+            }
+        };
+        Some(PathCurve { points, closed })
+    }
+
+    /// The total arc length along the curve's segments.
+    pub fn length(&self) -> f64 {
+        self.points
+            .windows(2)
+            .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
+            .sum()
+    }
+
+    /// Places `count - 1` copies along the curve (the objects themselves are
+    /// item 0 at the curve's start), spaced by `spacing` or evenly along the
+    /// curve (around it when `closed`). Aligned copies turn with the curve's
+    /// tangent difference from its start, matching the core's `array::along`.
+    pub fn along(
+        &self,
+        count: usize,
+        spacing: Option<f64>,
+        align: bool,
+    ) -> Result<Vec<Place>, String> {
+        if count < 2 {
+            return Ok(Vec::new());
+        }
+        let mut starts: Vec<(f64, f64)> = Vec::with_capacity(self.points.len().saturating_sub(1));
+        let mut total = 0.0;
+        for w in self.points.windows(2) {
+            let len = (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
+            starts.push((total, len));
+            total += len;
+        }
+        if total <= 0.0 || !total.is_finite() {
+            return Err("The path has no length to run along.".to_owned());
+        }
+        let step = match spacing {
+            Some(s) => {
+                if s <= 0.0 || !s.is_finite() {
+                    return Err("The spacing along the path is more than 0.".to_owned());
+                }
+                let run = s * (count - 1) as f64;
+                if run > total * (1.0 + 1e-9) {
+                    return Err(format!(
+                        "{count} items {} apart run {} along the path, which is {} long.",
+                        f3(s),
+                        f3(run),
+                        f3(total)
+                    ));
+                }
+                s
+            }
+            None if self.closed => total / count as f64,
+            None => total / (count - 1) as f64,
+        };
+        let n = starts.len();
+        let at = |distance: f64| -> ([f64; 2], f64) {
+            let j = if distance <= 0.0 {
+                (0..n).find(|&j| starts[j].1 > 0.0).unwrap_or(0)
+            } else {
+                (0..n)
+                    .find(|&j| {
+                        let (seg_start, seg_len) = starts[j];
+                        if seg_len <= 0.0 {
+                            return false;
+                        }
+                        let near = (total * 1e-9).min(seg_len * 1e-6);
+                        distance < seg_start + seg_len - near
+                    })
+                    .or_else(|| (0..n).rev().find(|&j| starts[j].1 > 0.0))
+                    .unwrap_or(0)
+            };
+            let (seg_start, seg_len) = starts[j];
+            let p0 = self.points[j];
+            let p1 = self.points[j + 1];
+            let t = if seg_len > 0.0 {
+                ((distance - seg_start) / seg_len).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let pt = [p0[0] + (p1[0] - p0[0]) * t, p0[1] + (p1[1] - p0[1]) * t];
+            let dir = (p1[1] - p0[1]).atan2(p1[0] - p0[0]);
+            (pt, dir)
+        };
+        let (start, start_dir) = at(0.0);
+        Ok((1..count)
+            .map(|i| {
+                let distance = (step * i as f64).min(total);
+                let (pt, here_dir) = at(distance);
+                let turn = if align {
+                    let deg = clean((here_dir - start_dir).to_degrees()).rem_euclid(360.0);
+                    if deg >= 360.0 - 1e-9 {
+                        0.0
+                    } else {
+                        deg
+                    }
+                } else {
+                    0.0
+                };
+                // Place::apply turns about `about` then adds `by`:
+                // start + R(turn)*(p - start) + (pt - start) == pt + R(turn)*(p - start),
+                // matching the core's move by (pt - start) then turn about pt.
+                Place {
+                    turn,
+                    about: start,
+                    by: [pt[0] - start[0], pt[1] - start[1]],
+                }
+            })
+            .collect())
     }
 }
 
@@ -193,6 +376,16 @@ pub struct Setup {
     pub angle_fill: f64,
     /// Whether each copy turns as it goes round.
     pub rotate: bool,
+    /// The items along a path, the objects the first.
+    pub path_items: f64,
+    /// Distance between items along a path when spacing is held between items.
+    pub path_spacing: f64,
+    /// Whether each copy aligns with the path's direction.
+    pub align: bool,
+    /// The picked path's length, if any, used to check spacing and sync evenly.
+    pub path_length: Option<f64>,
+    /// Whether the picked path is closed.
+    pub path_closed: bool,
     /// How many objects it copies: the core's limit counts every copy of
     /// every one of them.
     pub objects: usize,
@@ -223,7 +416,7 @@ pub struct Field {
 impl Setup {
     /// An array of `kind` of objects whose box is `b`: three rows a box
     /// and a little more apart downwards, rounded up to a quarter of the
-    /// unit, and six items round a whole turn, as the prototype starts.
+    /// unit, six items round a whole turn, and six items evenly along a path.
     pub fn new(kind: ArrayKind, b: Option<[f64; 4]>) -> Self {
         let step = |v: f64| clean(((v + 0.2) / 0.25).ceil() * 0.25);
         let (w, h) = b.map_or((0.8, 0.8), |b| (b[2] - b[0], b[3] - b[1]));
@@ -231,7 +424,11 @@ impl Setup {
         let column_spacing = step(w);
         Setup {
             kind,
-            spacing: Spacing::Between,
+            spacing: if kind == ArrayKind::Path {
+                Spacing::Total
+            } else {
+                Spacing::Between
+            },
             rows: 3.0,
             columns: 1.0,
             row_spacing,
@@ -242,9 +439,30 @@ impl Setup {
             angle_between: 60.0,
             angle_fill: 360.0,
             rotate: true,
+            path_items: 6.0,
+            path_spacing: 1.0,
+            align: true,
+            path_length: None,
+            path_closed: false,
             objects: 1,
             unread: Vec::new(),
             whole_kept: true,
+        }
+    }
+
+    /// Records the picked path's arc length and closure, syncing `path_spacing`
+    /// when spacing is held evenly along the path or on first pick.
+    pub fn set_path(&mut self, length: f64, closed: bool) {
+        let first = self.path_length.is_none();
+        self.path_length = Some(length);
+        self.path_closed = closed;
+        if (first || self.spacing == Spacing::Total) && self.path_items >= 2.0 {
+            let divisor = if closed {
+                self.path_items
+            } else {
+                self.path_items - 1.0
+            };
+            self.path_spacing = clean(length / divisor);
         }
     }
 
@@ -289,6 +507,16 @@ impl Setup {
                     } else {
                         clean(self.angle_fill / (self.items - 1.0))
                     };
+                }
+                if self.path_items >= 2.0 {
+                    if let Some(len) = self.path_length {
+                        let divisor = if self.path_closed {
+                            self.path_items
+                        } else {
+                            self.path_items - 1.0
+                        };
+                        self.path_spacing = clean(len / divisor);
+                    }
                 }
             }
         }
@@ -336,6 +564,8 @@ impl Setup {
                 self.angle_fill = v;
                 self.whole_kept = whole_turn(v);
             }
+            "path_items" => self.path_items = v,
+            "path_spacing" => self.path_spacing = v,
             _ => return false,
         }
         self.sync();
@@ -347,6 +577,7 @@ impl Setup {
         match self.kind {
             ArrayKind::Rectangular => self.rows * self.columns,
             ArrayKind::Polar => self.items,
+            ArrayKind::Path => self.path_items,
         }
     }
 
@@ -384,6 +615,8 @@ impl Setup {
             "items",
             "angle_between",
             "angle_fill",
+            "path_items",
+            "path_spacing",
         ]
         .contains(&key)
     }
@@ -475,6 +708,31 @@ impl Setup {
                     }
                 }
             }
+            ArrayKind::Path => {
+                if !whole(self.path_items) || self.path_items < 2.0 {
+                    return Some(
+                        "Items are a whole number, 2 or more: the objects are the first."
+                            .to_owned(),
+                    );
+                }
+                if !total {
+                    if self.path_spacing <= 0.0 || !self.path_spacing.is_finite() {
+                        return Some("The spacing along the path is more than 0.".to_owned());
+                    }
+                    if let Some(len) = self.path_length {
+                        let run = self.path_spacing * (self.path_items - 1.0);
+                        if run > len * (1.0 + 1e-9) {
+                            return Some(format!(
+                                "{} items {} apart run {} along the path, which is {} long.",
+                                self.path_items,
+                                f3(self.path_spacing),
+                                f3(run),
+                                f3(len)
+                            ));
+                        }
+                    }
+                }
+            }
         }
         let copies = self.copies(self.objects);
         if copies as f64 > MOST_COPIES {
@@ -486,12 +744,13 @@ impl Setup {
     }
 
     /// Its short name, for the tag over it and the journal: `3 × 2`,
-    /// `8 round`, or `5 round, -180°` when it fills less than a turn.
+    /// `8 round`, `5 round, -180°` when it fills less than a turn, or `6 along`.
     pub fn tag(&self) -> String {
         match self.kind {
             ArrayKind::Rectangular => format!("{} × {}", self.rows, self.columns),
             ArrayKind::Polar if self.whole() => format!("{} round", self.items),
             ArrayKind::Polar => format!("{} round, {}°", self.items, f1(self.angle_fill)),
+            ArrayKind::Path => format!("{} along", self.path_items),
         }
     }
 
@@ -546,6 +805,18 @@ impl Setup {
                     self.items,
                     f1(self.angle_between.abs()),
                     if self.rotate { "" } else { ", not turned" }
+                )
+            }
+            ArrayKind::Path => {
+                let how = if self.spacing == Spacing::Total {
+                    "evenly along the path".to_owned()
+                } else {
+                    format!("{}{unit} apart along the path", f3(self.path_spacing))
+                };
+                format!(
+                    "{} items {how}{}: {copies}",
+                    self.path_items,
+                    if self.align { "" } else { ", not aligned" }
                 )
             }
         }
@@ -632,15 +903,40 @@ impl Setup {
                     )
                 },
             ],
+            ArrayKind::Path => {
+                let mut out = vec![field(
+                    "path_items",
+                    "Items".to_owned(),
+                    Some("the objects are the first"),
+                    self.path_items,
+                    true,
+                )];
+                if !total {
+                    out.push(field(
+                        "path_spacing",
+                        format!("Spacing{unit}"),
+                        Some("along the path"),
+                        self.path_spacing,
+                        false,
+                    ));
+                }
+                out
+            }
         }
     }
 
     /// Where each copy goes, the objects themselves left out: their box's
     /// centre is `middle`, which goes round when a polar array's copies are
     /// not turned, as the core's `base_point` left out does; `center` is a
-    /// polar array's centre. None while the values are wrong, or a polar
-    /// array has no centre.
-    pub fn places(&self, middle: [f64; 2], center: Option<[f64; 2]>) -> Vec<Place> {
+    /// polar array's centre; `path` is a path array's curve. None while the
+    /// values are wrong, or a polar array has no centre, or a path array has
+    /// no path.
+    pub fn places(
+        &self,
+        middle: [f64; 2],
+        center: Option<[f64; 2]>,
+        path: Option<&PathCurve>,
+    ) -> Vec<Place> {
         if self.problem().is_some() {
             return Vec::new();
         }
@@ -679,18 +975,27 @@ impl Setup {
                     })
                     .collect()
             }
+            ArrayKind::Path => {
+                let Some(curve) = path else {
+                    return Vec::new();
+                };
+                let spacing = (self.spacing == Spacing::Between).then_some(self.path_spacing);
+                curve
+                    .along(self.path_items as usize, spacing, self.align)
+                    .unwrap_or_default()
+            }
         }
     }
 
     /// The keys of the core's `array` operation, `center` a polar array's
-    /// centre as the operation takes it: the spacing between items, worked
-    /// out from a total held, and the angle it fills, the items placed as
-    /// the preview places them: (items - 1) times the angle between them,
-    /// or, only when they go a whole turn spread evenly, left out, or -360
-    /// clockwise, so the copies go round the way the preview shows and
-    /// keep its order and their IDs; `rotate` only when false, as the core
-    /// turns them by default.
-    pub fn keys(&self, center: Value) -> Map<String, Value> {
+    /// centre and `path` a path array's curve target as the operation takes
+    /// them: the spacing between items, worked out from a total held, and the
+    /// angle it fills, the items placed as the preview places them:
+    /// (items - 1) times the angle between them, or, only when they go a whole
+    /// turn spread evenly, left out, or -360 clockwise, so the copies go round
+    /// the way the preview shows and keep its order and their IDs; `rotate`
+    /// and `align` only when false, as the core turns/aligns them by default.
+    pub fn keys(&self, center: Value, path: Value) -> Map<String, Value> {
         let mut k = Map::new();
         match self.kind {
             ArrayKind::Rectangular => {
@@ -715,6 +1020,17 @@ impl Setup {
                 }
                 if !self.rotate {
                     k.insert("rotate".into(), json!(false));
+                }
+            }
+            ArrayKind::Path => {
+                k.insert("kind".into(), json!("path"));
+                k.insert("path".into(), path);
+                k.insert("count".into(), json!(self.path_items as u64));
+                if self.spacing == Spacing::Between {
+                    k.insert("spacing".into(), json!(self.path_spacing));
+                }
+                if !self.align {
+                    k.insert("align".into(), json!(false));
                 }
             }
         }

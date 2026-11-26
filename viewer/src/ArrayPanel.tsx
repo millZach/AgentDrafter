@@ -82,9 +82,9 @@ export function ArrayPanel({ panel, touch, onAct, onValue, boxRef }: ArrayPanelP
     <div className={`arr${touch ? ' docked' : ''}`} ref={boxRef} data-arraypanel role="group" aria-label="Array">
       <div className="ah">
         <div className="akinds" role="group" aria-label="Kind of array">
-          {(['rectangular', 'polar'] as const).map((k) => (
+          {(['rectangular', 'polar', 'path'] as const).map((k) => (
             <button key={k} type="button" data-kind={k} aria-pressed={panel.kind === k} onMouseDown={keepFocus} onClick={() => onAct(k)}>
-              {k === 'rectangular' ? 'Rectangular' : 'Polar'}
+              {k === 'rectangular' ? 'Rectangular' : k === 'polar' ? 'Polar' : 'Path'}
             </button>
           ))}
         </div>
@@ -95,7 +95,7 @@ export function ArrayPanel({ panel, touch, onAct, onValue, boxRef }: ArrayPanelP
         <div className="aseg" role="group" aria-label="Spacing">
           {(['between', 'total'] as const).map((h) => (
             <button key={h} type="button" data-hold={h} aria-pressed={panel.spacing === h} onMouseDown={keepFocus} onClick={() => onAct(h)}>
-              {h === 'between' ? 'Between items' : 'Total, divided evenly'}
+              {h === 'between' ? 'Between items' : panel.kind === 'path' ? 'Evenly along path' : 'Total, divided evenly'}
             </button>
           ))}
         </div>
@@ -118,6 +118,19 @@ export function ArrayPanel({ panel, touch, onAct, onValue, boxRef }: ArrayPanelP
           )}
         </div>
       )}
+      {panel.path != null && (
+        <div className="apick">
+          <span className="al">Path</span>
+          <span className={`av${panel.picking ? ' live' : ''}`} data-apath>
+            {panel.path}
+          </span>
+          {!panel.picking && (
+            <button type="button" className="btn sm" data-act="pick-path" onMouseDown={keepFocus} onClick={() => onAct('pick-path')}>
+              Pick
+            </button>
+          )}
+        </div>
+      )}
       {panel.kind === 'polar' && (
         <label className="achk" onMouseDown={keepFocus}>
           <input
@@ -133,6 +146,23 @@ export function ArrayPanel({ panel, touch, onAct, onValue, boxRef }: ArrayPanelP
             }}
           />
           Turn the items as they go round
+        </label>
+      )}
+      {panel.kind === 'path' && (
+        <label className="achk" onMouseDown={keepFocus}>
+          <input
+            type="checkbox"
+            data-k="align"
+            checked={panel.align ?? true}
+            onChange={(e) => onAct(e.target.checked ? 'align' : 'no-align')}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter') return;
+              e.preventDefault();
+              e.stopPropagation();
+              land();
+            }}
+          />
+          Align items with the path
         </label>
       )}
       <div className="foot">

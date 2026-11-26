@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{build_set_with, change_with, ChangeRequest, SetBuildRequest, Settings};
+use agentdrafter_viewer::array::PathCurve;
 use agentdrafter_viewer::tools::{Context, ObjectInfo, Reach, Taken, Tools};
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -198,6 +199,121 @@ fn switching_between_items_and_the_total_keeps_the_preview_where_the_core_lands_
                 (a - b).abs() < 1e-6,
                 "{what}: copy {} shown turned {a}°, landed {b}°; sent {}",
                 k + 1,
+                send.change_set
+            );
+        }
+    }
+}
+
+#[test]
+fn each_path_copy_lands_where_the_preview_draws_it() {
+    let set = plant("path");
+    let mut base = Tools::default();
+    base.load(Context {
+        sheet: "DP-LD-101".to_owned(),
+        units: Some("in".to_owned()),
+        objects: vec![
+            ObjectInfo {
+                id: Some("DP-LD-101/device".to_owned()),
+                kind: "insert".to_owned(),
+                layer: "0".to_owned(),
+                from_template: Some(false),
+                bounds: Some([1.5, 6.3, 2.5, 6.7]),
+                ..ObjectInfo::default()
+            },
+            // Open line from templates/loop-2-wire.yaml: [3.25, 6.75] -> [7.2, 6.75]
+            ObjectInfo {
+                id: Some("DP-LD-101/field-wire-1".to_owned()),
+                kind: "line".to_owned(),
+                layer: "wire".to_owned(),
+                from_template: Some(true),
+                bounds: Some([3.25, 6.75, 7.2, 6.75]),
+                path: PathCurve::from_runs("line", &[&[[3.25, 6.75], [7.2, 6.75]]]),
+                ..ObjectInfo::default()
+            },
+            // Closed polyline border from templates/loop-2-wire.yaml
+            ObjectInfo {
+                id: Some("DP-LD-101/border".to_owned()),
+                kind: "polyline".to_owned(),
+                layer: "border".to_owned(),
+                from_template: Some(true),
+                bounds: Some([0.5, 0.5, 16.5, 10.5]),
+                path: PathCurve::from_runs(
+                    "polyline",
+                    &[&[
+                        [0.5, 0.5],
+                        [16.5, 0.5],
+                        [16.5, 10.5],
+                        [0.5, 10.5],
+                        [0.5, 0.5],
+                    ]],
+                ),
+                ..ObjectInfo::default()
+            },
+        ],
+        snaps: Vec::new(),
+        template: Some(Reach {
+            path: "templates/loop-2-wire.yaml".to_owned(),
+            sheets: vec!["DP-LD-101".to_owned()],
+        }),
+        editable_dwg: false,
+        past: false,
+        space: None,
+        layout: None,
+    });
+
+    // (path index, command-bar input, align)
+    let cases: [(usize, &str, bool); 4] = [
+        (1, "4", true),
+        (1, "3,1.2", true),
+        (2, "6", true),
+        (2, "5,8", false),
+    ];
+    for (path_idx, typed, align) in cases {
+        let mut t = base.clone();
+        t.start_word("ARRAYPATH", &[0]);
+        t.pick(Some(path_idx));
+        if !align {
+            t.option("no-align");
+        }
+        t.input(typed, None);
+        let shown = t
+            .band(None)
+            .arrayed
+            .unwrap_or_else(|| panic!("path {path_idx} {typed}: no copy shown"))
+            .1;
+        let out = t.input("", None);
+        let send = out
+            .sends
+            .first()
+            .unwrap_or_else(|| panic!("path {path_idx} {typed}: nothing sent"));
+        let reply = change_with(
+            &ChangeRequest {
+                set: set.clone(),
+                change_set: send.change_set.clone(),
+                dry_run: true,
+            },
+            &Settings::default(),
+        );
+        assert!(reply.ok, "path {path_idx} {typed}: {:#?}", reply.error);
+        let copies = &reply.result.unwrap().operations[0].copies;
+        assert_eq!(shown.len(), copies.len(), "path {path_idx} {typed}");
+        for (k, (place, landed)) in shown.iter().zip(copies).enumerate() {
+            let turn = landed.turned.unwrap_or(0.0);
+            assert!(
+                (place.turn - turn).abs() < 1e-6,
+                "path {path_idx} {typed}: copy {} shown turned {}°, landed {turn}°; sent {}",
+                k + 1,
+                place.turn,
+                send.change_set
+            );
+            let moved = landed.by;
+            assert!(
+                (place.by[0] - moved[0]).abs() < 1e-6 && (place.by[1] - moved[1]).abs() < 1e-6,
+                "path {path_idx} {typed}: copy {} shown by {:?}, landed {:?}; sent {}",
+                k + 1,
+                place.by,
+                moved,
                 send.change_set
             );
         }

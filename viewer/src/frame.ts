@@ -52,7 +52,7 @@ export const PANELS: { title: string; tools: Tool[] }[] = [
         label: 'Array',
         command: 'ARRAY',
         alias: 'AR',
-        tip: 'Pick objects, then copies of them in rows and columns or round a centre, set in a small panel. Enter or Array lands them as plain objects, each with its own ID; Esc sends nothing.',
+        tip: 'Pick objects, then copies of them in rows and columns, round a centre or along a path, set in a small panel. Enter or Array lands them as plain objects, each with its own ID; Esc sends nothing.',
       },
       { key: 'erase', label: 'Erase', command: 'ERASE', alias: 'E', tip: 'Pick objects to remove. Undo brings them back.' },
     ],
@@ -367,16 +367,19 @@ export interface ArrayField {
 
 /** What Array's panel shows, as the renderer gives it (`ToolState.array`). */
 export interface ArrayPanelState {
-  kind: 'rectangular' | 'polar';
+  kind: 'rectangular' | 'polar' | 'path';
   spacing: 'between' | 'total';
   /** What it arrays: `of terminal-2`. */
   of: string;
   fields: ArrayField[];
-  /** A polar array's centre in words, or where to click it; null for a rectangular one. */
+  /** A polar array's centre in words, or where to click it; null for rectangular or path. */
   center: string | null;
-  /** Whether a click takes the centre now. */
+  /** A path array's curve in words, or where to click it; null for rectangular or polar. */
+  path?: string | null;
+  /** Whether a click takes the centre or path now. */
   picking: boolean;
   rotate: boolean;
+  align?: boolean;
   /** `3 × 2: 5 copies`, or what is wrong. */
   count: string;
   /** Whether it can land. */

@@ -19,6 +19,7 @@ fn context() -> Context {
         from_template: Some(template),
         through_viewport: false,
         bounds: None,
+        path: None,
     };
     Context {
         sheet: "DP-LD-101".to_owned(),
@@ -172,6 +173,7 @@ fn a_value_joined_from_parts_names_its_row_values_and_sends_its_whole_text() {
         from_template: Some(true),
         through_viewport: false,
         bounds: None,
+        path: None,
     });
     let slot = context.objects.len() - 1;
     let fields = fields(&context, slot);
