@@ -2367,16 +2367,18 @@ function DrawingWorkspace({
   }
   /** A tool's change set, sent marked with the step running, when one runs on its sheet. */
   function sendGuided(s: ToolSend) {
+    const sentRunId = runNow.current?.runId;
     const cs = guideMarked(s.change_set, runNow.current, runGuide(), summary?.sheet ?? null);
     if (cs === s.change_set) return sendChange(s);
-    return sendChange({ ...s, change_set: cs }, undefined, guideReplied);
+    return sendChange({ ...s, change_set: cs }, undefined, (reply) => guideReplied(reply, sentRunId));
   }
   /** The core's check of a change set sent for a step: the guide moves on, or the note offers to undo it. */
-  function guideReplied(reply: ChangeReply) {
+  function guideReplied(reply: ChangeReply, sentRunId?: number) {
+    if (sentRunId !== undefined && runNow.current?.runId !== sentRunId) return;
     const g = runGuide();
     const checked = reply.guide;
     if (!checked || !g) return;
-    setRun((r) => (r ? guideLanded(r, g, checked, reply.journal_entry) : r));
+    setRun((r) => (r ? guideLanded(r, g, checked, reply.journal_entry, sentRunId) : r));
     log(`Guide: ${checked.message}`);
   }
   function startGuide(n: number) {
@@ -2441,7 +2443,11 @@ function DrawingWorkspace({
     log(`Guide: stopped at step ${r.at + 1}`);
   }
   function closeGuide() {
+    const r = runNow.current;
     setGuideClosed(true);
+    if (r) {
+      void call('end-guide', { set: source, guide: r.guide, by: DRAFTER }, token).catch(() => {});
+    }
     log('Guide closed');
   }
   /** Do it for me: the step's operation lands as the drafter's would, marked with the step. */
@@ -2467,6 +2473,7 @@ function DrawingWorkspace({
     const filled = v?.guide_operation(JSON.stringify(step.operation));
     const operation = filled ? (JSON.parse(filled) as Record<string, unknown>) : step.operation;
     setGuideBusy(true);
+    const sentRunId = forMe.runId;
     void sendChange(
       {
         change_set: { operations: [operation], guide: { guide: r.guide, step: step.step } } as ToolSend['change_set'],
@@ -2474,7 +2481,7 @@ function DrawingWorkspace({
         sheets: [g.sheet],
       },
       undefined,
-      guideReplied,
+      (reply) => guideReplied(reply, sentRunId),
     ).finally(() => setGuideBusy(false));
   }
   /** The note's button: undo the change set, take the point or the pick back, or end the other tool. */
@@ -2492,10 +2499,13 @@ function DrawingWorkspace({
       leaveTool();
     }
   }
-  /** The change sets an undo can take now, read from the journal as it is. */
-  async function canUndoNow(): Promise<number[]> {
-    const fresh = await call<{ can_undo?: number[] }>('journal', { set: source }, token);
-    return fresh.can_undo ?? [];
+  /** The change sets an undo can take now and the journal's newest entry, read fresh. */
+  async function canUndoNow(): Promise<{ canUndo: number[]; newest: number }> {
+    const fresh = await call<{ can_undo?: number[]; entries?: { entry: number }[] }>('journal', { set: source }, token);
+    return {
+      canUndo: fresh.can_undo ?? [],
+      newest: fresh.entries?.at(-1)?.entry ?? 0,
+    };
   }
   /**
    * Undo it, of a change set sent for a step that does not complete it:
@@ -2505,13 +2515,14 @@ function DrawingWorkspace({
   async function undoIt(entry: number) {
     setGuideBusy(true);
     try {
-      const blocked = undoItBlocked(entry, await canUndoNow());
+      const { canUndo, newest } = await canUndoNow();
+      const blocked = undoItBlocked(entry, canUndo);
       if (blocked) {
         setRun((r) => (r ? { ...r, note: blocked } : r));
         log(`Guide: ${blocked.words}`);
         return;
       }
-      await call('undo', { set: source, change_set: entry }, token);
+      await call('undo', { set: source, change_set: entry, newest_seen: newest }, token);
       log(`Guide: change set ${entry} undone, as you asked`);
     } catch (e) {
       say('warn', `Change set ${entry} was not undone`, why(e, token));
@@ -2526,12 +2537,13 @@ function DrawingWorkspace({
     if (!r || !g) return;
     setGuideBusy(true);
     try {
-      const blocked = undoAllBlocked(r, g, await canUndoNow(), from, label);
+      const { canUndo, newest } = await canUndoNow();
+      const blocked = undoAllBlocked(r, g, canUndo, from, label);
       if (blocked) {
         say('warn', 'The guide’s steps were not undone', blocked);
         return;
       }
-      const reply = await call<{ journal_entry?: number }>('undo', { set: source, change_set: from }, token);
+      const reply = await call<{ journal_entry?: number }>('undo', { set: source, change_set: from, newest_seen: newest }, token);
       setRun((r) => (r ? { ...r, undone: reply.journal_entry ?? 0 } : r));
       log(`Guide: its steps undone, from change set ${from}`);
     } catch (e) {

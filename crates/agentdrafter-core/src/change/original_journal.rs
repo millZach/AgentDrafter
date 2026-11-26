@@ -1221,6 +1221,11 @@ pub(super) fn undo_original(request: &UndoRequest) -> Reply<UndoReport> {
     // journal exists yet.
     match oj.journal_exists_checked() {
         Ok(false) => {
+            if let Some(seen) = request.newest_seen {
+                if seen != 0 {
+                    return Reply::from(Err(super::undo::moved_on(&[], seen, 0)));
+                }
+            }
             let empty = BTreeMap::new();
             return Reply::from(Err(Error::new(
                 ErrorCode::UnknownName,
@@ -1258,6 +1263,12 @@ fn undo_original_inner(
     let entries = entries.unwrap_or_default();
     if let Some(entry) = pending(&entries) {
         return Err(left_pending(entry));
+    }
+    let newest = entries.last().map_or(0, |e| e.entry);
+    if let Some(seen) = request.newest_seen {
+        if seen != newest {
+            return Err(super::undo::moved_on(&entries, seen, newest));
+        }
     }
     let fates = fates(&entries);
     let wanted = request.change_set;

@@ -646,6 +646,7 @@ fn revising_original_ascii_and_binary_dxf_preserves_format_and_supports_journal_
         let u = undo(&UndoRequest {
             set: orig.clone(),
             change_set: 1,
+            newest_seen: None,
             dry_run: false,
         });
         assert!(u.ok, "{name}: {u:?}");

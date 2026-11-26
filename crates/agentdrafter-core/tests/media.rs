@@ -622,6 +622,7 @@ fn change_set_imageattach_pdfattach_transform_and_undo_on_set_and_original_dwg()
     let undone = undo(&UndoRequest {
         set: set_dir.clone(),
         change_set: moved.result.as_ref().unwrap().journal_entry.unwrap(),
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{undone:?}");

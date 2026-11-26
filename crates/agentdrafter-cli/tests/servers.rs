@@ -846,6 +846,13 @@ fn an_open_event_stream_reports_a_guide_given_and_each_step_landing() {
     assert!(steps[1].get("completed_by").is_none(), "{next}");
     assert!(steps[1].get("landed").is_none(), "{next}");
     assert_eq!(steps[2]["points"][0]["waits_on"], 2, "{next}");
+
+    // Ended in the core: the event stream drops the guide from `guides`.
+    let (status, ended) = http.run_as_viewer("end-guide", &json!({"set": "demo-set", "guide": 1}));
+    assert_eq!(status, 200, "{ended}");
+    assert_eq!(ended["result"]["ended_by"], "drafter", "{ended}");
+    let next = events.next_guides(Duration::from_secs(10));
+    assert_eq!(next["result"]["guides"], json!([]), "{next}");
 }
 
 #[test]

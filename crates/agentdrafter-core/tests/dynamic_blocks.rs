@@ -393,6 +393,7 @@ fn set_block_state_properties_and_insert_block_with_state_and_undo() {
     let undo_reply = undo(&UndoRequest {
         set: dir.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undo_reply.ok, "undo dynamic block changes: {undo_reply:#?}");

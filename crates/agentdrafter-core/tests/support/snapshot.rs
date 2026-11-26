@@ -57,12 +57,18 @@ pub fn snapshot(set: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
                     .collect();
                 found.insert(path.clone(), Some(normalized.join("\n").into_bytes()));
             } else if path.starts_with(&guides) && path.extension().is_some_and(|e| e == "json") {
-                // A guide's record, without the time it was given, its
-                // top-level `at`: the one thing two interfaces may record
-                // differently.
+                // A guide's record, without the times it was given or ended:
+                // the only things two interfaces may record differently.
                 let mut record: serde_json::Value =
                     serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-                assert!(record.as_object_mut().unwrap().remove("at").is_some());
+                let map = record.as_object_mut().unwrap();
+                assert!(map.remove("at").is_some());
+                if let Some(ended) = map
+                    .get_mut("ended")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    assert!(ended.remove("at").is_some());
+                }
                 found.insert(path.clone(), Some(record.to_string().into_bytes()));
             } else {
                 found.insert(path.clone(), Some(fs::read(&path).unwrap()));

@@ -562,6 +562,7 @@ fn undo_puts_the_set_back_byte_for_byte_and_a_dry_run_writes_nothing() {
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);
@@ -767,6 +768,7 @@ fn a_copy_shares_its_sources_row_values_until_one_is_set_and_then_takes_its_own(
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);

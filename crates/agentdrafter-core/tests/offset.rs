@@ -205,6 +205,7 @@ fn offset_all_six_curve_kinds_builds_draws_and_undoes() {
     let undone = undo(&UndoRequest {
         set: dir.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{undone:?}");

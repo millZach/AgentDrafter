@@ -667,6 +667,7 @@ objects:
     let undone = undo(&UndoRequest {
         set: dir.clone(),
         change_set: cs_id,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "undo failed: {undone:?}");

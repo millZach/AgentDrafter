@@ -1046,7 +1046,20 @@ pub(super) fn commit_change_set(
     replacements: Vec<Replacement>,
     keeping: Option<&Keeping>,
 ) -> Result<u64, Error> {
-    let _lock = lock(folder)?;
+    let lock = lock(folder)?;
+    commit_change_set_locked(folder, &lock, change_set, landing, replacements, keeping)
+}
+
+/// Like [`commit_change_set`], while the caller already holds the set's
+/// journal lock, `_locked`.
+pub(super) fn commit_change_set_locked(
+    folder: &Path,
+    _locked: &File,
+    change_set: &Value,
+    landing: Landing,
+    replacements: Vec<Replacement>,
+    keeping: Option<&Keeping>,
+) -> Result<u64, Error> {
     let (text, entries_before) = read_text(folder)?.unzip();
     let entries_before = entries_before.unwrap_or_default();
     if let Some(entry) = pending(&entries_before) {

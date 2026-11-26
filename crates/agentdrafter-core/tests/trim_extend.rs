@@ -191,6 +191,7 @@ fn trim_split_block_boundary_extend_and_undo() {
     let undone = undo(&UndoRequest {
         set: dir.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{undone:?}");

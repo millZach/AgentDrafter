@@ -2051,6 +2051,7 @@ fn original_change_journal_stack_undo_and_dry_run() {
     let dry = undo(&UndoRequest {
         set: orig.clone(),
         change_set: 1,
+        newest_seen: None,
         dry_run: true,
     });
     assert!(dry.ok, "{dry:?}");
@@ -2069,6 +2070,7 @@ fn original_change_journal_stack_undo_and_dry_run() {
     let u = undo(&UndoRequest {
         set: orig.clone(),
         change_set: 1,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(u.ok, "{u:?}");
@@ -2101,6 +2103,7 @@ fn original_change_journal_stack_undo_and_dry_run() {
     let again = undo(&UndoRequest {
         set: orig,
         change_set: 1,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(!again.ok);
@@ -2148,6 +2151,7 @@ fn original_undo_refuses_hand_edited_missing_symlink_and_original_file() {
     let u = undo(&UndoRequest {
         set: orig.clone(),
         change_set: 1,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(!u.ok);
@@ -2162,6 +2166,7 @@ fn original_undo_refuses_hand_edited_missing_symlink_and_original_file() {
     let u2 = undo(&UndoRequest {
         set: orig.clone(),
         change_set: 1,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(!u2.ok);
@@ -2180,6 +2185,7 @@ fn original_undo_refuses_hand_edited_missing_symlink_and_original_file() {
         let u3 = undo(&UndoRequest {
             set: orig.clone(),
             change_set: 1,
+            newest_seen: None,
             dry_run: false,
         });
         assert!(!u3.ok);
@@ -2206,6 +2212,7 @@ fn original_undo_refuses_hand_edited_missing_symlink_and_original_file() {
     let u4 = undo(&UndoRequest {
         set: orig.clone(),
         change_set: 1,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(!u4.ok);
@@ -2377,6 +2384,7 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
         undo(&UndoRequest {
             set: orig.clone(),
             change_set: 2,
+            newest_seen: None,
             dry_run: false,
         })
     }));
@@ -2596,6 +2604,7 @@ fn original_accept_checks_newest_seen_blocks_undo_and_stamps_outputs_issued() {
     let u = undo(&UndoRequest {
         set: orig.clone(),
         change_set: 1,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(!u.ok);
@@ -2674,6 +2683,7 @@ fn original_accept_checks_newest_seen_blocks_undo_and_stamps_outputs_issued() {
     let u3 = undo(&UndoRequest {
         set: orig.clone(),
         change_set: 3,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(u3.ok, "{u3:?}");
@@ -2776,6 +2786,7 @@ fn original_dry_run_undo_and_accept_refuse_pending_and_never_write() {
         let u = undo(&UndoRequest {
             set: orig.clone(),
             change_set: 1,
+            newest_seen: None,
             dry_run: dry,
         });
         assert!(!u.ok);
@@ -2849,6 +2860,7 @@ fn original_dry_run_undo_and_accept_refuse_pending_and_never_write() {
     let dry_u = undo(&UndoRequest {
         set: orig.clone(),
         change_set: 1,
+        newest_seen: None,
         dry_run: true,
     });
     assert!(!dry_u.ok);
@@ -3087,6 +3099,7 @@ fn original_journal_and_prune_refuse_symlinks_without_modifying_targets() {
     let u = undo(&UndoRequest {
         set: orig.clone(),
         change_set: 1,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(!u.ok, "undo with symlinked undo-states must be refused");
@@ -3378,6 +3391,7 @@ fn original_symlink_source_resolves_consistently_and_stamps_refuse_symlinks() {
     let u = undo(&UndoRequest {
         set: sym_orig.clone(),
         change_set: 1,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(u.ok, "{u:?}");
@@ -3547,6 +3561,7 @@ fn original_undo_refuses_symlinked_output_subdirectory() {
     let u = undo(&UndoRequest {
         set: orig,
         change_set: 1,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(
@@ -3660,6 +3675,7 @@ fn original_external_output_refuses_symlinked_ancestor_in_undo_and_stamps() {
     let u = undo(&UndoRequest {
         set: orig,
         change_set: 3,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(
@@ -3801,6 +3817,7 @@ fn successive_revisions_accumulate_edits_and_stack_undo_restores_each_step() {
     let u2 = undo(&UndoRequest {
         set: orig.clone(),
         change_set: 2,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(u2.ok, "{u2:?}");
@@ -3812,6 +3829,7 @@ fn successive_revisions_accumulate_edits_and_stack_undo_restores_each_step() {
     let u1 = undo(&UndoRequest {
         set: orig.clone(),
         change_set: 1,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(u1.ok, "{u1:?}");

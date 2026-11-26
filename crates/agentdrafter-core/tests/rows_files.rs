@@ -411,6 +411,7 @@ fn a_change_set_on_sheets_of_two_rows_files_writes_each_and_undoes_byte_for_byte
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: report.journal_entry.unwrap(),
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);

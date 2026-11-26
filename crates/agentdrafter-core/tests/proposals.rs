@@ -365,6 +365,7 @@ fn undoing_a_kept_proposal_does_not_bring_it_back() {
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);
@@ -388,6 +389,7 @@ fn an_undo_passes_over_a_discard_and_a_discard_is_not_undone() {
     let refused = undo(&UndoRequest {
         set: set.clone(),
         change_set: line,
+        newest_seen: None,
         dry_run: false,
     });
     let error = refused.error.unwrap();
@@ -397,6 +399,7 @@ fn an_undo_passes_over_a_discard_and_a_discard_is_not_undone() {
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: first,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);

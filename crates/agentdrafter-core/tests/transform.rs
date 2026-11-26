@@ -488,6 +488,7 @@ fn a_dry_run_writes_nothing_and_undo_puts_the_set_back_byte_for_byte() {
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);
@@ -694,6 +695,7 @@ fn rotate_reference_and_copy_options_match_autocad() {
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: report.journal_entry.unwrap(),
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);
@@ -777,6 +779,7 @@ fn scale_reference_and_copy_options_match_autocad() {
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: report.journal_entry.unwrap(),
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);

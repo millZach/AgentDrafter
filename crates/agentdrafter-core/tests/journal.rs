@@ -68,6 +68,7 @@ fn undo_of(set: &Path, change_set: u64, dry_run: bool) -> Reply<UndoReport> {
     undo(&UndoRequest {
         set: set.to_owned(),
         change_set,
+        newest_seen: None,
         dry_run,
     })
 }

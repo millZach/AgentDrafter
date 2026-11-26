@@ -31,7 +31,10 @@ use super::fillet_chamfer::{
     ChamferSpec,
 };
 use super::from_dimension::dimension_from;
-use super::journal::{commit_change_set, HowChanged, Keeping, Landing, ObjectChanged, SheetFailed};
+use super::journal::{
+    commit_change_set, commit_change_set_locked, HowChanged, Keeping, Landing, ObjectChanged,
+    SheetFailed,
+};
 use super::offset::{compute_offset, object_to_record_keys, OffsetBy, OffsetSide};
 use super::operations::{
     op_error, read_change_set, resolve_rotate_angle, resolve_scale_factor, AddTo, BlockOp, Body,
@@ -677,6 +680,12 @@ pub(super) struct Kept {
     pub objects: Vec<ObjectChanged>,
 }
 
+/// Context for a guided change set applied under the set's journal lock.
+pub(super) struct GuidedRun<'a> {
+    pub guided: &'a mut super::guides::Guided,
+    pub locked: Option<&'a fs::File>,
+}
+
 /// Applies the change set. `attempted` is given what it did to its sheets
 /// before its files are put in place, so a commit that fails is recorded as
 /// a failed attempt with the sheets it touched. A dry run gives `kept`
@@ -688,6 +697,7 @@ pub(super) fn apply(
     kept: Option<&mut Kept>,
     keeping: Option<&Keeping>,
     whole: bool,
+    mut guided: Option<GuidedRun<'_>>,
 ) -> Result<ChangeReport, Error> {
     let files = SetFiles::load(&request.set)?;
     let change_set = read_change_set(&request.change_set, files.units)?;
@@ -904,73 +914,6 @@ pub(super) fn apply(
         kept.objects = objects_changed(ops, &included, &done, &op_sheets, &files);
     }
 
-    // The records, the DWGs and the mark land together, with the change
-    // set's undo state and its entry in the journal, or nothing does. A
-    // change set that failed on every sheet it touched changed nothing, and
-    // is recorded as a failed attempt.
-    let mut journal_entry = None;
-    if !request.dry_run && (!landed.is_empty() || failed.is_empty()) {
-        let mut replacements: Vec<Replacement> = records
-            .iter()
-            .map(|(path, text)| Replacement {
-                path: path.clone(),
-                bytes: Some(text.as_bytes().to_vec()),
-                what: "the record",
-            })
-            .collect();
-        replacements.extend(dwgs.iter().map(|(k, path)| Replacement {
-            path: path.clone(),
-            bytes: Some(prepared[k].bytes.clone()),
-            what: "the DWG",
-        }));
-        if failures != mark {
-            replacements.push(Replacement {
-                path: files.folder.join(MARK_FILE),
-                bytes: (!failures.is_empty()).then(|| mark_text(&failures).into_bytes()),
-                what: "the set's inconsistent mark",
-            });
-        }
-        let landing = Landing {
-            objects: objects_changed(ops, &included, &done, &op_sheets, &files),
-            landed_on: files.names(&landed),
-            failed_on: failed
-                .iter()
-                .map(|(&k, e)| SheetFailed {
-                    sheet: files.name(k).to_owned(),
-                    code: code_text(e),
-                    message: e.message.clone(),
-                })
-                .collect(),
-        };
-        *attempted = Some(landing.clone());
-        journal_entry = Some(commit_change_set(
-            &files.folder,
-            &request.change_set,
-            landing,
-            replacements,
-            keeping,
-        )?);
-    }
-
-    let written: BTreeSet<usize> = if request.dry_run {
-        BTreeSet::new()
-    } else {
-        dwgs.iter().map(|(k, _)| *k).collect()
-    };
-    let sheets: Vec<SheetChange> = touched
-        .iter()
-        .map(|&k| SheetChange {
-            sheet: files.name(k).to_owned(),
-            template: files.rows[k].template.clone(),
-            ok: !failed.contains_key(&k),
-            operations: (0..n).filter(|&i| op_sheets[i].contains(&k)).collect(),
-            fixed: cleared.contains(&k),
-            dwg_written: written.contains(&k),
-            result: prepared.get(&k).map(|p| p.report.clone()),
-            error: failed.get(&k).cloned(),
-            notices: notices.remove(&k).unwrap_or_default(),
-        })
-        .collect();
     let operations: Vec<OperationOutcome> = ops
         .iter()
         .map(|op| {
@@ -1051,6 +994,93 @@ pub(super) fn apply(
             }
         })
         .collect();
+
+    // Check against the guide's expected operation using the exact outcomes
+    // about to commit, while the journal lock is held, so the journal mark's
+    // `completes` and the reply's `guide` always agree.
+    let guide_checked = guided.as_mut().map(|run| {
+        let checked = super::guides::checked_outcomes(run.guided, landed.len(), &operations);
+        if !request.dry_run {
+            super::guides::mark_completes(run.guided, checked.completes);
+        }
+        checked
+    });
+
+    // The records, the DWGs and the mark land together, with the change
+    // set's undo state and its entry in the journal, or nothing does. A
+    // change set that failed on every sheet it touched changed nothing, and
+    // is recorded as a failed attempt.
+    let mut journal_entry = None;
+    if !request.dry_run && (!landed.is_empty() || failed.is_empty()) {
+        let mut replacements: Vec<Replacement> = records
+            .iter()
+            .map(|(path, text)| Replacement {
+                path: path.clone(),
+                bytes: Some(text.as_bytes().to_vec()),
+                what: "the record",
+            })
+            .collect();
+        replacements.extend(dwgs.iter().map(|(k, path)| Replacement {
+            path: path.clone(),
+            bytes: Some(prepared[k].bytes.clone()),
+            what: "the DWG",
+        }));
+        if failures != mark {
+            replacements.push(Replacement {
+                path: files.folder.join(MARK_FILE),
+                bytes: (!failures.is_empty()).then(|| mark_text(&failures).into_bytes()),
+                what: "the set's inconsistent mark",
+            });
+        }
+        let landing = Landing {
+            objects: objects_changed(ops, &included, &done, &op_sheets, &files),
+            landed_on: files.names(&landed),
+            failed_on: failed
+                .iter()
+                .map(|(&k, e)| SheetFailed {
+                    sheet: files.name(k).to_owned(),
+                    code: code_text(e),
+                    message: e.message.clone(),
+                })
+                .collect(),
+        };
+        *attempted = Some(landing.clone());
+        let recorded_cs = guided
+            .as_ref()
+            .map_or(&request.change_set, |run| &run.guided.request.change_set);
+        let entry = match guided.as_ref().and_then(|run| run.locked) {
+            Some(lock) => commit_change_set_locked(
+                &files.folder,
+                lock,
+                recorded_cs,
+                landing,
+                replacements,
+                keeping,
+            )?,
+            None => commit_change_set(&files.folder, recorded_cs, landing, replacements, keeping)?,
+        };
+        journal_entry = Some(entry);
+    }
+
+    let written: BTreeSet<usize> = if request.dry_run {
+        BTreeSet::new()
+    } else {
+        dwgs.iter().map(|(k, _)| *k).collect()
+    };
+    let sheets: Vec<SheetChange> = touched
+        .iter()
+        .map(|&k| SheetChange {
+            sheet: files.name(k).to_owned(),
+            template: files.rows[k].template.clone(),
+            ok: !failed.contains_key(&k),
+            operations: (0..n).filter(|&i| op_sheets[i].contains(&k)).collect(),
+            fixed: cleared.contains(&k),
+            dwg_written: written.contains(&k),
+            result: prepared.get(&k).map(|p| p.report.clone()),
+            error: failed.get(&k).cloned(),
+            notices: notices.remove(&k).unwrap_or_default(),
+        })
+        .collect();
     let failed_names: Vec<&str> = failed.keys().map(|&k| files.name(k)).collect();
     let message = message(
         request.dry_run,
@@ -1079,7 +1109,7 @@ pub(super) fn apply(
             .collect(),
         inconsistent: (!failures.is_empty()).then(|| mark_report(&files.folder, &failures)),
         checks: None,
-        guide: None,
+        guide: guide_checked,
     })
 }
 
@@ -14421,23 +14451,25 @@ fn guide_op(
         )
         .at_field(here));
     }
-    // The sheet is read as it now stands, as a dry run builds it, so an
-    // operation that leaves it unreadable, such as one naming a layer it
-    // does not have, is the step's.
+    // Every sheet the operation reaches is read and prepared, as a dry run
+    // builds it, so an operation that leaves a sheet unreadable or whose
+    // sibling sheet's DWG cannot be written is refused as the step's.
     let rows = at.rows_now()?;
-    sheet_record(at, &rows, k, &mut Vec::new()).map_err(|e| {
-        let key = e
-            .field
-            .as_deref()
-            .and_then(|f| f.rsplit('.').next())
-            .filter(|key| op.get(*key).is_some())
-            .map(|key| format!("{here}.{key}"));
-        Error {
-            message: format!("step {step}'s operation: {}", e.message),
-            field: key.or(Some(here.clone())),
-            ..e
-        }
-    })?;
+    for &sheet_k in &applied.sheets {
+        validate(at, &rows, sheet_k, settings, &mut Vec::new()).map_err(|e| {
+            let key = e
+                .field
+                .as_deref()
+                .and_then(|f| f.rsplit('.').next())
+                .filter(|key| op.get(*key).is_some())
+                .map(|key| format!("{here}.{key}"));
+            Error {
+                message: format!("step {step}'s operation: {}", e.message),
+                field: key.or(Some(here.clone())),
+                ..e
+            }
+        })?;
+    }
     let name = operation.spec.name;
     // An object of a template's, added or copied through another sheet
     // built from it, is on the guide's sheet with the same ID after its

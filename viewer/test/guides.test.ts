@@ -206,6 +206,17 @@ test('a late reply for another guide’s step leaves this run as it was', () => 
   assert.equal(landed(run, guide, other, 12), run);
 });
 
+test('stopping and restarting the same guide while an edit is pending ignores the stale reply', () => {
+  const first = stepDone(startRun(guide), guide);
+  const restarted = stepDone(startRun(guide), guide);
+  assert.notEqual(first.runId, restarted.runId);
+  const stale = { guide: 1, step: 2, of: 4, completes: true, message: 'That completes step 2 of 4.' };
+  const after = landed(restarted, guide, stale, 12, first.runId);
+  assert.equal(after, restarted);
+  assert.equal(after.at, 1);
+  assert.deepEqual(after.entries, []);
+});
+
 test('Undo it is not pressed through edits that landed after the change set', () => {
   assert.equal(undoItBlocked(7, [5, 7]), null);
   const note = undoItBlocked(7, [5, 7, 8, 9]);

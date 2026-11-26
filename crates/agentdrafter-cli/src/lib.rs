@@ -50,13 +50,14 @@ const OPERATIONS_USAGE: &str = "agentdrafter operations";
 const CHANGE_USAGE: &str = "agentdrafter change <drawing-set-folder | original.dwg> <change-set.json | -> [--output <revision.dwg>] [--allow-loss] [--expected-original-sha256 <sha256>] [--dry-run] [--fonts <folder>]... [--no-system-fonts] [--plot-style <name>] [--plot-styles <folder>]... [--no-pdf]";
 const JOURNAL_USAGE: &str = "agentdrafter journal <drawing-set-folder | original.dwg>";
 const UNDO_USAGE: &str =
-    "agentdrafter undo <drawing-set-folder | original.dwg> <change-set> [--dry-run]";
+    "agentdrafter undo <drawing-set-folder | original.dwg> <change-set> [--newest-seen <entry>] [--dry-run]";
 const ACCEPT_USAGE: &str = "agentdrafter accept <drawing-set-folder | original.dwg> [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]... [--no-system-fonts]";
 const PROPOSE_USAGE: &str = "agentdrafter propose <drawing-set-folder> <change-set.json | -> [--by <who>] [--fonts <folder>]... [--no-system-fonts]";
 const PROPOSALS_USAGE: &str = "agentdrafter proposals <drawing-set-folder>";
 const GUIDE_USAGE: &str = "agentdrafter guide <drawing-set-folder> <guide.json | -> [--by <who>] [--fonts <folder>]... [--no-system-fonts]";
 const GUIDES_USAGE: &str =
     "agentdrafter guides <drawing-set-folder> [--fonts <folder>]... [--no-system-fonts]";
+const END_GUIDE_USAGE: &str = "agentdrafter end-guide <drawing-set-folder> <guide> [--by <who>]";
 const KEEP_USAGE: &str = "agentdrafter keep <drawing-set-folder> <proposal> [--by <who>] [--fonts <folder>]... [--no-system-fonts]";
 const DISCARD_USAGE: &str = "agentdrafter discard <drawing-set-folder> <proposal> [--by <who>]";
 const LOOK_AT_USAGE: &str =
@@ -122,6 +123,7 @@ fn cli_form(command: &str) -> Option<(&'static str, Parse)> {
         "discard" => (DISCARD_USAGE, parse_discard),
         "guide" => (GUIDE_USAGE, parse_guide),
         "guides" => (GUIDES_USAGE, parse_guides),
+        "end-guide" => (END_GUIDE_USAGE, parse_end_guide),
         "look-at" => (LOOK_AT_USAGE, parse_look_at),
         "looking-at" => (LOOKING_AT_USAGE, parse_looking_at),
         "check" => (CHECK_USAGE, parse_check),
@@ -782,13 +784,29 @@ fn parse_journal(args: Args) -> Result<Value, Error> {
 
 /// Reads `undo`'s arguments: the set's folder, the change set's entry in
 /// the journal, and the options.
-fn parse_undo(args: Args) -> Result<Value, Error> {
+fn parse_undo(mut args: Args) -> Result<Value, Error> {
     let usage = |message: String| Error::usage(format!("{message}; usage: {UNDO_USAGE}"));
     let mut given: Vec<OsString> = Vec::new();
+    let mut newest_seen: Option<u64> = None;
     let mut dry_run = false;
-    for arg in args {
+    while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--dry-run") => dry_run = true,
+            Some("--newest-seen") => {
+                let text = args
+                    .next()
+                    .ok_or_else(|| usage("--newest-seen needs a journal entry's number".into()))?;
+                let entry = entry_number(&text).ok_or_else(|| {
+                    usage(format!(
+                        "--newest-seen takes the journal's newest entry the caller has seen, by \
+                         its number, such as 7, not `{}`",
+                        text.to_string_lossy()
+                    ))
+                })?;
+                if newest_seen.replace(entry).is_some() {
+                    return Err(usage("--newest-seen is given twice".into()));
+                }
+            }
             Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
                 return Err(usage(format!("undo takes no option `{flag}`")))
             }
@@ -815,6 +833,7 @@ fn parse_undo(args: Args) -> Result<Value, Error> {
     let request = UndoRequest {
         set: PathBuf::from(set),
         change_set,
+        newest_seen,
         dry_run,
     };
     input_of(request, FontOptions::default())
@@ -884,6 +903,7 @@ enum Second {
     ChangeSet,
     Proposal,
     Guide,
+    GuideNumber,
 }
 
 /// Reads the arguments of `propose`, `keep` and `discard`: the set's
@@ -928,6 +948,7 @@ fn parse_proposing(
         Second::ChangeSet => "a change set",
         Second::Proposal => "a proposal's number",
         Second::Guide => "a guide",
+        Second::GuideNumber => "a guide's number",
     };
     let [set, then] = <[OsString; 2]>::try_from(given).map_err(|given| {
         usage(format!(
@@ -951,6 +972,15 @@ fn parse_proposing(
             })?;
             input["proposal"] = json!(number);
         }
+        Second::GuideNumber => {
+            let number = entry_number(&then).ok_or_else(|| {
+                usage(format!(
+                    "{command} takes the guide by its number, such as 1, not `{}`",
+                    then.to_string_lossy()
+                ))
+            })?;
+            input["guide"] = json!(number);
+        }
     }
     if let Some(by) = by {
         input["by"] = Value::String(by);
@@ -972,6 +1002,16 @@ fn parse_discard(args: Args) -> Result<Value, Error> {
 
 fn parse_guide(args: Args) -> Result<Value, Error> {
     parse_proposing(args, "guide", GUIDE_USAGE, Second::Guide, true)
+}
+
+fn parse_end_guide(args: Args) -> Result<Value, Error> {
+    parse_proposing(
+        args,
+        "end-guide",
+        END_GUIDE_USAGE,
+        Second::GuideNumber,
+        false,
+    )
 }
 
 /// Reads `guides`' arguments: the set's folder, and the font options.

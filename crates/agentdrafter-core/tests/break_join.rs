@@ -240,6 +240,7 @@ fn break_wire_crossing_with_snap_split_circle_join_and_undo() {
     let undone = undo(&UndoRequest {
         set: dir.clone(),
         change_set: report.journal_entry.unwrap(),
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{undone:#?}");

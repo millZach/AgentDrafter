@@ -77,9 +77,10 @@ pub(crate) use apply::fit_library_inserts;
 #[cfg(test)]
 pub(crate) use commit::{rollback_placed_new_files, STOP_AT};
 pub use guides::{
-    guide_with, guides_with, GuideChecked, GuideGiven, GuideListed, GuideMark, GuidePoint,
-    GuideReport, GuideRequest, GuidesReport, GuidesRequest, PointListed, Setting, SnapNamed,
-    StepGiven, StepListed, GUIDES_FOLDER, TOOLS as GUIDE_TOOLS,
+    end_guide, guide_with, guides_with, EndGuideReport, EndGuideRequest, GuideChecked, GuideEnded,
+    GuideGiven, GuideListed, GuideMark, GuidePoint, GuideReport, GuideRequest, GuidesReport,
+    GuidesRequest, PointListed, Setting, SnapNamed, StepGiven, StepListed, GUIDES_FOLDER,
+    TOOLS as GUIDE_TOOLS,
 };
 pub(crate) use guides::{LONGEST_LABEL, LONGEST_SAY, LONGEST_TITLE, MOST_STEPS};
 pub(crate) use history::FilesAsOf;
@@ -506,43 +507,51 @@ fn land(
     settings: &Settings,
     keeping: Option<&journal::Keeping>,
 ) -> Reply<ChangeReport> {
-    // A change set sent for a guide's step names it under `guide`: the step
-    // is checked to be one of the guide's, and what its own operation would
-    // do now is worked out first, on the set as it is, to check it against.
+    // A change set sent for a guide's step holds the journal lock across
+    // working out the step's expected outcome, applying the change set and
+    // committing it, so no concurrent edit can move a snap target between the
+    // check and the commit.
+    let locked = if !request.dry_run && request.change_set.get("guide").is_some() {
+        if let Err(error) =
+            crate::description::read_set_settings(&request.set.join(crate::set::SET_SETTINGS_FILE))
+        {
+            return Reply::from(Err(error));
+        }
+        if let Err(error) = guides::check_mark(&request.set, &request.change_set) {
+            return Reply::from(Err(error));
+        }
+        match journal::lock(&request.set) {
+            Ok(lock) => Some(lock),
+            Err(error) => return Reply::from(Err(error)),
+        }
+    } else {
+        None
+    };
     let mut guided = match guides::prepare(request, settings) {
         Ok(guided) => guided,
         Err(error) => return Reply::from(Err(error)),
     };
-    // Whether it completes the step is checked on a dry run first, so its
-    // journal entry records it: only the change set that completes a step
-    // names, for the steps after it, what the step made.
-    if let Some(guided) = guided.as_mut().filter(|_| !request.dry_run) {
-        let dry = ChangeRequest {
-            dry_run: true,
-            ..guided.request.clone()
-        };
-        let would = apply::apply(&dry, settings, &mut None, None, keeping, keeping.is_some());
-        let completes = would.is_ok_and(|report| guides::checked(guided, &report).completes);
-        guides::mark_completes(guided, completes);
-    }
-    let request = guided.as_ref().map_or(request, |g| &g.request);
+    let req = guided.as_ref().map_or(request, |g| &g.request).clone();
     let mut attempted = None;
     let mut outcome = apply::apply(
-        request,
+        &req,
         settings,
         &mut attempted,
         None,
         keeping,
         keeping.is_some(),
+        guided.as_mut().map(|guided| apply::GuidedRun {
+            guided,
+            locked: locked.as_ref(),
+        }),
     );
-    journal::record_failed_attempt(request, &mut outcome, attempted, keeping);
+    drop(locked);
+    let req = guided.as_ref().map_or(request, |g| &g.request);
+    journal::record_failed_attempt(req, &mut outcome, attempted, keeping);
     // Once the change set and its journal entry are written, the checker
     // reads the sheets it landed on back from the saved files.
     if let Ok(report) = &mut outcome {
-        report.checks = checks(request, report, settings);
-        if let Some(guided) = &guided {
-            report.guide = Some(guides::checked(guided, report));
-        }
+        report.checks = checks(req, report, settings);
     }
     match outcome {
         Ok(report) if report.failed > 0 => {
@@ -585,7 +594,15 @@ pub(crate) fn preview(
         dry_run: true,
     };
     let mut kept = apply::Kept::default();
-    let report = apply::apply(&request, settings, &mut None, Some(&mut kept), None, whole)?;
+    let report = apply::apply(
+        &request,
+        settings,
+        &mut None,
+        Some(&mut kept),
+        None,
+        whole,
+        None,
+    )?;
     Ok(Previewed {
         report,
         files: Arc::new(FilesAsOf::with_records(set, &kept.records)),

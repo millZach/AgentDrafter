@@ -278,6 +278,7 @@ fn explode_insert_polyline_hatch_dimension_mleader_table_preserves_display_and_u
     let undone = undo(&UndoRequest {
         set: dir.clone(),
         change_set: report.journal_entry.unwrap(),
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{undone:#?}");

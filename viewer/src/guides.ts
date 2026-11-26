@@ -119,6 +119,8 @@ export interface Note {
 
 /** A guide running, on the page. */
 export interface GuideRun {
+  /** Monotonic ID for this start of the guide, so a late reply from an earlier run is ignored. */
+  runId: number;
   guide: number;
   /** The step running, from 0. */
   at: number;
@@ -155,9 +157,13 @@ export const toolLabel = (tool: string): string => TOOL_WORDS[tool]?.label ?? to
 
 const finished = (s: StepStatus) => s === 'done' || s === 'forme';
 
+let nextRunId = 0;
+
 /** A guide started: its first step running, nothing landed. */
 export function startRun(guide: Guide): GuideRun {
+  nextRunId += 1;
   return {
+    runId: nextRunId,
     guide: guide.guide,
     at: 0,
     status: guide.steps.map(() => 'todo'),
@@ -244,9 +250,9 @@ export function stopRun(run: GuideRun): GuideRun {
  * moves the guide on; one that does not lands as the drafter's own edit,
  * and the note offers to undo it. The guide waits.
  */
-export function landed(run: GuideRun, guide: Guide, checked: GuideChecked, entry: number | undefined): GuideRun {
-  // A late reply for another guide's step is that guide's, not this run's.
-  if (checked.guide !== run.guide) return run;
+export function landed(run: GuideRun, guide: Guide, checked: GuideChecked, entry: number | undefined, sentRunId?: number): GuideRun {
+  // A late reply for another guide's step, or an earlier run of the same guide, is not this run's.
+  if (checked.guide !== run.guide || (sentRunId !== undefined && sentRunId !== run.runId)) return run;
   const entries = entry !== undefined ? [...run.entries, entry] : run.entries;
   const next = { ...run, entries };
   if (checked.step !== run.at + 1 || run.end) return next;
