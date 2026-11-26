@@ -421,36 +421,137 @@ fn set_holding(path: &Path) -> Option<PathBuf> {
 }
 
 /// Moves each of `found` that is a leftover into [`SUPERSEDED_FOLDER`],
-/// made only when there is one to move. When that folder is a link or a
-/// junction, or cannot be made, nothing is moved and each leftover carries
-/// the error.
+/// made only when there is one to move. A sheet's leftover outputs (such as
+/// its DWG and PDF) move together: if one cannot be moved, any sibling already
+/// moved for that sheet is moved back so the pair is never split (#236). When
+/// `superseded/` is a link or a junction, or cannot be made, nothing is moved
+/// and each leftover carries the error.
 fn clean_up(set: &SetOutputs, found: Vec<Leftover>) -> Vec<Leftover> {
+    clean_up_with(
+        found,
+        &set.output.join(SUPERSEDED_FOLDER),
+        |kind, path| still_a_leftover(set, kind, path),
+        supersede,
+    )
+}
+
+fn clean_up_with<Check, Move>(
+    mut found: Vec<Leftover>,
+    folder: &Path,
+    mut check: Check,
+    mut mover: Move,
+) -> Vec<Leftover>
+where
+    Check: FnMut(LeftoverKind, &Path) -> Result<(), Error>,
+    Move: FnMut(&Path, &str, &Path) -> Result<PathBuf, Error>,
+{
     if found.iter().all(|leftover| leftover.unreadable) {
         return found;
     }
-    let folder = set.output.join(SUPERSEDED_FOLDER);
-    let ready = superseded_folder(&folder);
+    let ready = superseded_folder(folder);
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (idx, leftover) in found.iter().enumerate() {
+        if leftover.unreadable {
+            continue;
+        }
+        if let Some((_, indices)) = groups.iter_mut().find(|(s, _)| s == &leftover.sheet) {
+            indices.push(idx);
+        } else {
+            groups.push((leftover.sheet.clone(), vec![idx]));
+        }
+    }
+    for (sheet, indices) in groups {
+        if let Err(err) = &ready {
+            for idx in indices {
+                found[idx].error = Some(err.clone());
+            }
+            continue;
+        }
+        // Check every movable output of this sheet before moving any of them,
+        // so a changed or missing sibling leaves the whole sheet untouched.
+        let mut first_failed: Option<String> = None;
+        for &idx in &indices {
+            let path = PathBuf::from(&found[idx].file);
+            if let Err(err) = check(found[idx].kind, &path) {
+                if first_failed.is_none() {
+                    first_failed = Some(file_name_text(&path));
+                }
+                found[idx].error = Some(err);
+            }
+        }
+        if let Some(failed_name) = first_failed {
+            for &idx in &indices {
+                if found[idx].error.is_none() {
+                    let path = PathBuf::from(&found[idx].file);
+                    found[idx].error = Some(held_together_error(&path, &sheet, &failed_name));
+                }
+            }
+            continue;
+        }
+        // Move each output of the sheet; if any fails, roll back earlier moves
+        // for this sheet so its DWG/DXF and PDF never end up split (#236).
+        let mut moved: Vec<(usize, PathBuf, PathBuf)> = Vec::new();
+        let mut failed: Option<(usize, String)> = None;
+        for (pos, &idx) in indices.iter().enumerate() {
+            let path = PathBuf::from(&found[idx].file);
+            let name = file_name_text(&path);
+            match mover(folder, &name, &path) {
+                Ok(dest) => {
+                    found[idx].moved_to = Some(dest.display().to_string());
+                    moved.push((idx, path, dest));
+                }
+                Err(err) => {
+                    found[idx].error = Some(err);
+                    failed = Some((pos, name));
+                    break;
+                }
+            }
+        }
+        if let Some((failed_pos, failed_name)) = failed {
+            for (prev_idx, orig_path, dest_path) in moved.into_iter().rev() {
+                match move_without_replacing(&dest_path, &orig_path) {
+                    Ok(()) => {
+                        found[prev_idx].moved_to = None;
+                        found[prev_idx].error =
+                            Some(held_together_error(&orig_path, &sheet, &failed_name));
+                    }
+                    Err(e) => {
+                        found[prev_idx].error = Some(
+                            Error::new(
+                                ErrorCode::WriteFailed,
+                                format!(
+                                    "could not be moved back after `{failed_name}` failed to move: {e}"
+                                ),
+                            )
+                            .in_file(&orig_path),
+                        );
+                    }
+                }
+            }
+            for &later_idx in &indices[failed_pos + 1..] {
+                let later_path = PathBuf::from(&found[later_idx].file);
+                found[later_idx].error =
+                    Some(held_together_error(&later_path, &sheet, &failed_name));
+            }
+        }
+    }
     found
-        .into_iter()
-        .map(|mut leftover| {
-            if leftover.unreadable {
-                return leftover;
-            }
-            let path = PathBuf::from(&leftover.file);
-            let moved = ready.clone().and_then(|()| {
-                still_a_leftover(set, leftover.kind, &path)?;
-                let name = path
-                    .file_name()
-                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-                supersede(&folder, &name, &path)
-            });
-            match moved {
-                Ok(to) => leftover.moved_to = Some(to.display().to_string()),
-                Err(error) => leftover.error = Some(error),
-            }
-            leftover
-        })
-        .collect()
+}
+
+fn file_name_text(path: &Path) -> String {
+    path.file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+}
+
+fn held_together_error(path: &Path, sheet: &str, failed_name: &str) -> Error {
+    Error::new(
+        ErrorCode::WriteFailed,
+        format!(
+            "not moved into `{SUPERSEDED_FOLDER}` so `{sheet}`'s outputs stay together after \
+             `{failed_name}` could not be moved"
+        ),
+    )
+    .in_file(path)
 }
 
 /// Makes `folder`, the output folder's [`SUPERSEDED_FOLDER`], when it is
@@ -701,6 +802,109 @@ mod tests {
         move_without_replacing(&from, &free).unwrap();
         assert!(!from.exists());
         assert_eq!(fs::read(&free).unwrap(), b"leftover");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_sibling_move_rolls_back_the_sheets_first_file_without_blocking_other_sheets() {
+        let dir =
+            std::env::temp_dir().join(format!("agentdrafter-pair-rollback-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let sup = dir.join(SUPERSEDED_FOLDER);
+
+        let dwg2 = dir.join("DEMO-002.dwg");
+        let pdf2 = dir.join("DEMO-002.pdf");
+        let dwg3 = dir.join("DEMO-003.dwg");
+        let pdf3 = dir.join("DEMO-003.pdf");
+        fs::write(&dwg2, b"dwg-2").unwrap();
+        fs::write(&pdf2, b"pdf-2").unwrap();
+        fs::write(&dwg3, b"dwg-3").unwrap();
+        fs::write(&pdf3, b"pdf-3").unwrap();
+
+        let item = |path: &Path, kind: LeftoverKind, sheet: &str| Leftover {
+            file: path.display().to_string(),
+            kind,
+            sheet: sheet.to_owned(),
+            unreadable: false,
+            moved_to: None,
+            error: None,
+        };
+        let found = vec![
+            item(&dwg2, LeftoverKind::Dwg, "DEMO-002"),
+            item(&pdf2, LeftoverKind::Pdf, "DEMO-002"),
+            item(&dwg3, LeftoverKind::Dwg, "DEMO-003"),
+            item(&pdf3, LeftoverKind::Pdf, "DEMO-003"),
+        ];
+
+        // Moving DEMO-002.pdf fails after DEMO-002.dwg was already moved:
+        // DEMO-002.dwg must be rolled back so DEMO-002 is not split, while
+        // DEMO-003 still moves cleanly.
+        let out = clean_up_with(
+            found,
+            &sup,
+            |_, _| Ok(()),
+            |folder, name, path| {
+                if name == "DEMO-002.pdf" {
+                    return Err(
+                        Error::new(ErrorCode::WriteFailed, "file is held open").in_file(path)
+                    );
+                }
+                supersede(folder, name, path)
+            },
+        );
+
+        assert!(out[0].moved_to.is_none(), "{:#?}", out[0]);
+        assert!(
+            out[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("DEMO-002.pdf"),
+            "{:#?}",
+            out[0]
+        );
+        assert!(out[1].moved_to.is_none(), "{:#?}", out[1]);
+        assert!(
+            out[1].error.as_ref().unwrap().message.contains("held open"),
+            "{:#?}",
+            out[1]
+        );
+        assert_eq!(fs::read(&dwg2).unwrap(), b"dwg-2");
+        assert_eq!(fs::read(&pdf2).unwrap(), b"pdf-2");
+        assert!(!sup.join("DEMO-002.dwg").exists());
+        assert!(!sup.join("DEMO-002.pdf").exists());
+
+        // DEMO-003 moved intact.
+        assert!(out[2].moved_to.is_some() && out[2].error.is_none());
+        assert!(out[3].moved_to.is_some() && out[3].error.is_none());
+        assert!(!dwg3.exists() && !pdf3.exists());
+        assert_eq!(fs::read(sup.join("DEMO-003.dwg")).unwrap(), b"dwg-3");
+        assert_eq!(fs::read(sup.join("DEMO-003.pdf")).unwrap(), b"pdf-3");
+
+        // Pre-check failure on one sibling holds back the other without moving either.
+        let out2 = clean_up_with(
+            vec![
+                item(&dwg2, LeftoverKind::Dwg, "DEMO-002"),
+                item(&pdf2, LeftoverKind::Pdf, "DEMO-002"),
+            ],
+            &sup,
+            |kind, path| {
+                if kind == LeftoverKind::Pdf {
+                    Err(Error::new(ErrorCode::WriteFailed, "changed").in_file(path))
+                } else {
+                    Ok(())
+                }
+            },
+            supersede,
+        );
+        assert!(out2[0].moved_to.is_none() && out2[0].error.is_some());
+        assert!(out2[1].moved_to.is_none() && out2[1].error.is_some());
+        assert_eq!(fs::read(&dwg2).unwrap(), b"dwg-2");
+        assert_eq!(fs::read(&pdf2).unwrap(), b"pdf-2");
+        assert!(!sup.join("DEMO-002.dwg").exists());
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -591,3 +591,57 @@ fn a_dwg_whose_mark_cannot_be_read_is_listed_as_unreadable() {
     assert_eq!(fs::read(&dwg).unwrap(), &bytes[..256]);
     assert!(!set.join("dwg").join(SUPERSEDED_FOLDER).exists());
 }
+
+/// On Windows, holding a sheet's leftover PDF open without delete sharing
+/// (as a PDF viewer does) prevents moving it; the sheet's DWG must stay with
+/// it rather than moving to `superseded/` alone (#236), while another sheet's
+/// unlocked pair still cleans.
+#[cfg(windows)]
+#[test]
+fn a_locked_pdf_keeps_its_sheets_dwg_from_splitting_into_superseded() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 1;
+
+    let set = demo_set(&scratch("locked-pdf").join("demo-set"));
+    built(&set, None);
+    plotted(&set, None);
+    let dwg_dir = set.join("dwg");
+    let dwg2_bytes = fs::read(dwg_dir.join("DEMO-002.dwg")).unwrap();
+    let pdf2_bytes = fs::read(dwg_dir.join("DEMO-002.pdf")).unwrap();
+
+    take_out(&set, "DEMO-002");
+    take_out(&set, "DEMO-003");
+
+    // Hold DEMO-002.pdf open with read-only sharing (no FILE_SHARE_DELETE).
+    let _held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(dwg_dir.join("DEMO-002.pdf"))
+        .unwrap();
+
+    let reply = build(&set, Some(true));
+    drop(_held);
+
+    assert!(!reply.ok);
+    assert_eq!(reply.error.unwrap().code, ErrorCode::WriteFailed);
+    let leftovers = reply.result.unwrap().leftovers.unwrap();
+    let superseded = dwg_dir.join(SUPERSEDED_FOLDER);
+
+    // DEMO-002 stayed together in dwg/ and nothing of DEMO-002 is in superseded/.
+    assert_eq!(fs::read(dwg_dir.join("DEMO-002.dwg")).unwrap(), dwg2_bytes);
+    assert_eq!(fs::read(dwg_dir.join("DEMO-002.pdf")).unwrap(), pdf2_bytes);
+    assert!(!superseded.join("DEMO-002.dwg").exists());
+    assert!(!superseded.join("DEMO-002.pdf").exists());
+    for l in leftovers.iter().filter(|l| l.sheet == "DEMO-002") {
+        assert!(l.moved_to.is_none(), "{l:#?}");
+        assert!(l.error.is_some(), "{l:#?}");
+    }
+
+    // DEMO-003 (unlocked) moved cleanly as a complete pair.
+    assert!(!dwg_dir.join("DEMO-003.dwg").exists());
+    assert!(!dwg_dir.join("DEMO-003.pdf").exists());
+    assert_eq!(files_in(&superseded), ["DEMO-003.dwg", "DEMO-003.pdf"]);
+    for l in leftovers.iter().filter(|l| l.sheet == "DEMO-003") {
+        assert!(l.moved_to.is_some() && l.error.is_none(), "{l:#?}");
+    }
+}
