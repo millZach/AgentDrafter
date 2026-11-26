@@ -36,6 +36,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agentdrafter_core::{
     find_command, looking_at_left_off, Error, ErrorCode, Interface, Reply, Settings,
+    SET_SETTINGS_FILE,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -411,19 +412,20 @@ impl Assistant {
 
     /// The canonical path of the drawing set `set` names, which keys its
     /// conversation, begun on the first agent found if there is none yet.
-    /// A folder that is not a drawing set's is refused, as the core's
-    /// `looking-at` refuses it.
+    /// A folder that is not a drawing set's is refused (`read_failed`) without
+    /// reading the optional `.agentdrafter/looking-at.json` record, so a
+    /// damaged file there cannot turn Chat off on a valid set (#231).
     pub(crate) fn open(&self, set: &Path) -> Result<PathBuf, Refusal> {
-        let command = find_command("looking-at").expect("the registry holds `looking-at`");
-        let reply = command.run(
-            json!({ "set": set }),
-            &Settings::default(),
-            Interface::Viewer,
-        );
-        if !reply.ok {
-            let error = reply.error.unwrap_or_else(|| {
-                Error::new(ErrorCode::ReadFailed, "the drawing set could not be read")
-            });
+        let settings = set.join(SET_SETTINGS_FILE);
+        if !settings.is_file() {
+            let mut error = Error::new(
+                ErrorCode::ReadFailed,
+                format!(
+                    "`{}` is not a drawing set's folder: it holds no {SET_SETTINGS_FILE}",
+                    set.display()
+                ),
+            );
+            error.file = Some(settings.display().to_string());
             return Err((status_of(&error), error));
         }
         let key = std::fs::canonicalize(set).map_err(|e| {
