@@ -5558,6 +5558,50 @@ const checks = {
         assert(journalOf(folder).length === before && waiting(folder).length === 0, 'nothing landed, and nothing was proposed');
         await shot(page, 'assistant-laptop-lines.png');
 
+        // A guide given by the assistant: card in the chat, Start the guide,
+        // advance a step, Stop from the card, Start it again, then Stop & Close (#263).
+        await page.fill('[data-chatin]', 'guide me');
+        await page.press('[data-chatin]', 'Enter');
+        await page.waitForSelector('[data-guide-card="1"][data-gcc="offer"]', { timeout: 60000 });
+        await replied(page, 5);
+        const fifth = await lines(page, 5);
+        assert(
+          JSON.stringify(fifth.map((l) => l.command)) === JSON.stringify(['looking-at', 'guide']),
+          `guide reply lines: ${JSON.stringify(fifth)}`,
+        );
+        assert(fifth.every((l) => !l.refused), `guide lines not refused: ${JSON.stringify(fifth)}`);
+        said = await page.textContent('[data-guide-card="1"]');
+        assert(
+          said.includes('Draw a note line') &&
+            said.includes('2 steps · DP-LD-101') &&
+            said.includes('Make notes current') &&
+            said.includes('Start the guide'),
+          `the chat's guide card: ${said}`,
+        );
+        await shot(page, 'assistant-laptop-guide-card.png');
+        await page.click('[data-guide-card="1"] [data-g="start"]');
+        await page.waitForSelector('[data-guide="run"][data-guide-step="1"]', { timeout: 15000 });
+        await page.waitForSelector('[data-guide-card="1"][data-gcc="run"]', { timeout: 15000 });
+        said = await page.textContent('[data-guide-card="1"]');
+        assert(said.includes('Running: step 1 of 2.') && said.includes('Stop the guide'), `card while running: ${said}`);
+        // Advance step 1 via Do it for me and verify the card tracks step 2.
+        await page.click('[data-g="forme"]');
+        await page.waitForSelector('[data-guide="run"][data-guide-step="2"]', { timeout: 15000 });
+        said = await page.textContent('[data-guide-card="1"]');
+        assert(said.includes('Running: step 2 of 2.'), `card tracks step 2: ${said}`);
+        // Stop right from the chat card, then Start it again from the card.
+        await page.click('[data-guide-card="1"] [data-g="cardstop"]');
+        await page.waitForSelector('[data-guide-card="1"][data-gcc="end"]', { timeout: 15000 });
+        await page.waitForSelector('[data-guide="end"]', { timeout: 15000 });
+        said = await page.textContent('[data-guide-card="1"]');
+        assert(said.includes('Stopped.') && said.includes('Start it again'), `card once stopped: ${said}`);
+        await page.click('[data-guide-card="1"] [data-g="start"]');
+        await page.waitForSelector('[data-guide="run"][data-guide-step="1"]', { timeout: 15000 });
+        await page.click('[data-g="stop"]');
+        await page.waitForSelector('[data-guide="end"]', { timeout: 15000 });
+        await page.click('[data-g="close"]');
+        await page.waitForFunction(() => !document.querySelector('.gbanner'), null, { timeout: 15000 });
+
         // The picker: a new conversation on Codex.
         await page.selectOption('.agent select', 'codex');
         await page.waitForFunction(() => [...document.querySelectorAll('[data-chat] [data-kind="note"]')].some((n) => n.textContent.includes('Now on Codex')), null, { timeout: 30000 });

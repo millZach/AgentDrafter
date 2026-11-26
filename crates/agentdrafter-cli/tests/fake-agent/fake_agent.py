@@ -16,6 +16,8 @@ It knows a few things the drafter may say:
   server withholds, and says it could not;
 - `what do I see`: `looking-at` alone, and says the sheet and selection it
   gave;
+- `guide me`: `looking-at`, then `guide` with a 2-step guide on the sheet
+  shown;
 - `look at <folder>`: `looking-at` on another folder, which the assistant's
   server, bound to the conversation's set, refuses;
 - anything else: says what it heard.
@@ -251,6 +253,46 @@ def act(prompt, server, out, delay):
             kind = objects[0].get("type", "object") if objects else "object"
             layer = objects[0].get("layer", "?") if objects else "?"
             out.words(f"{id} is {'an' if kind[:1] in 'aeiou' else 'a'} {kind} on layer {layer}.")
+        return
+    if re.search(r"\bguide me\b", said, re.I):
+        looking, _ = call("looking-at", {"set": folder})
+        sheet = (looking or {}).get("result", {}).get("sheet") or "DP-LD-101"
+        title = "Draw a note line"
+        guide = {
+            "title": title,
+            "sheet": sheet,
+            "steps": [
+                {
+                    "say": "Make notes the current layer.",
+                    "title": "Make notes current",
+                    "setting": {"current_layer": "notes"},
+                },
+                {
+                    "say": "Draw a short line on notes.",
+                    "title": "Draw a note line",
+                    "tool": "line",
+                    "points": [
+                        {"at": [1, 3], "label": "start"},
+                        {"at": [2, 3], "label": "end"},
+                    ],
+                    "completes": {
+                        "op": "add_line",
+                        "sheet": sheet,
+                        "layer": "notes",
+                        "from": [1, 3, 0],
+                        "to": [2, 3, 0],
+                    },
+                },
+            ],
+        }
+        reply, refused = call("guide", {"set": folder, "guide": guide, "by": "Assistant"})
+        time.sleep(delay)
+        if refused or not reply or not reply.get("ok"):
+            message = ((reply or {}).get("error") or {}).get("message", "it was refused")
+            out.words(f"I couldn't give a guide: {message}")
+            return
+        number = reply["result"]["guide"]
+        out.words(f"I gave you guide {number}: {title}. Start it from the card below when you're ready.")
         return
     if re.search(r"what do I see", said, re.I):
         looking, _ = call("looking-at", {"set": folder})
