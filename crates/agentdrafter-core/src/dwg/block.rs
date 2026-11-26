@@ -29,7 +29,8 @@ use super::{point, vector};
 use crate::description::normalize_degrees;
 use crate::error::{Error, ErrorCode};
 use crate::model::block::{
-    attachment_to_justify, definition_mtext, definition_text, justify_to_attachment,
+    attachment_to_justify, attribute_mtext_alt, attribute_text_alt, definition_mtext,
+    definition_text, justify_to_attachment,
 };
 use crate::model::{
     attribute_mtext, attribute_text, Attribute, AttributeDefinition, Block, Insert, Point3, Xref,
@@ -617,6 +618,7 @@ fn read_attribute(
                 return None;
             }
             let expected = attribute_mtext(insert, block, definition, &value);
+            let alt = attribute_mtext_alt(insert, block, definition, &value);
             let emb_style = if !emb.style.is_empty() {
                 style_name(&emb.style)
             } else {
@@ -627,19 +629,22 @@ fn read_attribute(
             } else {
                 dwg.height
             };
-            let same = super::read_properties(&dwg.common).as_ref() == Some(&expected.properties)
-                && layer == expected.layer
-                && attachment_of(emb.attachment_point) == Some(expected.justify)
-                && emb_style == expected.style
-                && wf.unwrap_or(dwg.width_factor) == definition.width_factor
-                && close(emb_height, expected.height, expected.height)
-                && close(
-                    emb.rectangle_width,
-                    expected.width,
-                    expected.width.max(expected.height),
-                )
-                && same_angle(emb.rotation.to_degrees(), expected.rotation)
-                && same_point(point(emb.insertion_point), expected.position);
+            let matches = |expected: &MText| {
+                super::read_properties(&dwg.common).as_ref() == Some(&expected.properties)
+                    && layer == expected.layer
+                    && attachment_of(emb.attachment_point) == Some(expected.justify)
+                    && emb_style == expected.style
+                    && wf.unwrap_or(dwg.width_factor) == definition.width_factor
+                    && close(emb_height, expected.height, expected.height)
+                    && close(
+                        emb.rectangle_width,
+                        expected.width,
+                        expected.width.max(expected.height),
+                    )
+                    && same_angle(emb.rotation.to_degrees(), expected.rotation)
+                    && same_point(point(emb.insertion_point), expected.position)
+            };
+            let same = matches(&expected) || alt.as_ref().is_some_and(matches);
             return same.then_some(value);
         }
         let (value, wf, u, o) = mtext_styled_contents(&dwg.value)?;
@@ -647,44 +652,52 @@ fn read_attribute(
             return None;
         }
         let expected = attribute_mtext(insert, block, definition, &value);
+        let alt = attribute_mtext_alt(insert, block, definition, &value);
         let raw_justify = justification(dwg.horizontal_alignment, dwg.vertical_alignment)?;
         let position = if raw_justify == Justify::Left {
             dwg.insertion_point
         } else {
             dwg.alignment_point
         };
-        let same = super::read_properties(&dwg.common).as_ref() == Some(&expected.properties)
-            && layer == expected.layer
-            && justify_to_attachment(raw_justify) == expected.justify
-            && style_name(&dwg.text_style) == expected.style
-            && wf.unwrap_or(dwg.width_factor) == definition.width_factor
-            && close(dwg.height, expected.height, expected.height)
-            && close(0.0, expected.width, expected.height)
-            && same_angle(dwg.rotation.to_degrees(), expected.rotation)
-            && same_point(point(position), expected.position);
+        let matches = |expected: &MText| {
+            super::read_properties(&dwg.common).as_ref() == Some(&expected.properties)
+                && layer == expected.layer
+                && justify_to_attachment(raw_justify) == expected.justify
+                && style_name(&dwg.text_style) == expected.style
+                && wf.unwrap_or(dwg.width_factor) == definition.width_factor
+                && close(dwg.height, expected.height, expected.height)
+                && close(0.0, expected.width, expected.height)
+                && same_angle(dwg.rotation.to_degrees(), expected.rotation)
+                && same_point(point(position), expected.position)
+        };
+        let same = matches(&expected) || alt.as_ref().is_some_and(matches);
         return same.then_some(value);
     }
     let value = text_contents(&dwg.value)?;
     let expected = attribute_text(insert, block, definition, &value);
-    let position = if expected.justify == Justify::Left {
-        dwg.insertion_point
-    } else {
-        dwg.alignment_point
+    let alt = attribute_text_alt(insert, block, definition, &value);
+    let matches = |expected: &Text| {
+        let position = if expected.justify == Justify::Left {
+            dwg.insertion_point
+        } else {
+            dwg.alignment_point
+        };
+        super::read_properties(&dwg.common).as_ref() == Some(&expected.properties)
+            && single_line(
+                dwg.mtext_flag,
+                dwg.is_multiline,
+                dwg.embedded_mtext.is_some(),
+            )
+            && justification(dwg.horizontal_alignment, dwg.vertical_alignment)
+                == Some(expected.justify)
+            && style_name(&dwg.text_style) == expected.style
+            && layer == expected.layer
+            && dwg.width_factor == expected.width_factor
+            && close(dwg.height, expected.height, expected.height)
+            && same_angle(dwg.rotation.to_degrees(), expected.rotation)
+            && same_point(point(position), expected.position)
     };
-    let same = super::read_properties(&dwg.common).as_ref() == Some(&expected.properties)
-        && single_line(
-            dwg.mtext_flag,
-            dwg.is_multiline,
-            dwg.embedded_mtext.is_some(),
-        )
-        && justification(dwg.horizontal_alignment, dwg.vertical_alignment)
-            == Some(expected.justify)
-        && style_name(&dwg.text_style) == expected.style
-        && layer == expected.layer
-        && dwg.width_factor == expected.width_factor
-        && close(dwg.height, expected.height, expected.height)
-        && same_angle(dwg.rotation.to_degrees(), expected.rotation)
-        && same_point(point(position), expected.position);
+    let same = matches(&expected) || alt.as_ref().is_some_and(matches);
     same.then_some(value)
 }
 
@@ -1031,6 +1044,69 @@ mod tests {
         assert_eq!(emb.value, "FIRST\\PSECOND\\PTHIRD");
         let read_ins = read_insert(&written_ins, "0".into(), &[blk]).unwrap();
         assert_eq!(read_ins.attributes[0].value, "FIRST\nSECOND\nTHIRD");
+    }
+
+    #[test]
+    fn mirrored_insert_attribute_near_readable_cutoff_reads_back() {
+        // Mirrored insert at 150.000000001° with an attribute defined at 240°
+        // puts the reflected angle at 90.000000001° (right on 90° + CUTOFF_NOISE),
+        // where a DWG radian round trip can nudge it across the cutoff.
+        let def = AttributeDefinition {
+            tag: "TAG".into(),
+            prompt: String::new(),
+            default: String::new(),
+            position: Point3::new(1.0, 2.0, 0.0),
+            height: 2.5,
+            style: "Standard".into(),
+            width_factor: 1.0,
+            rotation: 240.0,
+            justify: Justify::TopLeft,
+            invisible: false,
+            constant: false,
+            verify: false,
+            preset: false,
+            lock_position: false,
+            multiline: false,
+            width: 0.0,
+            layer: "0".into(),
+            properties: Default::default(),
+        };
+        let blk = Block {
+            name: "CUTOFF".into(),
+            base_point: Point3::new(0.0, 0.0, 0.0),
+            objects: vec![crate::model::Object::AttributeDefinition(def)],
+            cells: Vec::new(),
+            parameters: Vec::new(),
+            annotative: false,
+        };
+        let ins = Insert {
+            block: "CUTOFF".into(),
+            position: Point3::new(10.0, 20.0, 0.0),
+            scale: 1.0,
+            rotation: 150.000000001,
+            mirrored: true,
+            readable_attributes: false,
+            attributes: vec![Attribute {
+                tag: "TAG".into(),
+                value: "V-101".into(),
+                field: None,
+            }],
+            state: std::collections::BTreeMap::new(),
+            evaluated_block: None,
+            name: None,
+            annotative: false,
+            annotation_scales: Vec::new(),
+            layer: "0".into(),
+            properties: Default::default(),
+        };
+        let mut written = dwg_insert(&ins, &blk, &|t| t.position).unwrap();
+        // Nudge the insert rotation by 1e-10° in either direction across the cutoff
+        // to simulate DWG radian round-trip drift.
+        for delta in [-1e-10_f64, 0.0, 1e-10] {
+            written.rotation = (ins.rotation + delta).to_radians();
+            let read_ins = read_insert(&written, "0".into(), std::slice::from_ref(&blk)).unwrap();
+            assert_eq!(read_ins.attributes[0].value, "V-101", "delta={delta}");
+        }
     }
 
     #[test]

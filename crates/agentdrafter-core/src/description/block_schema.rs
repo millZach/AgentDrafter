@@ -153,9 +153,9 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                 },
                 "scale": {
                     "description": "How much the block is enlarged, the same along every axis: a \
-                                    number more than 0, with no unit. Without it, 1.",
+                                    number of at least 1e-12, with no unit. Without it, 1.",
                     "anyOf": [
-                        { "type": "number", "exclusiveMinimum": 0 },
+                        { "type": "number", "minimum": 1e-12 },
                         { "type": "string", "pattern": format!("^{POSITIVE_NUMBER}$") },
                     ],
                 },

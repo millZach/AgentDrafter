@@ -6918,7 +6918,7 @@ fn found_objects<'t>(
 /// defaults, which a scaling scales, and a table's size, which a mirror
 /// places it by; worked out on sheet `k` as the change set has left it.
 fn resolved_for(
-    at: &Attempt,
+    at: &mut Attempt,
     op: &Operation,
     k: usize,
     found: &[(Found, &str)],
@@ -6929,6 +6929,25 @@ fn resolved_for(
     if !scaled && !t.mirrors() {
         return Ok(resolved);
     }
+    let needs_kind = |kind: &str| match kind {
+        "mleader" | "leader" => scaled,
+        "table" => t.mirrors() || scaled,
+        _ => false,
+    };
+    let mut needed = vec![false; found.len()];
+    let mut any_needed = false;
+    for (i, (f, _)) in found.iter().enumerate() {
+        let needs_this = at
+            .file(f.file)?
+            .object_kind(f.list, f.index)
+            .map(needs_kind)
+            .unwrap_or(false);
+        needed[i] = needs_this;
+        any_needed |= needs_this;
+    }
+    if !any_needed {
+        return Ok(resolved);
+    }
     let needs = |o: &Object| match o {
         Object::MLeader(_) | Object::Leader(_) => scaled,
         Object::Table(_) => t.mirrors() || scaled,
@@ -6937,6 +6956,9 @@ fn resolved_for(
     let rows = at.rows_now()?;
     let mut sheet: Option<SheetRecord> = None;
     for (i, (f, _)) in found.iter().enumerate() {
+        if !needed[i] {
+            continue;
+        }
         if sheet.is_none() {
             sheet = Some(
                 sheet_record(at, &rows, k, &mut Vec::new()).map_err(|e| Error {

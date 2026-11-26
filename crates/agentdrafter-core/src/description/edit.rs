@@ -336,6 +336,14 @@ impl RecordFile {
             || self.lists.iter().any(|(_, state)| state.dirty())
     }
 
+    /// The type name of the object of `list` at `index`, such as `line` or
+    /// `table`, as the record writes it now.
+    pub(crate) fn object_kind(&self, list: ObjectList, index: usize) -> Option<&str> {
+        self.items(list)?
+            .get(index)
+            .and_then(|item| object_parts(item).0)
+    }
+
     /// The objects of `list` as the record writes them now. A row with no
     /// objects has none.
     pub(crate) fn objects(&self, list: ObjectList) -> Vec<Listed> {

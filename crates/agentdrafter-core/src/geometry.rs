@@ -65,6 +65,10 @@ impl Chain {
         [at.x, at.y, at.z]
     }
 
+    pub(crate) fn vector(&self, v: [f64; 2]) -> [f64; 2] {
+        self.placements.iter().fold(v, |acc, p| p.vector(acc))
+    }
+
     fn curve(&self, c: &Curve) -> Curve {
         if self.placements.is_empty() {
             return c.clone();
@@ -72,7 +76,13 @@ impl Chain {
         let scale = self.placements.iter().map(Placement::scale).product();
         let mirrored = self.placements.iter().filter(|p| p.mirrored()).count() % 2 == 1;
         let angle = |radians: f64| self.placements.iter().fold(radians, |a, p| p.radians(a));
-        c.placed(&|p| self.point(p), scale, &angle, mirrored)
+        c.placed(
+            &|p| self.point(p),
+            &|v| self.vector(v),
+            scale,
+            &angle,
+            mirrored,
+        )
     }
 }
 

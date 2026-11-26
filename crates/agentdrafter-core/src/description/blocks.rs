@@ -832,6 +832,11 @@ fn block_named_with_xrefs<'a>(
     }
 }
 
+/// The smallest scale a DWG insert or multileader block content can hold:
+/// acadrust clamps scales below `1e-12` to `+1e-12`, silently dropping the
+/// sign of a mirrored X scale and enlarging the block (#250).
+pub(super) const MIN_BLOCK_SCALE: f64 = 1e-12;
+
 /// The `scale` and `rotation` an insert, or a multileader's block content,
 /// places its block with: without them, 1 and 0.
 pub(super) fn scale_and_rotation(fields: &Fields) -> Result<(f64, f64), Error> {
@@ -844,6 +849,13 @@ pub(super) fn scale_and_rotation(fields: &Fields) -> Result<(f64, f64), Error> {
                     node,
                     &path,
                     "a scale is more than 0: how much the block is enlarged, the same along every axis",
+                ));
+            }
+            if scale < MIN_BLOCK_SCALE {
+                return Err(bad_value(
+                    node,
+                    &path,
+                    "a scale is at least 1e-12: a smaller scale cannot be kept in a DWG without clamping or losing a mirrored sign",
                 ));
             }
             scale

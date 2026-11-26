@@ -1486,3 +1486,103 @@ blocks:
         "mirrored attribute ink [{att_l}, {att_r}] overflowed mirrored cell [70, 100]"
     );
 }
+
+#[test]
+fn tiny_block_scale_below_1e_12_is_refused() {
+    let set = strip_set("tiny_block_scale");
+    // A mirrored insert written directly with scale < 1e-12 would be silently
+    // clamped by acadrust to +1e-12, dropping the negative X scale sign (#250).
+    let sheet_path = set.join("tiny-mirrored.yaml");
+    fs::write(
+        &sheet_path,
+        "units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert: {block: TERM, position: [10, 60, 0], scale: 5e-13, mirrored: true}\n",
+    )
+    .unwrap();
+    let err = agentdrafter_core::build_with(
+        &agentdrafter_core::BuildRequest {
+            description: sheet_path,
+            output: Some(set.join("tiny-mirrored.dwg")),
+            overwrite: true,
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadValue);
+    assert!(
+        err.message.contains("1e-12"),
+        "expected 1e-12 scale refusal, got: {}",
+        err.message
+    );
+    // Scaling a mirrored insert below 1e-12 via `change` is also refused cleanly.
+    let reply = send(
+        &set,
+        json!([
+            {
+                "op": "mirror",
+                "targets": [{"id": "ROT-001/lug"}],
+                "first_point": [10, 60, 0],
+                "second_point": [10, 70, 0],
+                "erase_source": true
+            },
+            {
+                "op": "scale",
+                "targets": [{"id": "ROT-001/lug"}],
+                "base_point": [10, 60, 0],
+                "factor": 5e-13
+            }
+        ]),
+        false,
+    );
+    assert!(!reply.ok);
+    let report = reply.result.expect("a sheet failed");
+    assert_eq!(report.landed, 0);
+    let err = report.sheets[0]
+        .error
+        .as_ref()
+        .expect("sheet failure error");
+    assert_eq!(err.code, ErrorCode::BadValue);
+}
+
+#[test]
+fn scale_and_mirror_do_not_read_intermediate_sheet_for_plain_objects() {
+    let set = strip_set("skip_intermediate_sheet");
+    // Op 1 temporarily puts `note` on a layer that does not exist yet, making
+    // the intermediate sheet unreadable until Op 4 puts it back on layer `0`.
+    // Scaling and mirroring `spoke` (a plain line) must not read the sheet (#250).
+    let report = lands(
+        &set,
+        json!([
+            {
+                "op": "change",
+                "target": {"id": "ROT-001/note"},
+                "set": { "layer": "not_yet_defined" }
+            },
+            {
+                "op": "scale",
+                "targets": [{"id": "ROT-001/spoke"}],
+                "base_point": [100, 100, 0],
+                "factor": 2
+            },
+            {
+                "op": "mirror",
+                "targets": [{"id": "ROT-001/spoke"}],
+                "first_point": [100, 100, 0],
+                "second_point": [100, 110, 0],
+                "erase_source": true
+            },
+            {
+                "op": "change",
+                "target": {"id": "ROT-001/note"},
+                "set": { "layer": "0" }
+            }
+        ]),
+    );
+    assert_eq!(report.sheets.len(), 1);
+    let objects = recorded(&set);
+    let Object::Line(spoke) = &objects["ROT-001/spoke"] else {
+        panic!("expected line spoke");
+    };
+    // [100, 100] -> [110, 100], scaled by 2 -> [120, 100], mirrored across x=100 -> [80, 100].
+    assert!((spoke.to.x - 80.0).abs() < 1e-6, "{spoke:?}");
+    assert!((spoke.to.y - 100.0).abs() < 1e-6, "{spoke:?}");
+}
