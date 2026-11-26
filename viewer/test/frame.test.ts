@@ -784,30 +784,36 @@ test('an option pressed lets any other focused control go, including toolbar but
   assert.equal(letGoOnOptionPress(null), false);
 });
 
-test('Esc and right-click with a half-typed point draft finish Copy right away (#248)', () => {
-  // With a tool running (such as Copy with copies placed and `@3,` typed), the first Esc finishes it.
+test('Esc and right-click with a half-typed point draft finish Copy or Array right away (#248, #259)', () => {
+  // With a tool running (such as Copy with `@3,` or Array with `2,`), the first Esc ends it.
   assert.equal(escapeEndsFromField('@3,', true, false), true);
+  assert.equal(escapeEndsFromField('2,', true, false), true);
   assert.equal(escapeEndsFromField('', true, false), true);
   assert.equal(escapeEndsFromField('hello', true, true), true);
   // With no tool running, Esc clears typed text first without dropping selection.
   assert.equal(escapeEndsFromField('move ', false, false), false);
   assert.equal(escapeEndsFromField('', false, false), true);
-  // Right-click on the drawing clears a half-typed point draft and acts as Done, while Text keeps its words.
+  // Right-click on the drawing clears a half-typed draft and acts as Done, while Text keeps its words.
   assert.equal(rightClickText('@3,', false), '');
+  assert.equal(rightClickText('2,', false), '');
   assert.equal(rightClickText('', false), '');
   assert.equal(rightClickText('FT-101', true), 'FT-101');
 });
 
-test('a pending array is dropped the moment another sheet or layout is asked for, not when it comes (#66)', () => {
+test('a pending array is dropped the moment another sheet or layout is asked for, not when it comes (#66, #259)', () => {
   const shown = { sheet: 'DP-LD-101', layout: null };
   assert.equal(switchingAway('DP-LD-101', null, shown), false);
   assert.equal(switchingAway('dp-ld-101', null, shown), false);
   assert.equal(switchingAway('DP-LD-102', null, shown), true);
-  // A layout asked for that is not the one drawn; none asked for is the one drawn.
-  const laid = { sheet: 'LAY-001', layout: 'Assembly' };
+  // A layout asked for that is not the one drawn; none asked for resets to the first layout.
+  const laid = { sheet: 'LAY-001', layout: 'Assembly', layouts: ['Assembly', 'Wiring'] };
   assert.equal(switchingAway('LAY-001', null, laid), false);
   assert.equal(switchingAway('LAY-001', 'assembly', laid), false);
   assert.equal(switchingAway('LAY-001', 'Wiring', laid), true);
+  // Clicking the same sheet's tab (`wantedLayout: null`) while viewing a second layout resets to the first (#259).
+  const second = { sheet: 'LAY-001', layout: 'Wiring', layouts: ['Assembly', 'Wiring'] };
+  assert.equal(switchingAway('LAY-001', null, second), true);
+  assert.equal(switchingAway('LAY-001', 'Wiring', second), false);
   // Nothing drawn yet, or nothing asked for: no switch.
   assert.equal(switchingAway('DP-LD-102', null, null), false);
   assert.equal(switchingAway(null, null, shown), false);

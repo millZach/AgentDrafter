@@ -1200,10 +1200,20 @@ export function arrayFraming(box: Box, room: Box, opening: boolean, touch: boole
  * Whether the page is on its way to another sheet, or another layout of
  * it, than the one drawn, `shown`: the moment a tab is asked for, before
  * the sheet comes. Array's pending array is dropped then, with nothing
- * sent, since it was set up on the sheet drawn (#66).
+ * sent, since it was set up on the sheet drawn (#66). Asking for the
+ * sheet's default layout (`wantedLayout === null`) while viewing a non-first
+ * layout switches back to `shown.layouts[0]` (#259).
  */
-export function switchingAway(wanted: string | null, wantedLayout: string | null, shown: { sheet: string; layout: string | null } | null): boolean {
+export function switchingAway(
+  wanted: string | null,
+  wantedLayout: string | null,
+  shown: { sheet: string; layout: string | null; layouts?: readonly string[] } | null,
+): boolean {
   if (!shown || !wanted) return false;
   if (wanted.toUpperCase() !== shown.sheet.toUpperCase()) return true;
-  return wantedLayout !== null && (shown.layout ?? '').toUpperCase() !== wantedLayout.toUpperCase();
+  if (wantedLayout !== null) {
+    return (shown.layout ?? '').toUpperCase() !== wantedLayout.toUpperCase();
+  }
+  const first = shown.layouts?.[0] ?? null;
+  return first !== null && shown.layout !== null && shown.layout.toUpperCase() !== first.toUpperCase();
 }

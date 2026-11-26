@@ -661,61 +661,10 @@ impl Viewer {
         let edges = std::mem::take(&mut sheet.edges);
         // An object whose drawing on the page is cut at a viewport's window
         // is model space seen through it: its points there are not its own.
-        // Each object's box too, which Array spaces its copies by, and its
-        // sampled curve for path arrays (#256).
+        // Each object's box (including patterned hatch boundaries, #259) and
+        // sampled curve for path arrays (#256) come from the display list.
         let mut objects: Vec<ObjectInfo> = sheet.objects.iter().map(ObjectInfo::of).collect();
-        let mut path_runs: Vec<Vec<&[[f64; 2]]>> = vec![Vec::new(); objects.len()];
-        for item in &sheet.display_list.items {
-            let Some(o) = objects.get_mut(item.object) else {
-                continue;
-            };
-            if item.clip.is_some() {
-                o.through_viewport = true;
-            }
-            let own_image_runs: Vec<Vec<[f64; 2]>>;
-            let runs = match &item.shape {
-                Shape::Stroke { runs, .. } => {
-                    if crate::array::PathCurve::is_path_kind(&o.kind) {
-                        for run in runs {
-                            path_runs[item.object].push(run.as_slice());
-                        }
-                    }
-                    runs
-                }
-                Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
-                Shape::Image {
-                    origin,
-                    u_axis,
-                    v_axis,
-                    clip,
-                    clip_inverted,
-                    ..
-                } => {
-                    own_image_runs = vec![Shape::image_outline(
-                        *origin,
-                        *u_axis,
-                        *v_axis,
-                        clip.as_deref(),
-                        *clip_inverted,
-                    )];
-                    &own_image_runs
-                }
-            };
-            for p in runs.iter().flatten() {
-                let b = o.bounds.get_or_insert([p[0], p[1], p[0], p[1]]);
-                *b = [
-                    b[0].min(p[0]),
-                    b[1].min(p[1]),
-                    b[2].max(p[0]),
-                    b[3].max(p[1]),
-                ];
-            }
-        }
-        for (o, runs) in objects.iter_mut().zip(&path_runs) {
-            if !runs.is_empty() {
-                o.path = crate::array::PathCurve::from_runs(&o.kind, runs);
-            }
-        }
+        crate::tools::load_geometry(&mut objects, &sheet.display_list);
         self.shown = (sheet.sheet.clone(), sheet.layout.clone());
         let editable_dwg = self.desktop_mode && sheet.source.to_ascii_lowercase().ends_with(".dwg");
         self.tools.load(Context {
@@ -1669,12 +1618,14 @@ impl Viewer {
         let source_runs = |picked: &[usize]| {
             let mut owned: Vec<Vec<[f64; 2]>> = Vec::new();
             let mut borrowed: Vec<&[[f64; 2]]> = Vec::new();
+            let mut drew: Vec<usize> = Vec::new();
             for item in sheet
                 .list
                 .items
                 .iter()
                 .filter(|i| picked.contains(&i.object))
             {
+                drew.push(item.object);
                 match &item.shape {
                     Shape::Stroke { runs, .. } => {
                         borrowed.extend(runs.iter().map(Vec::as_slice));
@@ -1702,6 +1653,19 @@ impl Viewer {
                         }
                         owned.push(ring);
                     }
+                }
+            }
+            // A patterned hatch whose pattern drew no strokes still has its
+            // boundary box: draw its box as its ghost outline (#259).
+            for &(object, b) in &sheet.list.boundaries {
+                if picked.contains(&object) && !drew.contains(&object) {
+                    owned.push(vec![
+                        [b.min[0], b.min[1]],
+                        [b.max[0], b.min[1]],
+                        [b.max[0], b.max[1]],
+                        [b.min[0], b.max[1]],
+                        [b.min[0], b.min[1]],
+                    ]);
                 }
             }
             (owned, borrowed)
