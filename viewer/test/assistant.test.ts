@@ -30,6 +30,7 @@ import {
   sheetsLink,
   spaceIsEnter,
   typedRoute,
+  unavailableAgents,
   viaWords,
   waitingWords,
   wordPieces,
@@ -330,10 +331,33 @@ test('the words with no agent, the input and the peek', () => {
   assert.equal(peekAskWords('Claude Code', false, true), 'Ask the assistant…');
   assert.equal(peekAskWords('Codex', true, true), 'Codex is working…');
   assert.equal(peekAskWords(null, false, true), 'No agent found: how to install one ›');
+  assert.equal(peekAskWords(null, false, true, true), 'No usable agent: see why ›');
   assert.equal(peekAskWords(null, false, false), 'Ask the assistant…');
   assert.equal(notSentWords('assistant_busy', 'busy', 'Claude Code'), 'Claude Code is still working: one message at a time.');
   assert.equal(notSentWords('no_agent', 'none', null), 'No agent was found: install Claude Code or Codex first, as the panel says.');
   assert.equal(notSentWords('usage', 'the text is empty', 'Codex'), 'the text is empty');
+
+  // An unusable Codex is omitted from the picker and reported with its reason (#229).
+  const codexOld: AgentsReport = {
+    ...BOTH,
+    agents: [
+      { agent: 'claude', name: 'Claude Code', command: 'claude', found: true },
+      { agent: 'codex', name: 'Codex', command: 'codex', found: false, unavailable: 'Codex 0.120.0 does not support --ignore-user-config.' },
+    ],
+  };
+  assert.deepEqual(agentHeader(codexOld, null), { kind: 'one', agent: 'claude', name: 'Claude Code' });
+  assert.deepEqual(unavailableAgents(codexOld), [
+    { agent: 'codex', name: 'Codex', command: 'codex', reason: 'Codex 0.120.0 does not support --ignore-user-config.' },
+  ]);
+  const onlyCodexUnusable: AgentsReport = {
+    ...BOTH,
+    agents: [
+      { agent: 'claude', name: 'Claude Code', command: 'claude', found: false },
+      { agent: 'codex', name: 'Codex', command: 'codex', found: false, unavailable: 'Codex is signed in only through keyring.' },
+    ],
+  };
+  assert.deepEqual(agentHeader(onlyCodexUnusable, null), { kind: 'none' });
+  assert.ok(!noAgentWords(onlyCodexUnusable).includes('found neither'), noAgentWords(onlyCodexUnusable));
 });
 
 test('the assistant’s routes carry the token, and its stream’s events are read as the journal’s', () => {

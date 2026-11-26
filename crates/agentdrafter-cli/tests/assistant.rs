@@ -693,3 +693,85 @@ fn looking_again_follows_the_agents_on_the_path() {
         "{note}"
     );
 }
+
+#[test]
+fn an_unusable_codex_is_left_out_of_the_picker_and_reports_why() {
+    // 1. Old Codex (0.120.0, lacks --ignore-user-config) alongside Claude Code:
+    //    only Claude is offered; Codex reports `found: false` with `unavailable`.
+    {
+        let dir = scratch("codex-old");
+        demo_set(&dir);
+        let shims = shims(&dir, &["claude", "codex"]);
+        let serve = Serve::start(
+            &dir,
+            &path_with(&shims),
+            &[("FAKE_CODEX_OLD", "0.120.0".to_owned())],
+        );
+        let (status, reply) = serve.send("GET", "/assistant", None);
+        assert_eq!(status, 200, "{reply}");
+        let agents = reply["result"]["agents"].as_array().unwrap();
+        assert_eq!(agents[0]["agent"], "claude");
+        assert_eq!(agents[0]["found"], true);
+        assert!(agents[0].get("unavailable").is_none());
+        assert_eq!(agents[1]["agent"], "codex");
+        assert_eq!(agents[1]["found"], false);
+        let reason = agents[1]["unavailable"].as_str().unwrap();
+        assert!(
+            reason.contains("Codex 0.120.0") && reason.contains("--ignore-user-config"),
+            "{reason}"
+        );
+
+        let (status, reply) = serve.post(
+            "/assistant/agent",
+            json!({"set": "demo-set", "agent": "codex"}),
+        );
+        assert_eq!(status, 422, "{reply}");
+        assert_eq!(reply["error"]["code"], "no_agent");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Codex 0.120.0"),
+            "{reply}"
+        );
+    }
+
+    // 2. Keyring-only Codex with no other agent on PATH: not offered, and both
+    //    `GET /assistant` and `POST /assistant/messages` explain why.
+    {
+        let dir = scratch("codex-keyring");
+        demo_set(&dir);
+        let shims = shims(&dir, &["codex"]);
+        let serve = Serve::start(
+            &dir,
+            &path_with(&shims),
+            &[
+                ("FAKE_CODEX_AUTH", "keyring".to_owned()),
+                ("CODEX_API_KEY", String::new()),
+            ],
+        );
+        let (status, reply) = serve.send("GET", "/assistant", None);
+        assert_eq!(status, 200, "{reply}");
+        let codex = &reply["result"]["agents"][1];
+        assert_eq!(codex["found"], false);
+        let reason = codex["unavailable"].as_str().unwrap();
+        assert!(
+            reason.contains("keyring") && reason.contains("cli_auth_credentials_store=file"),
+            "{reason}"
+        );
+
+        let (status, reply) = serve.post(
+            "/assistant/messages",
+            json!({"set": "demo-set", "text": "hello", "looking_at": null}),
+        );
+        assert_eq!(status, 422, "{reply}");
+        assert_eq!(reply["error"]["code"], "no_agent");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("keyring"),
+            "{reply}"
+        );
+    }
+}

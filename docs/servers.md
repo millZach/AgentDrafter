@@ -109,7 +109,7 @@ It is kept in the set's folder, beside the journal, in `.agentdrafter/looking-at
 
 | Route | What it does |
 |---|---|
-| `GET /assistant` | The agents, `claude` and `codex`, each with its name, whether it was found, and any `warnings` about administrator-managed or system configuration it still loads, plus how to install each: its line and its page. |
+| `GET /assistant` | The agents, `claude` and `codex`, each with its name, whether it was found (and usable), any `warnings` about administrator-managed or system configuration it still loads, and `unavailable` if the binary was found on the PATH but failed preflight checks (such as an older Codex lacking `--ignore-user-config` or a keyring-only / missing sign-in, #229), plus how to install each: its line and its page. |
 | `POST /assistant/find` | Looks on the PATH again, for an agent installed since, and replies as `GET /assistant` does. A conversation with no agent goes on the first one found, and one whose agent is gone on the first found, or none, as a new conversation, so the server and the panel agree. |
 | `POST /assistant/events` | The conversation on a set, `{"set": "<folder>"}`, as Server-Sent Events: an event named `assistant` when the stream opens and each time the conversation changes, holding all of it, `{"set", "agent", "busy", "items"}`. Its streams count with `/events`'s towards the 16 open at once. |
 | `POST /assistant/messages` | A message from the drafter, `{"set", "text", "via", "looking_at"}`: `via` is `chat` or `command_bar`, and `looking_at`, `{"sheet", "layout", "selected", "names"}`, what the drafter is looking at, or null when they left it off. It replies at once with the item it added; the agent's work comes on the stream. |

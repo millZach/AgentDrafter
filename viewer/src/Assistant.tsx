@@ -31,6 +31,7 @@ import {
   guideMade,
   proposedTitle,
   sheetsLink,
+  unavailableAgents,
   viaWords,
   waitingWords,
   wordPieces,
@@ -41,6 +42,7 @@ import {
   type DrafterItem,
   type LookingAt,
   type ChatCardActs,
+  type UnavailableAgent,
 } from './assistant.ts';
 import type { JournalReport } from './journal.ts';
 import { proposalTitle, type CardLine, type Proposal, type Standing } from './proposals.ts';
@@ -95,6 +97,10 @@ export function AssistantPanel(props: AssistantPanelProps) {
   const { agents, unreachable, conversation, side, onSide, proposals } = props;
   const header = agentHeader(agents, conversation?.agent ?? null);
   const name = agentName(agents, conversation?.agent ?? null);
+  const unavailable = unavailableAgents(agents);
+  const unavailableKey = unavailable.map((u) => `${u.agent}:${u.reason}`).join('\n');
+  const [dismissedKey, setDismissedKey] = useState('');
+  const showUnavailableNotice = !unreachable && header.kind !== 'none' && header.kind !== 'loading' && unavailable.length > 0 && dismissedKey !== unavailableKey;
   const busy = !!conversation?.busy;
   const chat = useRef<HTMLDivElement>(null);
   // The chat keeps to its newest item while the drafter is at the bottom.
@@ -114,7 +120,7 @@ export function AssistantPanel(props: AssistantPanelProps) {
       <div className="ahead">
         <div className="ahrow">
           <b>Assistant</b>
-          <AgentPill header={header} busy={busy} onPick={props.onPickAgent} />
+          <AgentPill header={header} hasUnavailable={unavailable.length > 0} busy={busy} onPick={props.onPickAgent} />
         </div>
         {(header.kind === 'one' || header.kind === 'picker') && (
           <div className="ahsub">
@@ -168,6 +174,13 @@ export function AssistantPanel(props: AssistantPanelProps) {
           </p>
         ) : header.kind === 'none' && agents ? (
           <NoAgent report={agents} looking={props.lookingAgain} onLookAgain={props.onLookAgain} />
+        ) : showUnavailableNotice ? (
+          <UnavailableNotice
+            agents={unavailable}
+            looking={props.lookingAgain}
+            onLookAgain={props.onLookAgain}
+            onDismiss={() => setDismissedKey(unavailableKey)}
+          />
         ) : null}
         <div className="chat">
           {items.map((item, i) =>
@@ -197,13 +210,23 @@ export function AssistantPanel(props: AssistantPanelProps) {
   );
 }
 
-function AgentPill({ header, busy, onPick }: { header: ReturnType<typeof agentHeader>; busy: boolean; onPick(agent: string): void }) {
+function AgentPill({
+  header,
+  hasUnavailable,
+  busy,
+  onPick,
+}: {
+  header: ReturnType<typeof agentHeader>;
+  hasUnavailable: boolean;
+  busy: boolean;
+  onPick(agent: string): void;
+}) {
   if (header.kind === 'loading') return null;
   if (header.kind === 'none') {
     return (
       <span className="agent none" data-agent="">
         <i />
-        No agent found
+        {hasUnavailable ? 'No usable agent' : 'No agent found'}
       </span>
     );
   }
@@ -237,24 +260,73 @@ function AgentPill({ header, busy, onPick }: { header: ReturnType<typeof agentHe
 }
 
 function NoAgent({ report, looking, onLookAgain }: { report: AgentsReport; looking: boolean; onLookAgain(): void }) {
+  const unavailable = unavailableAgents(report);
+  const unavailableIds = new Set(unavailable.map((u) => u.agent));
+  const install = unavailable.length > 0 ? report.install.filter((i) => !unavailableIds.has(i.agent)) : report.install;
   return (
     <div className="noagent" data-noagent>
-      <h4>No agent found</h4>
+      <h4>{unavailable.length > 0 ? 'No usable agent' : 'No agent found'}</h4>
       <p>{noAgentWords(report)}</p>
-      <p>Install one, then look again:</p>
-      {report.install.map((i) => (
-        <div key={i.agent} className="inst" data-install={i.agent}>
-          <b>{i.name}</b>
-          <code>{i.line}</code>
-          {i.page && (
-            <a href={i.page} target="_blank" rel="noreferrer noopener">
-              How to set it up ›
-            </a>
-          )}
+      {unavailable.map((u) => (
+        <div key={u.agent} className="unavail" data-unavailable={u.agent}>
+          <b>
+            {u.name} ({u.command}) was found on your PATH, but can’t be used
+          </b>
+          <span>{u.reason}</span>
         </div>
       ))}
+      {install.length > 0 && (
+        <>
+          <p>{unavailable.length > 0 ? 'Or install another agent, then look again:' : 'Install one, then look again:'}</p>
+          {install.map((i) => (
+            <div key={i.agent} className="inst" data-install={i.agent}>
+              <b>{i.name}</b>
+              <code>{i.line}</code>
+              {i.page && (
+                <a href={i.page} target="_blank" rel="noreferrer noopener">
+                  How to set it up ›
+                </a>
+              )}
+            </div>
+          ))}
+        </>
+      )}
       <div>
         <button type="button" className="btn primary" data-act="lookagain" disabled={looking} onClick={onLookAgain}>
+          {looking ? 'Looking…' : 'Look again'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function UnavailableNotice({
+  agents,
+  looking,
+  onLookAgain,
+  onDismiss,
+}: {
+  agents: readonly UnavailableAgent[];
+  looking: boolean;
+  onLookAgain(): void;
+  onDismiss(): void;
+}) {
+  return (
+    <div className="agnotice" data-unavailable-notice role="status">
+      <div className="agnotice-row">
+        <div className="agnotice-body">
+          {agents.map((u) => (
+            <div key={u.agent} data-unavailable={u.agent}>
+              <b>{u.name} wasn’t offered:</b> {u.reason}
+            </div>
+          ))}
+        </div>
+        <button type="button" className="agnotice-x" data-act="dismiss-unavailable" aria-label="Dismiss" onClick={onDismiss}>
+          &times;
+        </button>
+      </div>
+      <div className="agnotice-acts">
+        <button type="button" className="btn sm" data-act="lookagain" disabled={looking} onClick={onLookAgain}>
           {looking ? 'Looking…' : 'Look again'}
         </button>
       </div>

@@ -42,6 +42,8 @@ import uuid
 def main():
     kind = sys.argv[1]
     args = sys.argv[2:]
+    if kind == "codex" and handle_codex_probe(args):
+        return
     prompt = sys.stdin.read()
     log = os.environ.get("FAKE_AGENT_LOG")
     if log:
@@ -69,6 +71,35 @@ def main():
     finally:
         server.close()
     out.end()
+
+
+def handle_codex_probe(args):
+    """Answers the Codex preflight probes (#229) without reading stdin or
+    logging a turn."""
+    old = os.environ.get("FAKE_CODEX_OLD")
+    if args == ["--version"]:
+        ver = "0.120.0" if old == "1" else (old or "0.172.0")
+        print(f"codex-cli {ver}", flush=True)
+        return True
+    if args == ["exec", "--help"]:
+        print("Usage: codex exec [OPTIONS] [PROMPT]", flush=True)
+        if not old:
+            print("      --ignore-user-config  Do not load config.toml", flush=True)
+        return True
+    if len(args) >= 2 and args[0] == "login" and args[1] == "status":
+        auth = os.environ.get("FAKE_CODEX_AUTH", "file")
+        forces_file = any(
+            "cli_auth_credentials_store" in a and "file" in a for a in args[2:]
+        )
+        if auth == "none":
+            print("Not logged in", flush=True)
+            sys.exit(1)
+        if auth == "keyring" and forces_file:
+            print("Not logged in", flush=True)
+            sys.exit(1)
+        print("Logged in", flush=True)
+        return True
+    return False
 
 
 def server_command(kind, args):
