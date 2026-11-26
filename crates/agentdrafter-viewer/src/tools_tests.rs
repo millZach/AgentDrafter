@@ -2099,3 +2099,38 @@ fn path_array_picks_curve_previews_and_sends_array_operation() {
     assert!(t.selecting());
     assert!(!t.state(false).array.unwrap().ready);
 }
+
+#[test]
+fn typed_array_values_with_more_than_six_decimals_are_not_rounded_when_shown() {
+    // A typed value with >6 decimals keeps its full precision after leaving
+    // the field, matching what is sent (#258), while worked-out fractions
+    // (such as 2 / 3 or 360 / 7) continue rounding cleanly to 4 places.
+    let mut t = array_on_device("ARRAYRECT");
+    t.array_value("row_spacing", "-0.1234567");
+    t.array_value("column_spacing", "0.0000001");
+    assert_eq!(field(&t, "row_spacing"), "-0.1234567");
+    assert_eq!(field(&t, "column_spacing"), "0.0000001");
+    t.array_value("columns", "2");
+    let op = &operations(&t.clone().input("", None))[0];
+    assert_eq!(op["row_spacing"], json!(-0.1234567));
+    assert_eq!(op["column_spacing"], json!(0.0000001));
+
+    // Switching to Total and changing rows recomputes row_spacing as a worked-out
+    // fraction, so switching back to Between formats the worked-out value cleanly.
+    t.option("total");
+    t.array_value("row_total", "2");
+    t.array_value("rows", "4");
+    t.option("between");
+    assert_eq!(field(&t, "row_spacing"), "0.6667");
+
+    // Command-bar @dx,dy preserves long decimals too.
+    t.input("@1.2345678,-0.9876543", None);
+    assert_eq!(field(&t, "column_spacing"), "1.2345678");
+    assert_eq!(field(&t, "row_spacing"), "-0.9876543");
+
+    // Polar typed angle keeps >6 decimals; changing items on a whole turn clears it.
+    let mut p = array_on_device("ARRAYPOLAR");
+    p.point(at(2.0, 4.5));
+    p.array_value("angle_between", "12.3456789");
+    assert_eq!(field(&p, "angle_between"), "12.3456789");
+}

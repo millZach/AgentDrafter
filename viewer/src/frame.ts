@@ -1075,10 +1075,11 @@ export function newlyHidden(box: Box, before: Box, now: Box, width: number, heig
 }
 
 /**
- * Where quick properties go beside the selected object, whose box on the
- * screen is `object`: to its right, or to its left when there is no room
- * there, level with its top, kept inside `room` (the drawing's free area)
- * by `margin`. Gives the card's left and top.
+ * Where quick properties or Array's panel goes beside the selected object or
+ * copies, whose box on the screen is `object`: to its right, or to its left
+ * when there is no room there, level with its top; when neither side has room,
+ * below it (or above when below does not fit), kept inside `room` (the
+ * drawing's free area) by `margin`. Gives the card's left and top.
  */
 export function placeBeside(
   object: Box,
@@ -1087,13 +1088,18 @@ export function placeBeside(
   gap = 16,
   margin = 8,
 ): [number, number] {
-  const [ol, ot, or] = object;
+  const [ol, ot, or, ob] = object;
   const [rl, rt, rr, rb] = room;
-  let x = or + gap;
-  if (x + card.width > rr - margin) x = ol - gap - card.width;
-  x = Math.max(rl + margin, Math.min(rr - margin - card.width, x));
-  const y = Math.max(rt + margin, Math.min(rb - margin - card.height, ot));
-  return [x, y];
+  const clampX = (v: number) => Math.max(rl + margin, Math.min(rr - margin - card.width, v));
+  const clampY = (v: number) => Math.max(rt + margin, Math.min(rb - margin - card.height, v));
+  if (or + gap + card.width <= rr - margin) return [clampX(or + gap), clampY(ot)];
+  if (ol - gap - card.width >= rl + margin) return [clampX(ol - gap - card.width), clampY(ot)];
+  // Neither side has room: drop below the object (or above if below does not
+  // fit) so the panel avoids covering the copies (#258).
+  const x = clampX(ol);
+  if (ob + gap + card.height <= rb - margin) return [x, clampY(ob + gap)];
+  if (ot - gap - card.height >= rt + margin) return [x, clampY(ot - gap - card.height)];
+  return [x, clampY(ob + gap)];
 }
 
 /**

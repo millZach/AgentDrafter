@@ -687,12 +687,20 @@ test('Array\'s panel: the view comes to the copies when any is out of sight, and
   assert.equal(arrayFraming([200, 4, 300, 500], room, false, false), true);
 });
 
-test('Array\'s panel goes beside its copies, to their right, or their left where there is no room', () => {
+test('Array\'s panel goes beside its copies, to their right, or their left, or below when neither side has room', () => {
   const room: [number, number, number, number] = [0, 0, 1100, 760];
+  const panel = { width: 330, height: 220 };
   // Right of the box, level with its top, 28 pixels clear.
-  assert.deepEqual(placeBeside([300, 320, 580, 580], { width: 330, height: 220 }, room, 28), [608, 320]);
+  assert.deepEqual(placeBeside([300, 320, 580, 580], panel, room, 28), [608, 320]);
   // No room at the right: at the left.
-  assert.deepEqual(placeBeside([700, 320, 900, 580], { width: 330, height: 220 }, room, 28), [342, 320]);
+  assert.deepEqual(placeBeside([700, 320, 900, 580], panel, room, 28), [342, 320]);
+  // No room on either side (#258): drops below the copies instead of covering them.
+  assert.deepEqual(placeBeside([150, 120, 950, 340], panel, room, 28), [150, 368]);
+  // No room on either side or below: sits above them.
+  assert.deepEqual(placeBeside([150, 420, 950, 650], panel, room, 28), [150, 172]);
+  // No room anywhere outside the box: stays clamped inside the room.
+  const [x, y] = placeBeside([50, 50, 1050, 700], panel, room, 28);
+  assert.ok(x >= 8 && x + panel.width <= 1092 && y >= 8 && y + panel.height <= 752, `kept inside: ${x}, ${y}`);
 });
 
 test('Ctrl+Z, or ⌘Z, is the undo key, in either case, but not with Shift or Alt', () => {
