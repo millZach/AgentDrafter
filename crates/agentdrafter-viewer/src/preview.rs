@@ -64,6 +64,9 @@ pub struct Preview {
     /// Those of what it would change.
     pub changed: Vec<usize>,
     pub was: Vec<Was>,
+    /// The old clipped viewports' boundaries that `was` items reference under
+    /// `clip_boundary` (#188).
+    pub was_clip_boundaries: Vec<Vec<[f64; 2]>>,
     /// The boxes of the checks the sheet would fail.
     pub clouds: Vec<Bounds>,
     /// A guide from where each object it would only move is now, to where
@@ -79,6 +82,8 @@ struct Reply {
     changed: Vec<usize>,
     #[serde(default)]
     was: Vec<WasReply>,
+    #[serde(default)]
+    was_clip_boundaries: Vec<Vec<[f64; 2]>>,
     #[serde(default)]
     clouds: Vec<CloudReply>,
 }
@@ -138,6 +143,7 @@ impl Preview {
             added,
             changed,
             was,
+            was_clip_boundaries: reply.was_clip_boundaries,
             clouds: reply.clouds.into_iter().map(|c| c.bounds).collect(),
             moves,
         })
@@ -266,6 +272,46 @@ pub fn pen(item: &Item) -> Option<f64> {
         Shape::Stroke { lineweight, .. } => Some(*lineweight),
         Shape::Fill { .. } | Shape::Mask { .. } | Shape::Image { .. } => None,
     }
+}
+
+/// The viewport clip polygon for `item` in drawing units, resolved against
+/// `boundaries` (#188): its non-rectangular `clip_boundary` when present and
+/// valid (`>= 3` vertices), otherwise its rectangular `clip` window as four
+/// corners, or `None` when the item is not clipped by a viewport.
+pub fn clip_polygon(item: &Item, boundaries: &[Vec<[f64; 2]>]) -> Option<Vec<[f64; 2]>> {
+    if let Some(b) = item.clip_boundary {
+        if let Some(poly) = boundaries.get(b) {
+            if poly.len() >= 3 {
+                return Some(poly.clone());
+            }
+        }
+    }
+    item.clip.map(|b| {
+        vec![
+            [b.min[0], b.min[1]],
+            [b.max[0], b.min[1]],
+            [b.max[0], b.max[1]],
+            [b.min[0], b.max[1]],
+        ]
+    })
+}
+
+/// Triangulates `outline` (drawing units) into a device-pixel triangle fan
+/// from its first vertex for even-odd stencil filling, matching `mesh.rs` (#188).
+pub fn stencil_fan(outline: &[[f64; 2]], device: &dyn Fn(f64, f64) -> (f64, f64)) -> Vec<f32> {
+    if outline.len() < 3 {
+        return Vec::new();
+    }
+    let (x0, y0) = device(outline[0][0], outline[0][1]);
+    let mut points = Vec::with_capacity((outline.len() - 2) * 6);
+    for pair in outline[1..].windows(2) {
+        let (x1, y1) = device(pair[0][0], pair[0][1]);
+        let (x2, y2) = device(pair[1][0], pair[1][1]);
+        points.extend_from_slice(&[
+            x0 as f32, y0 as f32, x1 as f32, y1 as f32, x2 as f32, y2 as f32,
+        ]);
+    }
+    points
 }
 
 /// `line`, device pixels, cut into dashes `dash` long with gaps of `gap`.

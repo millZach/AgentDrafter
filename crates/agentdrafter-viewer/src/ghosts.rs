@@ -31,13 +31,15 @@ pub const PROPOSAL_DIM: [f32; 4] = [
 pub const REFUSED_ALPHA: f32 = 0.6;
 
 /// One run of a proposal's marks: the lines one item draws through, in
-/// drawing units, its pen in millimetres on paper (none for a fill), and
-/// whether it is a fill, whose outline is drawn solid, as text is.
+/// drawing units, its pen in millimetres on paper (none for a fill), whether
+/// it is a fill (whose outline is drawn solid, as text is), and the viewport
+/// clip polygon that cuts it when the item sits inside a viewport (#188).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Run {
     pub lines: Vec<Line>,
     pub pen: Option<f64>,
     pub fill: bool,
+    pub clip: Option<Vec<[f64; 2]>>,
 }
 
 /// A waiting proposal, as the renderer draws it over one sheet.
@@ -82,6 +84,7 @@ impl Ghost {
                     lines: preview::outline(item),
                     pen: preview::pen(item),
                     fill: matches!(item.shape, Shape::Fill { .. }),
+                    clip: preview::clip_polygon(item, &list.clip_boundaries),
                 }
             })
             .collect();

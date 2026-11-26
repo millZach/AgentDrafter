@@ -449,3 +449,76 @@ fn a_sheet_emptied_by_a_change_set_is_clouded_on_its_paper() {
         ([0.0, 0.0], [100.0, 80.0])
     );
 }
+
+#[test]
+fn a_preview_in_a_circular_viewport_carries_old_and_new_clip_boundaries() {
+    // An invented sheet with a circular viewport and a filled 2D solid that
+    // crosses its boundary (#188).
+    let set = scratch("circular-viewport");
+    fs::create_dir_all(set.join("templates")).unwrap();
+    fs::write(
+        set.join("set.yaml"),
+        "units: mm\noutput: dwg\nrows: rows.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        set.join("templates/t.yaml"),
+        "\
+units: mm
+paper: ISO A4 landscape
+layout: {name: Plan}
+objects:
+  - solid: {id: pad, corners: [[38, 20, 0], [56, 20, 0], [56, 60, 0], [38, 60, 0]]}
+  - viewport: {id: round, space: paper, clip: {center: [50, 40, 0], radius: 15}, view_center: [50, 40, 0], scale: 1}
+",
+    )
+    .unwrap();
+    fs::write(
+        set.join("rows.yaml"),
+        "rows:\n  - sheet: S-1\n    template: templates/t.yaml\n",
+    )
+    .unwrap();
+
+    // Move the filled solid AND shrink the circular viewport clip: the new
+    // display list carries the smaller clip boundary while `was_clip_boundaries`
+    // carries the original radius-15 circular boundary for the old geometry.
+    let change_set = json!({"operations": [
+        {"op": "move", "target": {"id": "S-1/pad"}, "by": [4, 0, 0]},
+        {"op": "clip_viewport", "target": {"id": "S-1/round"}, "clip": {"center": [50, 40, 0], "radius": 10}}
+    ]});
+    let report = draw(&request(&set, "S-1", Some(change_set)));
+    let p = preview(&report);
+
+    let pad_items = items_of(&report, "S-1/pad");
+    assert!(!pad_items.is_empty(), "moved pad draws through viewport");
+    assert_eq!(report.display_list.clip_boundaries.len(), 1);
+    for &idx in &pad_items {
+        assert!(p.changed.contains(&idx), "pad item {idx} is marked changed");
+        let item = &report.display_list.items[idx];
+        assert_eq!(item.clip_boundary, Some(0));
+    }
+    let new_radius = report.display_list.clip_boundaries[0]
+        .iter()
+        .map(|p| (p[0] - 50.0).hypot(p[1] - 40.0))
+        .fold(0.0_f64, f64::max);
+    assert!((new_radius - 10.0).abs() < 0.2, "new radius={new_radius}");
+
+    let was_pad = p
+        .was
+        .iter()
+        .find(|w| w.id.eq_ignore_ascii_case("S-1/pad"))
+        .expect("old pad items in preview.was");
+    assert!(!was_pad.items.is_empty());
+    assert_eq!(p.was_clip_boundaries.len(), 1);
+    for item in &was_pad.items {
+        assert_eq!(item.clip_boundary, Some(0));
+    }
+    let old_radius = p.was_clip_boundaries[0]
+        .iter()
+        .map(|p| (p[0] - 50.0).hypot(p[1] - 40.0))
+        .fold(0.0_f64, f64::max);
+    assert!(
+        (old_radius - 15.0).abs() < 0.2,
+        "old clip boundary keeps original radius 15: {old_radius}"
+    );
+}

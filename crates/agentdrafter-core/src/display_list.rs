@@ -43,7 +43,7 @@ use crate::description::{
     read_sheet_record, ObjectSources, ReadFiles, SavedSet, SheetSources, Source, ID_SEPARATOR,
 };
 use crate::display_snaps::{edge_fills, snaps_of, DisplaySnap};
-use crate::draw::{self, Bounds, DisplayList, HatchCutShort, Item};
+use crate::draw::{self, Bounds, DisplayList, HatchCutShort, Item, Point2};
 use crate::error::{Error, ErrorCode};
 use crate::model::{Attribute, Object, Paper, Sheet};
 use crate::output::read_record_with_recovery;
@@ -183,6 +183,11 @@ pub struct Preview {
     /// a deleted one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub was: Vec<WasDrawn>,
+    /// The clipped viewports' boundaries that `was` items name under
+    /// `clip_boundary`, as the sheet as it is drew them, in paper units (#188).
+    /// Left out when no old item is clipped to a boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub was_clip_boundaries: Vec<Vec<Point2>>,
     /// On the sheet drawn, a box round each check it would fail there, in
     /// drawing units: what the viewer clouds.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -732,6 +737,26 @@ fn preview_of(
             .is_some_and(|(s, _)| s.eq_ignore_ascii_case(name))
     };
     let (mut added, mut changed, mut was) = (Vec::new(), Vec::new(), Vec::new());
+    let mut was_clip_boundaries: Vec<Vec<Point2>> = Vec::new();
+    let mut old_boundary_map: HashMap<usize, usize> = HashMap::new();
+    let mut remap_was = |mut items: Vec<Item>| -> Vec<Item> {
+        let Some((_, was_list)) = old.as_ref() else {
+            return items;
+        };
+        for item in &mut items {
+            item.clip_boundary = item.clip_boundary.and_then(|old_idx| {
+                if let Some(&mapped) = old_boundary_map.get(&old_idx) {
+                    return Some(mapped);
+                }
+                let outline = was_list.clip_boundaries.get(old_idx)?;
+                let mapped = was_clip_boundaries.len();
+                was_clip_boundaries.push(outline.clone());
+                old_boundary_map.insert(old_idx, mapped);
+                Some(mapped)
+            });
+        }
+        items
+    };
     for object in p.objects.iter().filter(|o| on_sheet(&o.id)) {
         let after = items_of(drew.list, place(&drew.drawn.objects, &object.id));
         let before = old.as_ref().map_or_else(Vec::new, |(now, was_list)| {
@@ -742,7 +767,7 @@ fn preview_of(
             HowChanged::Deleted if !before.is_empty() => was.push(WasDrawn {
                 id: object.id.clone(),
                 how: HowChanged::Deleted,
-                items: before.into_iter().map(|(_, item)| item.clone()).collect(),
+                items: remap_was(before.into_iter().map(|(_, item)| item.clone()).collect()),
             }),
             HowChanged::Deleted => {}
             HowChanged::Changed => {
@@ -753,7 +778,7 @@ fn preview_of(
                     was.push(WasDrawn {
                         id: object.id.clone(),
                         how: HowChanged::Changed,
-                        items: gone,
+                        items: remap_was(gone),
                     });
                 }
             }
@@ -810,6 +835,7 @@ fn preview_of(
         added,
         changed,
         was,
+        was_clip_boundaries,
         clouds,
         warning,
     })

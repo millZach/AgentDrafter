@@ -82,6 +82,7 @@ fn a_ghost_keeps_what_the_proposal_adds_changes_moves_and_deletes() {
     assert_eq!(g.runs.len(), 3);
     assert_eq!(g.runs[0].lines, [[[5.0, 5.0], [6.0, 5.0]]]);
     assert_eq!(g.runs[0].pen, Some(0.35));
+    assert_eq!(g.runs[0].clip, None);
     assert!(!g.runs[0].fill && g.runs[2].fill);
     assert_eq!(g.runs[2].pen, None);
     assert_eq!(

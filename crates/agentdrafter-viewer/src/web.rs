@@ -1783,35 +1783,51 @@ impl Viewer {
                 .map_or(0.0, |mm| mm * per_mm)
                 .max(1.5 * ratio)
         };
-        // The old places, and what it deletes, struck through.
+        // The old places, and what it deletes, struck through. Each item's
+        // outline is clipped by its own viewport boundary (#188).
+        let mut active_clip: Option<Vec<[f64; 2]>> = None;
+        let mut apply_clip = |clip: Option<Vec<[f64; 2]>>| {
+            if clip != active_clip {
+                self.set_overlay_clip(clip.as_deref(), device, size);
+                active_clip = clip;
+            }
+        };
         for was in &p.was {
-            let lines: Vec<Segment> = was
-                .items
-                .iter()
-                .flat_map(preview::outline)
-                .map(seg)
-                .collect();
             let color = if was.deleted {
                 preview::DELETED
             } else {
                 preview::OLD_PLACE
             };
-            self.lines(&lines, ratio.max(1.0), color, size);
+            for item in &was.items {
+                let lines: Vec<Segment> = preview::outline(item).into_iter().map(seg).collect();
+                if lines.is_empty() {
+                    continue;
+                }
+                apply_clip(preview::clip_polygon(item, &p.was_clip_boundaries));
+                self.lines(&lines, ratio.max(1.0), color, size);
+            }
             if was.deleted {
                 if let Some(bounds) = preview::bounds_of(was.items.iter()) {
+                    apply_clip(None);
                     let strike = preview::strike(corners(bounds, 5.0 * ratio));
                     self.lines(&strike, 1.6 * ratio, preview::DELETED, size);
                 }
             }
         }
-        // What it adds and changes, item by item, at its pen's width.
+        // What it adds and changes, item by item, at its pen's width, clipped
+        // by its viewport boundary (#188).
         for (places, color) in [(&p.added, preview::ADDED), (&p.changed, preview::CHANGED)] {
             for &i in places {
                 let item = &sheet.list.items[i];
                 let lines: Vec<Segment> = preview::outline(item).into_iter().map(seg).collect();
+                if lines.is_empty() {
+                    continue;
+                }
+                apply_clip(preview::clip_polygon(item, &sheet.list.clip_boundaries));
                 self.lines(&lines, width(item), color, size);
             }
         }
+        apply_clip(None);
         // A dashed box round each object it adds or changes.
         let dash = 4.0 * ratio;
         for (added, bounds) in p.marked_objects(&sheet.list) {
@@ -1879,8 +1895,16 @@ impl Viewer {
             let color = [r, g, b, a * fade];
             let [r, g, b, a] = ghosts::PROPOSAL_DIM;
             let dim = [r, g, b, a * fade];
+            let mut active_clip: Option<Vec<[f64; 2]>> = None;
             for run in &ghost.runs {
                 let lines: Vec<Segment> = run.lines.iter().copied().map(seg).collect();
+                if lines.is_empty() {
+                    continue;
+                }
+                if run.clip != active_clip {
+                    self.set_overlay_clip(run.clip.as_deref(), device, size);
+                    active_clip = run.clip.clone();
+                }
                 let width = run.pen.map_or(0.0, |mm| mm * per_mm).max(1.4 * ratio);
                 if run.fill {
                     self.lines(&lines, ratio.max(1.0), color, size);
@@ -1888,6 +1912,9 @@ impl Viewer {
                     let dashed = ghosts::dash_run(&lines, 7.0 * ratio, 4.0 * ratio);
                     self.lines(&dashed, width, color, size);
                 }
+            }
+            if active_clip.is_some() {
+                self.set_overlay_clip(None, device, size);
             }
             let dash = 4.0 * ratio;
             let boxes: Vec<Segment> = ghost
@@ -1912,6 +1939,46 @@ impl Viewer {
             self.lines(&guides, ratio.max(1.0), dim, size);
         }
         gl.disable(Gl::BLEND);
+    }
+
+    /// Sets the stencil buffer to the even-odd interior of `outline` (drawing
+    /// units) so subsequent overlay `lines` calls clip cleanly to the viewport
+    /// boundary; `None` disables stencil clipping (#188).
+    fn set_overlay_clip(
+        &self,
+        outline: Option<&[[f64; 2]]>,
+        device: &dyn Fn(f64, f64) -> (f64, f64),
+        size: (f32, f32),
+    ) {
+        let gl = &self.gl;
+        let Some(outline) = outline.filter(|o| o.len() >= 3) else {
+            gl.disable(Gl::STENCIL_TEST);
+            return;
+        };
+        let fan = preview::stencil_fan(outline, device);
+        if fan.is_empty() {
+            gl.disable(Gl::STENCIL_TEST);
+            return;
+        }
+        gl.enable(Gl::STENCIL_TEST);
+        gl.clear_stencil(0);
+        gl.clear(Gl::STENCIL_BUFFER_BIT);
+        gl.color_mask(false, false, false, false);
+        gl.depth_mask(false);
+        gl.stencil_func(Gl::ALWAYS, 0, 0xff);
+        gl.stencil_op(Gl::KEEP, Gl::KEEP, Gl::INVERT);
+        gl.use_program(Some(&self.overlay.program));
+        gl.uniform2f(self.overlay.at("u_size"), size.0, size.1);
+        gl.uniform4f(self.overlay.at("u_color"), 1.0, 1.0, 1.0, 1.0);
+        gl.bind_vertex_array(Some(&self.overlay_array));
+        gl.bind_buffer(Gl::ARRAY_BUFFER, Some(&self.overlay_points));
+        gl.buffer_data_with_u8_array(Gl::ARRAY_BUFFER, &floats(&fan), Gl::DYNAMIC_DRAW);
+        gl.draw_arrays(Gl::TRIANGLES, 0, (fan.len() / 2) as i32);
+        gl.bind_vertex_array(None);
+        gl.color_mask(true, true, true, true);
+        gl.depth_mask(true);
+        gl.stencil_func(Gl::EQUAL, 0xff, 0xff);
+        gl.stencil_op(Gl::KEEP, Gl::KEEP, Gl::KEEP);
     }
 
     /// Draws `segments`, device pixels, `width` device pixels wide in `color`.
