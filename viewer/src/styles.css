@@ -693,13 +693,12 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
   .cmdnote, .hist { display: none; }
   .cmdbar { flex-wrap: wrap; }
   .cmdin { flex: 1 1 100%; font-size: 16px; padding: 6px 4px; background: #1b2129; border: 1px solid #5a6577; border-radius: 3px; }
-  /* Tight enough that a selected object's name and its five options, Move, Copy, Array, Erase and Clear,
-     stay on one line on a phone 390 pixels wide, whatever its font (#66). */
+  /* Tight enough that a selected object's name and its four phone options (Move, Copy, Array, Erase)
+     stay on one line down to 320 pixels wide, whatever the font (#66, #260, #247). */
   .opt { display: inline-block; background: #2b3a50; border: 1px solid #4f6684; border-radius: 12px; color: #cfe3ff; text-decoration: none; padding: 2px 6px; margin: 1px; font: 13px var(--ui); }
-  /* That line: the name shrinks, with an ellipsis, before an option wraps; only on a phone too narrow for
-     the options themselves do they wrap. */
+  /* That line: the name shrinks, with an ellipsis, before an option wraps (#247, #260). */
   .cmdline.oneline { display: flex; flex-wrap: wrap; align-items: center; }
-  .cmdline.oneline > span:first-child { flex: 1 1 0; min-width: 2em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 3px; }
+  .cmdline.oneline > span:first-child { flex: 1 1 0; min-width: 1.5em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 3px; }
   .cmdline.oneline .opt { flex: none; }
   .brk, .chev { display: none; }
   .opt.main { background: #1f6fc9; border-color: #3d8fe8; color: #fff; font-weight: 600; }

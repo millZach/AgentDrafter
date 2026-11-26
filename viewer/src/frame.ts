@@ -291,14 +291,29 @@ export function promptFor(s: PromptState): Prompt {
   }
   if (s.selected) {
     // Move, Copy, Array and Erase take what is selected, as AutoCAD's do. A
-    // phone gives the name alone, so its buttons stay together: the halo
-    // and the card say it is selected.
+    // phone gives the name alone and drops Clear (quick properties' × and
+    // tapping empty canvas already clear the selection), so the name and all
+    // four options stay on one line even on narrow phones (#260, #247).
+    const acts: [string, Act][] = s.touch
+      ? [
+          ['Move', 'move'],
+          ['Copy', 'copy-objects'],
+          ['Array', 'array-objects'],
+          ['Erase', 'erase'],
+        ]
+      : [
+          ['Move', 'move'],
+          ['Copy', 'copy-objects'],
+          ['Array', 'array-objects'],
+          ['Erase', 'erase'],
+          ['Clear', 'clear'],
+        ];
     return {
       command: null,
       oneLine: !!s.touch,
       parts: [
         { text: s.touch ? `${nameOf(s.selected)} ` : `${nameOf(s.selected)} selected ` },
-        ...options(['Move', 'move'], ['Copy', 'copy-objects'], ['Array', 'array-objects'], ['Erase', 'erase'], ['Clear', 'clear']),
+        ...options(...acts),
       ],
     };
   }

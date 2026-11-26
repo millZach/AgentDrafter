@@ -1969,15 +1969,16 @@ const checks = {
         });
         assert(placed.qp[3] <= placed.cmd[0] && placed.cmd[1] <= placed.peek && placed.qp[0] >= 0 && placed.qp[2] <= placed.width, `on a phone the card sits above the command bar, above the peek: ${JSON.stringify(placed)}`);
         await page.screenshot({ path: join(out, 'frame-phone-selected.png') });
-        // The selected object's line is one line, whatever the font: every
-        // option and the name on one row, the name giving way first (#66).
+        // The selected object's line is one line, whatever the font: four
+        // phone edit options (Clear dropped on phone; QP × clears) and the
+        // name on one row, the name giving way first (#66, #260, #247).
         const line = await page.evaluate(() => {
           const tops = [...document.querySelectorAll('.cmdline.oneline > *')]
             .filter((el) => getComputedStyle(el).display !== 'none')
             .map((el) => Math.round(el.getBoundingClientRect().top + el.getBoundingClientRect().height / 2));
           return { tops, options: document.querySelectorAll('.cmdline.oneline .opt').length };
         });
-        assert(line.options === 5 && Math.max(...line.tops) - Math.min(...line.tops) <= 3, `the selected object's line is one line: ${JSON.stringify(line)}`);
+        assert(line.options === 4 && Math.max(...line.tops) - Math.min(...line.tops) <= 3, `the selected object's line is one line: ${JSON.stringify(line)}`);
         assert(await page.isVisible('.va-peek button[data-act="undo"]') && await page.isVisible('.va-peek button[data-act="accept"]'), 'Undo last and Accept are in the peek');
         // Fit stays in reach while something is selected: nothing covers it, and it fits.
         const fitButton = await page.evaluate(() => {
@@ -2019,12 +2020,50 @@ const checks = {
         seen.phone = { toggles, placed, raised };
         await context.close();
       }
-      // A small phone, 320 by 568: a long prompt, a number typed with no tool
-      // running, wraps the command bar, and quick properties stay above it, at
-      // its real height.
+      // A small phone, 320 by 568: even a long object name stays on one line
+      // with ellipsis (#260, #247), QP × clears selection, and a long error
+      // prompt wraps the command bar while quick properties stay above it.
       {
         const context = await b.newContext({ ...PHONE, viewport: { width: 320, height: 568 } });
         const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        // Long object name (`home-run-cable`, 14 chars) on a 320 px phone stays on 1 line with ellipsis (#260, #247).
+        const longAt = await page.evaluate(() => {
+          const p = window.agentdrafterViewer;
+          const place = p.summary.objects.findIndex((o) => o.id === 'DP-LD-101/home-run-cable');
+          const [x0, y0, x1, y1] = p.bounds([place]);
+          const v = p.view();
+          const r = document.querySelector('.stage').getBoundingClientRect();
+          for (let j = 1; j < 8; j++) {
+            for (let i = 1; i < 12; i++) {
+              const x = x0 + ((x1 - x0) * i) / 12;
+              const y = y0 + ((y1 - y0) * j) / 8;
+              if (p.pickAt(x, y, 16) === place) return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
+            }
+          }
+          return null;
+        });
+        assert(longAt, 'a point picks home-run-cable on a 320 px phone');
+        await page.touchscreen.tap(longAt[0], longAt[1]);
+        await page.waitForSelector('.qp');
+        await sleep(300);
+        const narrowLine = await page.evaluate(() => {
+          const els = [...document.querySelectorAll('.cmdline.oneline > *')].filter((el) => getComputedStyle(el).display !== 'none');
+          const tops = els.map((el) => Math.round(el.getBoundingClientRect().top + el.getBoundingClientRect().height / 2));
+          const name = document.querySelector('.cmdline.oneline > span:first-child');
+          return {
+            tops,
+            options: document.querySelectorAll('.cmdline.oneline .opt').length,
+            clipped: !!name && name.scrollWidth > name.clientWidth,
+            text: name?.textContent?.trim() ?? '',
+          };
+        });
+        assert(
+          narrowLine.options === 4 && Math.max(...narrowLine.tops) - Math.min(...narrowLine.tops) <= 3 && narrowLine.clipped && narrowLine.text === 'home-run-cable',
+          `320 px phone keeps a long object name on one line with ellipsis: ${JSON.stringify(narrowLine)}`,
+        );
+        // Quick properties × clears the selection on a phone.
+        await page.tap('.qp [data-close]');
+        await page.waitForFunction(() => !document.querySelector('.qp'), null, { timeout: 10000 });
         const device = await at(page, 'DP-LD-101/device');
         await page.touchscreen.tap(...middle(device.box));
         await page.waitForSelector('.qp');
