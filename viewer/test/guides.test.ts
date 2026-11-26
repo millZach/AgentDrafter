@@ -14,6 +14,7 @@ import {
   layerChosen,
   marked,
   nowWords,
+  previewConfirmSend,
   pulseOf,
   skipStep,
   startRun,
@@ -178,6 +179,20 @@ test('a tool’s change set is marked with the step only on the guide’s sheet,
   assert.equal(marked(cs, two, guide, 'DP-LD-102'), cs);
   assert.equal(marked(cs, stopRun(two), guide, 'DP-LD-101'), cs);
   assert.equal(marked(cs, null, guide, 'DP-LD-101'), cs);
+});
+
+test('a template preview keeps the guide mark for Change all only while that guide run stays active (#264)', () => {
+  const base = { operations: [{ op: 'move', target: { id: 'DP-LD-101/terminal-2' }, by: [0, -0.1, 0] }] };
+  const active = stepDone(startRun(guide), guide);
+  const withMark = marked(base, active, guide, 'DP-LD-101');
+  assert.deepEqual(previewConfirmSend(withMark, active.runId, active), { changeSet: withMark, runId: active.runId });
+  // Stopped while the preview was open: mark stripped so it lands as a plain edit.
+  assert.deepEqual(previewConfirmSend(withMark, active.runId, stopRun(active)), { changeSet: base, runId: undefined });
+  // Restarted with a new runId while the preview was open: mark stripped.
+  const restarted = stepDone(startRun(guide), guide);
+  assert.deepEqual(previewConfirmSend(withMark, active.runId, restarted), { changeSet: base, runId: undefined });
+  // Unmarked preview stays untouched.
+  assert.deepEqual(previewConfirmSend(base, undefined, active), { changeSet: base, runId: undefined });
 });
 
 test('the journal marks a change set sent for a step', () => {

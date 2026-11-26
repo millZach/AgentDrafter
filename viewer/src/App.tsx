@@ -132,6 +132,7 @@ import {
   endsStepTool,
   givenToast,
   landed as guideLanded,
+  previewConfirmSend,
   pulseOf,
   toastAfterStart,
   marked as guideMarked,
@@ -274,6 +275,8 @@ interface Previewing {
   picked: Picked | null;
   /** A proposal opened (#155): Keep sends it with `keep`, and closing it leaves it waiting. */
   proposal?: Proposal;
+  /** The guide run this template preview belongs to (#264), so Change all ticks its step. */
+  guideRunId?: number;
 }
 
 /** A waiting proposal drawn on a sheet as it would leave it (#155): the reply's text, its preview, or why it could not be drawn. */
@@ -1843,10 +1846,13 @@ function DrawingWorkspace({
         // takes back the last thing taken, so it goes.
         setRun((r) => (r?.note?.act?.kind === 'take_back' ? { ...r, note: null } : r));
       }
-      // Each in order: one to a template's object is asked about first.
+      // Each in order: one to a template's object is asked about first,
+      // carrying the guide mark through the preview when a guide runs (#264).
       for (const s of o.sends ?? []) {
         if (s.template) {
-          startPreview(s);
+          const cs = guideMarked(s.change_set, runNow.current, runGuide(), summary?.sheet ?? null);
+          const guideRunId = cs !== s.change_set ? runNow.current?.runId : undefined;
+          startPreview(cs !== s.change_set ? { ...s, change_set: cs } : s, guideRunId);
           asking = true;
         } else {
           void sendGuided(s);
@@ -2238,7 +2244,7 @@ function DrawingWorkspace({
   // the sheet shown as it would leave it, then each sheet it reaches, one
   // by one. Cancel lands nothing; Change all sends it, and it lands on all
   // of them or on none.
-  function startPreview(s: ToolSend) {
+  function startPreview(s: ToolSend, guideRunId?: number) {
     if (!s.template) return;
     previewKeys.current += 1;
     setPicked(null);
@@ -2249,7 +2255,7 @@ function DrawingWorkspace({
     setPreviewReport(null);
     const home = summary?.sheet ?? wanted ?? '';
     const homeLayout = summary?.layout ?? wantedLayout ?? null;
-    setPreview({ send: { ...s, template: s.template }, home, homeLayout, key: previewKeys.current, picked });
+    setPreview({ send: { ...s, template: s.template }, home, homeLayout, key: previewKeys.current, picked, guideRunId });
     // The command bar's field lets go, so the arrow keys step through the sheets.
     field.current?.blur();
     log(`Preview: ${s.template.edit} ${previewTitle(s.template).reach}. Nothing has landed.`);
@@ -2285,8 +2291,15 @@ function DrawingWorkspace({
       return;
     }
     endPreview(was.home, was.homeLayout, was.picked);
+    const { changeSet, runId } = previewConfirmSend(
+      was.send.change_set as ToolSend['change_set'] & { guide?: { guide: number; step: number } },
+      was.guideRunId,
+      runNow.current,
+    );
+    const toSend = changeSet === was.send.change_set ? was.send : { ...was.send, change_set: changeSet };
+    const onReply = runId !== undefined ? (reply: ChangeReply) => guideReplied(reply, runId) : undefined;
     // An edit in quick properties that did not land shows its value again.
-    void sendChange(was.send).then((ok) => ok || setPropsReset((n) => n + 1));
+    void sendChange(toSend, undefined, onReply).then((ok) => ok || setPropsReset((n) => n + 1));
   };
   // A sheet whose DWG could not be written may be written now: ask again.
   const recheckPreview = () => {
