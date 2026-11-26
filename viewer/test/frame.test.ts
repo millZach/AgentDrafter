@@ -4,7 +4,9 @@ import { test } from 'node:test';
 import {
   barNote,
   barWarning,
+  escapeEndsFromField,
   letGoOnOptionPress,
+  rightClickText,
   canToolUndo,
   isUndoKey,
   CORE_ORDER,
@@ -757,17 +759,31 @@ test('Copy\'s template warning shows above its prompt in the renderer\'s words, 
   );
 });
 
-test('an option pressed lets a field being edited go, and gives up the focus Tab gave it, but keeps the command bar\'s field', () => {
+test('an option pressed lets any other focused control go, including toolbar buttons, but keeps the command bar\'s field (#248)', () => {
   // A quick properties field being edited lets go, so its edit lands as leaving it does.
   assert.equal(letGoOnOptionPress({ tag: 'INPUT', option: false, commandField: false }), true);
   assert.equal(letGoOnOptionPress({ tag: 'TEXTAREA', option: false, commandField: false }), true);
   assert.equal(letGoOnOptionPress({ tag: 'SELECT', option: false, commandField: false }), true);
-  // An option reached by Tab gives the focus up, so Enter after the click enters at the prompt.
+  // An option reached by Tab, or a toolbar button focused before clicking Copy's Undo (such as Fit), gives focus up so Enter enters at the prompt.
   assert.equal(letGoOnOptionPress({ tag: 'BUTTON', option: true, commandField: false }), true);
-  // The command bar's field keeps it, and so does anything else, such as a ribbon button.
+  assert.equal(letGoOnOptionPress({ tag: 'BUTTON', option: false, commandField: false }), true);
+  // The command bar's field keeps focus, and nothing focused needs no blur.
   assert.equal(letGoOnOptionPress({ tag: 'INPUT', option: false, commandField: true }), false);
-  assert.equal(letGoOnOptionPress({ tag: 'BUTTON', option: false, commandField: false }), false);
   assert.equal(letGoOnOptionPress(null), false);
+});
+
+test('Esc and right-click with a half-typed point draft finish Copy right away (#248)', () => {
+  // With a tool running (such as Copy with copies placed and `@3,` typed), the first Esc finishes it.
+  assert.equal(escapeEndsFromField('@3,', true, false), true);
+  assert.equal(escapeEndsFromField('', true, false), true);
+  assert.equal(escapeEndsFromField('hello', true, true), true);
+  // With no tool running, Esc clears typed text first without dropping selection.
+  assert.equal(escapeEndsFromField('move ', false, false), false);
+  assert.equal(escapeEndsFromField('', false, false), true);
+  // Right-click on the drawing clears a half-typed point draft and acts as Done, while Text keeps its words.
+  assert.equal(rightClickText('@3,', false), '');
+  assert.equal(rightClickText('', false), '');
+  assert.equal(rightClickText('FT-101', true), 'FT-101');
 });
 
 test('a pending array is dropped the moment another sheet or layout is asked for, not when it comes (#66)', () => {

@@ -1120,19 +1120,39 @@ export function isUndoKey(e: { key: string; ctrlKey: boolean; metaKey: boolean; 
 }
 
 /**
+ * Whether Escape in the command bar's field ends the running tool (or
+ * steps back) right away, after clearing what was typed (#248): always
+ * when the field was empty, when typing a Text tool's words, or when a
+ * tool is running (so a half-typed point such as `@3,` finishes Copy on
+ * the first Esc instead of taking two). With no tool running, Esc clears
+ * typed text first without dropping the selection.
+ */
+export function escapeEndsFromField(typed: string, toolRunning: boolean, typingText: boolean): boolean {
+  return !typed || typingText || toolRunning;
+}
+
+/**
+ * What a right-click on the drawing submits to the running tool (#248):
+ * the text being typed when the Text tool takes words, otherwise an empty
+ * Enter (Done) so a half-typed point draft such as `@3,` is cleared rather
+ * than rejected by the point parser.
+ */
+export function rightClickText(typed: string, typingText: boolean): string {
+  return typingText ? typed : '';
+}
+
+/**
  * Whether a press on a command bar option lets the focus go before the
  * option acts. The option takes no focus, so Enter after clicking Undo
- * enters at the prompt; but a field being edited, such as quick
- * properties', is let go first, so its edit lands as leaving it does; and
- * an option that has the focus, reached by Tab, gives it up, so Enter
- * after the click does not press it again. The command bar's own field
- * keeps it, and its typing (#66).
+ * enters at the prompt; any other focused control — a field being edited,
+ * an option reached by Tab, or a toolbar button such as Fit the sheet
+ * focused before clicking Copy's Undo (#248) — gives focus up first so
+ * Enter enters at the prompt rather than triggering that button again.
+ * The command bar's own field keeps it, and its typing (#66).
  */
 export function letGoOnOptionPress(active: { tag: string; option: boolean; commandField: boolean } | null): boolean {
   if (!active) return false;
-  if (active.option) return true;
-  if (active.commandField) return false;
-  return active.tag === 'INPUT' || active.tag === 'TEXTAREA' || active.tag === 'SELECT';
+  return !active.commandField;
 }
 
 /** The template warning the command bar shows above its prompt: the running tool's, but not while a change set is shown before it lands. */

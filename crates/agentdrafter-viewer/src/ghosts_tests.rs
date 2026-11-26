@@ -171,3 +171,33 @@ fn a_run_is_dashed_at_a_fractional_pixel_ratio_and_always_ends() {
     let dashes = dash_run(&odd, 7.0 * 1.25, 4.0 * 1.25);
     assert!(!dashes.is_empty() && dashes.len() < 20, "{}", dashes.len());
 }
+
+#[test]
+fn ghost_runs_divides_segment_budget_evenly_across_copies() {
+    // A 30,000-segment polyline copied 3 times would starve copy 3 under a
+    // single shared 50,000-segment cap; dividing evenly gives every copy
+    // 16,666 segments within the 50,000 total budget (#248).
+    let pts: Vec<[f64; 2]> = (0..=30_000).map(|i| [i as f64, 0.0]).collect();
+    let runs: Vec<&[[f64; 2]]> = vec![pts.as_slice()];
+    let offsets = [[0.0, 10.0], [0.0, 20.0], [0.0, 30.0]];
+    let out = ghost_runs(&offsets, &runs, MOST_GHOST_SEGMENTS, |&[dx, dy], p| {
+        (p[0] + dx, p[1] + dy)
+    });
+    assert_eq!(out.len(), 3, "every copy gets geometry");
+    let total: usize = out.iter().map(Vec::len).sum();
+    assert!(total <= MOST_GHOST_SEGMENTS, "total={total}");
+    for (i, &[_, dy]) in offsets.iter().enumerate() {
+        assert_eq!(out[i].len(), 16_666);
+        assert_eq!(out[i][0][1], dy);
+    }
+    // Small selections draw every segment of every copy untouched.
+    let small = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]];
+    let out = ghost_runs(
+        &offsets,
+        &[&small[..]],
+        MOST_GHOST_SEGMENTS,
+        |&[dx, dy], p| (p[0] + dx, p[1] + dy),
+    );
+    assert_eq!(out.len(), 3);
+    assert!(out.iter().all(|r| r.len() == 2));
+}

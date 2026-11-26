@@ -90,6 +90,7 @@ import {
   switchingAway,
   canToolUndo,
   isUndoKey,
+  rightClickText,
   toggledWords,
   typeWords,
   nameOf,
@@ -2100,13 +2101,22 @@ function DrawingWorkspace({
     }
     toolDid(v.tool_input(text));
   };
-  // Enter, Space or a right-click away from the field: what it holds is entered.
+  // Enter or Space away from the field: what it holds is entered.
   const enterTyped = () => {
     const f = field.current;
     const text = f?.value ?? '';
     if (f) f.value = '';
     setTyped('');
     enter(text);
+  };
+  // Right-click on the drawing while a tool runs: Done, clearing any
+  // half-typed point draft so it never stalls finishing Copy (#248).
+  const rightClickFinish = () => {
+    const f = field.current;
+    const text = f?.value ?? '';
+    if (f) f.value = '';
+    setTyped('');
+    enter(rightClickText(text, !!toolState?.typing_text));
   };
   useEffect(() => {
     if (!pendingTool || !summary || summary.entry !== null || at !== null) return;
@@ -2932,9 +2942,14 @@ function DrawingWorkspace({
       const typedText = field.current?.value ?? '';
       if (a === 'tool:done' && toolState?.typing_text && typedText) {
         if (field.current) field.current.value = '';
+        setTyped('');
         toolDid(v.tool_input(typedText));
         toolDid(v.tool_input(''));
         return;
+      }
+      if (a === 'tool:done' || a === 'tool:cancel') {
+        if (field.current) field.current.value = '';
+        setTyped('');
       }
       toolDid(v.tool_option(a.slice(5)));
     }
@@ -3572,7 +3587,7 @@ function DrawingWorkspace({
             onPickedColor={setPickedColor}
             tool={toolState}
             onToolOutcome={toolDid}
-            onToolEnter={enterTyped}
+            onToolEnter={rightClickFinish}
             ortho={toggles.ortho}
             layer={toolLayer}
             handle={drawing}
@@ -3716,6 +3731,7 @@ function DrawingWorkspace({
               }
             }}
             typingText={!!toolState?.typing_text}
+            toolRunning={!!toolState?.tool}
             hint={askHint(typed, !!toolState?.tool, onPreview, toolWord, toolName)}
             spaceEnters={(text) => spaceIsEnter(text, !!toolState?.tool, toolWord)}
             onTyped={setTyped}
