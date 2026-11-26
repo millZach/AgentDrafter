@@ -810,6 +810,7 @@ fn the_journal_and_undo_leave_the_checker_reading_the_sets_files() {
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);

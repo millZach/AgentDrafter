@@ -103,6 +103,10 @@ fn samples() -> Vec<(&'static str, Value)> {
             json!({"set": "missing", "fonts": ["f"], "no_system_fonts": true}),
         ),
         (
+            "end-guide",
+            json!({"set": "missing", "guide": 1, "by": "drafter"}),
+        ),
+        (
             "look-at",
             json!({"set": "missing", "sheet": "DEMO-001", "layout": "Wiring", "selected": ["DEMO-001/border"]}),
         ),

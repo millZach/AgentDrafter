@@ -404,6 +404,7 @@ fn change_set_group_operations_targeting_and_undo() {
     let u = undo(&UndoRequest {
         set: set.clone(),
         change_set: entry1,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(u.ok, "{u:?}");

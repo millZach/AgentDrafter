@@ -53,6 +53,10 @@ pub struct UndoRequest {
     pub set: PathBuf,
     /// The change set to undo, by its entry's number in the journal.
     pub change_set: u64,
+    /// The journal's newest entry the caller has looked at, 0 for an empty
+    /// journal: the undo is refused if the journal holds a newer one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_seen: Option<u64>,
     /// Report what the undo would do, and write nothing.
     #[serde(default)]
     pub dry_run: bool,
@@ -141,6 +145,12 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
         Some(lock(folder)?)
     };
     let entries = read_entries(folder)?;
+    let newest = entries.last().map_or(0, |e| e.entry);
+    if let Some(seen) = request.newest_seen {
+        if seen != newest {
+            return Err(moved_on(&entries, seen, newest));
+        }
+    }
     let fates = fates(&entries);
     let wanted = request.change_set;
     let refuse = |code: ErrorCode, why: String| {
@@ -418,6 +428,39 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
         folders_removed,
         inconsistent: inconsistent(folder),
     })
+}
+
+/// The error for an undo whose `newest_seen` does not match the journal's
+/// newest entry: another edit landed since the caller looked, so nothing
+/// is undone.
+pub(super) fn moved_on(entries: &[Entry], seen: u64, newest: u64) -> Error {
+    let since: Vec<String> = entries
+        .iter()
+        .filter(|e| e.entry > seen)
+        .map(|e| {
+            let kind = match e.kind {
+                EntryKind::ChangeSet => "change set",
+                EntryKind::FailedAttempt => "failed attempt",
+                EntryKind::Undo => "undo",
+                EntryKind::Accept => "accept",
+                EntryKind::Discard => "discard",
+            };
+            format!("{kind} {}", e.entry)
+        })
+        .collect();
+    let message = if seen > newest {
+        format!(
+            "the journal's newest entry is {newest}, not {seen}: look at the journal as it is, \
+             then undo again; nothing was changed"
+        )
+    } else {
+        format!(
+            "the journal has moved on since entry {seen}, the newest the undo was asked to \
+             follow: {} came since. Look at them, then undo again; nothing was changed",
+            since.join(", ")
+        )
+    };
+    Error::new(ErrorCode::MovedOn, message).at_field("newest_seen")
 }
 
 /// The change sets an undo can take, in words.

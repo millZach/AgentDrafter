@@ -260,6 +260,7 @@ fn replace_text_whole_word_dry_run_apply_and_undo_across_set() {
     let undone = undo(&UndoRequest {
         set: dir.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{undone:?}");

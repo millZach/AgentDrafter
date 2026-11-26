@@ -419,6 +419,7 @@ fn drawing_set_wipeout_draw_order_text_to_front_and_undo() {
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: entry1,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:?}", undone.error);

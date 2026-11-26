@@ -799,7 +799,9 @@ fn stream_journal(
     let proposals = find_command("proposals").expect("the registry holds `proposals`");
     let guides = find_command("guides").expect("the registry holds `guides`");
     let kind = watch_kind(set);
-    type Seen = (Option<(u64, SystemTime)>, Vec<String>, Vec<String>);
+    type FileStamp = Option<(u64, SystemTime)>;
+    type Listed = Vec<(String, FileStamp)>;
+    type Seen = (FileStamp, Listed, Listed);
     let mut seen: Option<Seen> = None;
     let (mut sent, mut sent_proposals): (Option<String>, Option<String>) = (None, None);
     let mut sent_guides: Option<String> = None;
@@ -876,19 +878,24 @@ fn stream_journal(
     }
 }
 
-/// The files of the set's proposals, or its guides, in `folder`, which
-/// change when one is proposed or given; none when it has none.
-fn listed_state(set: &Path, folder: &str) -> Vec<String> {
-    let Ok(listing) = fs::read_dir(set.join(folder)) else {
+/// The files of the set's proposals, or its guides, in `folder`, with each
+/// file's length and modification time, which change when one is added or
+/// updated (such as a guide ended); none when it has none.
+fn listed_state(set: &Path, folder: &str) -> Vec<(String, Option<(u64, SystemTime)>)> {
+    let dir = set.join(folder);
+    let Ok(listing) = fs::read_dir(&dir) else {
         return Vec::new();
     };
-    let mut names: Vec<String> = listing
+    let mut items: Vec<(String, Option<(u64, SystemTime)>)> = listing
         .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| name.ends_with(".json"))
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            name.ends_with(".json")
+                .then(|| (name, file_state(&entry.path())))
+        })
         .collect();
-    names.sort();
-    names
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    items
 }
 
 /// A journal file's length and when it was last written, which change when an

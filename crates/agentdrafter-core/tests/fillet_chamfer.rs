@@ -242,6 +242,7 @@ fn fillet_and_chamfer_two_objects_radius_zero_polylines_display_list_and_undo() 
     let u = undo(&UndoRequest {
         set: dir.clone(),
         change_set: report.journal_entry.unwrap(),
+        newest_seen: None,
         dry_run: false,
     });
     assert!(u.ok, "{u:#?}");

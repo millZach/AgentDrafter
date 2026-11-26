@@ -607,6 +607,7 @@ objects:
     let undo_reply = undo(&UndoRequest {
         set: set_dir.clone(),
         change_set: change_report.journal_entry.expect("journal id"),
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undo_reply.ok, "{:?}", undo_reply.error);

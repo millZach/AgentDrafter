@@ -82,6 +82,7 @@ fn undo_code(set: &Path, change_set: u64) -> Option<ErrorCode> {
     let reply = undo(&UndoRequest {
         set: set.to_owned(),
         change_set,
+        newest_seen: None,
         dry_run: false,
     });
     reply.error.map(|e| e.code)

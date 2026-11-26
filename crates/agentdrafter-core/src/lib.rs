@@ -128,9 +128,10 @@ pub use change::{
     ASSISTANT, DRAFTER, PROPOSALS_FOLDER,
 };
 pub use change::{
-    guide_with, guides_with, GuideChecked, GuideGiven, GuideListed, GuideMark, GuidePoint,
-    GuideReport, GuideRequest, GuidesReport, GuidesRequest, PointListed, Setting, SnapNamed,
-    StepGiven, StepListed, GUIDES_FOLDER, GUIDE_TOOLS,
+    end_guide, guide_with, guides_with, EndGuideReport, EndGuideRequest, GuideChecked, GuideEnded,
+    GuideGiven, GuideListed, GuideMark, GuidePoint, GuideReport, GuideRequest, GuidesReport,
+    GuidesRequest, PointListed, Setting, SnapNamed, StepGiven, StepListed, GUIDES_FOLDER,
+    GUIDE_TOOLS,
 };
 pub use change::{
     journal, original_journal_file, undo, CommitState, Entry, EntryKind, FileState, FileUndone,

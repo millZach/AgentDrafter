@@ -2385,6 +2385,7 @@ fn redefine_block_replaces_the_definition_and_removes_values_no_longer_defined()
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);
@@ -3283,6 +3284,7 @@ fn leader_lines_are_added_to_and_deleted_from_a_sheets_multileader() {
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: added.journal_entry.unwrap(),
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);
@@ -3333,6 +3335,7 @@ fn a_leader_line_added_to_a_templates_multileader_reaches_every_sheet() {
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: report.journal_entry.unwrap(),
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);

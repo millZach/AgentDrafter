@@ -5744,14 +5744,14 @@ const checks = {
           completes: { op: 'add_text', sheet: 'DP-LD-101', contents: '101+', height: 0.08, position: { snap: { made_by: 2, snap: 'midpoint' } } },
         },
         {
-          say: 'Move the number 0.04 in up, so the wire doesn’t run through its letters.',
+          say: 'Move the number 0.4 in left and 0.04 in up, clear of the wire and the zone line.',
           title: 'Move the number above the wire',
           tool: 'move',
           points: [
             { object: { made_by: 3 }, label: '101+' },
             { at: { snap: { made_by: 2, snap: 'midpoint' } }, label: 'base point' },
           ],
-          completes: { op: 'move', target: { made_by: 3 }, by: [0, 0.04, 0] },
+          completes: { op: 'move', target: { made_by: 3 }, by: [-0.4, 0.04, 0] },
         },
       ],
     };
@@ -5949,13 +5949,15 @@ const checks = {
         await page.keyboard.press('Enter');
         await ringOn(page, 1, 4, 1, 'base point');
         await clickAt(page, ringAt(1, 4, 1));
-        await page.waitForFunction(() => (document.querySelector('[data-g-now]')?.textContent ?? '').includes('@0,0.04'), null, { timeout: 15000 });
+        await page.waitForFunction(() => (document.querySelector('[data-g-now]')?.textContent ?? '').includes('@-0.4,0.04'), null, { timeout: 15000 });
         await shot(page, 'guides-laptop-10-step4-type.png');
         before = journal().entries.length;
-        await page.keyboard.type('@0,0.04');
+        await page.keyboard.type('@-0.4,0.04');
         await page.keyboard.press('Enter');
         entry = await landedAfter(before, 'the move');
         assert(entry.guide?.step === 4, `step 4 marked: ${JSON.stringify(entry.guide)}`);
+        const checked = agentIn(folder, 'check', 'demo-plant', '--sheet', 'DP-LD-101');
+        assert(checked.ok && checked.result.passed, `the completed guide passes every check: ${JSON.stringify(checked)}`);
         // The end: every step done, what landed, and one Undo.
         await page.waitForSelector('[data-guide="end"]', { timeout: 15000 });
         words = await banner(page);
@@ -5982,6 +5984,11 @@ const checks = {
         await shot(page, 'guides-laptop-13-undone.png');
         await page.click('[data-g="close"]');
         await page.waitForFunction(() => !document.querySelector('.gbanner'), null, { timeout: 15000 });
+        const dropUntil = Date.now() + 10000;
+        while (listed().some((g) => g.guide === 1)) {
+          assert(Date.now() < dropUntil, `guide 1 was not ended on Close: ${JSON.stringify(listed())}`);
+          await sleep(100);
+        }
         seen.laptop = { marks, undone: undone.undid, problems };
         assert(!problems.length, `no page errors: ${problems.join('; ')}`);
         await context.close();

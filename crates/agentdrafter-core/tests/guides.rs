@@ -8,10 +8,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, change_with, guide_with, guides_with, journal, propose_with, undo,
-    ChangeReport, ChangeRequest, ErrorCode, GuideChecked, GuideRequest, GuidesReport,
-    GuidesRequest, Interface, JournalRequest, ProposeRequest, Reply, SetBuildRequest, Settings,
-    UndoRequest, GUIDES_FOLDER, JOURNAL_FILE,
+    build_set_with, change_with, end_guide, guide_with, guides_with, journal, propose_with, undo,
+    ChangeReport, ChangeRequest, EndGuideRequest, ErrorCode, GuideChecked, GuideRequest,
+    GuidesReport, GuidesRequest, Interface, JournalRequest, ProposeRequest, Reply, SetBuildRequest,
+    Settings, UndoRequest, GUIDES_FOLDER, JOURNAL_FILE,
 };
 use serde_json::{json, Value};
 
@@ -273,6 +273,7 @@ fn a_change_set_sent_for_a_step_is_marked_and_checked_against_it() {
     undo(&UndoRequest {
         set: set.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
 
@@ -386,6 +387,7 @@ fn undone(set: &Path, entry: u64) {
     let reply = undo(&UndoRequest {
         set: set.to_owned(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(reply.ok, "{:#?}", reply.error);
@@ -459,13 +461,28 @@ fn only_the_change_set_that_completes_a_step_names_what_it_made() {
 }
 
 #[test]
-fn a_step_is_completed_on_its_sheet_by_its_objects_with_its_id() {
+fn a_step_is_completed_on_its_sheet_by_its_objects_and_refuses_explicit_id() {
     let set = demo_set("where");
+    // An add_* step meant to be drawn by hand refuses an explicit `id`.
+    let with_id = give(
+        &set,
+        json!({"title": "Rule a line", "sheet": "DEMO-002", "steps": [
+            {"say": "Draw the rule.", "tool": "line", "points": [{"at": [1, 1]}, {"at": [2, 1]}],
+             "completes": {"op": "add_line", "sheet": "DEMO-002", "id": "rule", "from": [1, 1, 0], "to": [2, 1, 0]}}
+        ]}),
+    )
+    .unwrap_err();
+    assert_eq!(with_id.code, ErrorCode::BadValue, "{}", with_id.message);
+    assert_eq!(
+        with_id.field.as_deref(),
+        Some("guide.steps[0].completes.id")
+    );
+
     give(
         &set,
         json!({"title": "Rule a line and copy the heading", "sheet": "DEMO-002", "steps": [
             {"say": "Draw the rule.", "tool": "line", "points": [{"at": [1, 1]}, {"at": [2, 1]}],
-             "completes": {"op": "add_line", "sheet": "DEMO-002", "id": "rule", "from": [1, 1, 0], "to": [2, 1, 0]}},
+             "completes": {"op": "add_line", "sheet": "DEMO-002", "from": [1, 1, 0], "to": [2, 1, 0]}},
             {"say": "Copy the heading 1 down.", "tool": "copy",
              "points": [{"object": {"id": "DEMO-002/heading"}}, {"at": [1, 10]}, {"at": [1, 9]}],
              "completes": {"op": "copy", "target": {"id": "DEMO-002/heading"}, "by": [0, -1, 0]}}
@@ -473,23 +490,25 @@ fn a_step_is_completed_on_its_sheet_by_its_objects_with_its_id() {
     )
     .unwrap();
     let step = |n: u64, op: Value| json!({"guide": {"guide": 1, "step": n}, "operations": [op]});
-    let line = |sheet: &str, id: &str| json!({"op": "add_line", "sheet": sheet, "id": id, "from": [1, 1, 0], "to": [2, 1, 0]});
+    let line =
+        |sheet: &str| json!({"op": "add_line", "sheet": sheet, "from": [1, 1, 0], "to": [2, 1, 0]});
     let tried = |change_set: Value| {
         let (checked, entry) = landed(&set, change_set);
         undone(&set, entry);
         checked
     };
 
-    let elsewhere = tried(step(1, line("DEMO-003", "rule")));
+    let elsewhere = tried(step(1, line("DEMO-003")));
     assert!(!elsewhere.completes);
     assert_eq!(
         elsewhere.message,
         "That landed on `DEMO-003`; the step wants `DEMO-002`."
     );
-    let renamed = tried(step(1, line("DEMO-002", "rule-2")));
-    assert!(!renamed.completes);
-    assert!(renamed.message.contains("`id`"), "{}", renamed.message);
-    assert!(tried(step(1, line("DEMO-002", "rule"))).completes);
+    assert_eq!(
+        elsewhere.made, None,
+        "a wrong-sheet add must not rewrite `made` to the guide's sheet"
+    );
+    assert!(tried(step(1, line("DEMO-002"))).completes);
 
     let copy = |id: &str| json!({"op": "copy", "target": {"id": id}, "by": [0, -1, 0]});
     let border = tried(step(2, copy("DEMO-002/border")));
@@ -680,4 +699,182 @@ fn a_proposal_for_a_guide_the_set_does_not_hold_is_refused() {
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::UnknownName, "{}", error.message);
     assert_eq!(error.field.as_deref(), Some("guide.guide"));
+}
+
+#[test]
+fn ending_a_guide_drops_it_from_guides_and_refuses_later_change_sets() {
+    let set = demo_set("end-guide");
+    assert_eq!(give(&set, a_guide()).unwrap(), 1);
+    assert_eq!(listed(&set).guides.len(), 1);
+
+    let ended = end_guide(
+        &EndGuideRequest {
+            set: set.clone(),
+            guide: 1,
+            by: Some("drafter".to_owned()),
+        },
+        Interface::Viewer,
+    )
+    .unwrap();
+    assert_eq!(ended.guide, 1);
+    assert_eq!(ended.ended_by, "drafter");
+
+    // Ended guides drop out of `guides`, so they are not re-walked.
+    assert!(listed(&set).guides.is_empty());
+
+    // Ending again is refused.
+    let again = end_guide(
+        &EndGuideRequest {
+            set: set.clone(),
+            guide: 1,
+            by: None,
+        },
+        Interface::Cli,
+    )
+    .unwrap_err();
+    assert_eq!(again.code, ErrorCode::BadValue, "{}", again.message);
+    assert_eq!(again.field.as_deref(), Some("guide"));
+
+    // A change set naming an ended guide is refused.
+    let err = change(
+        &set,
+        json!({"guide": {"guide": 1, "step": 2}, "operations": [
+            {"op": "add_line", "sheet": "DEMO-002", "layer": "notes", "from": corner(), "to": side()}]}),
+    )
+    .error
+    .unwrap();
+    assert_eq!(err.code, ErrorCode::BadValue, "{}", err.message);
+    assert_eq!(err.field.as_deref(), Some("guide.guide"));
+
+    // A new guide keeps a fresh number, never reusing 1.
+    assert_eq!(give(&set, a_guide()).unwrap(), 2);
+    let active: Vec<u64> = listed(&set).guides.iter().map(|g| g.guide).collect();
+    assert_eq!(active, vec![2]);
+}
+
+#[test]
+fn a_guide_step_checks_sibling_sheets_output_preparation_as_a_dry_run_does() {
+    let set = demo_set("sibling-dwg");
+    // Block sibling sheet DEMO-001's DWG path with a directory so writing it
+    // fails, as an open DWG would on a shared template edit.
+    let sibling = set.join("dwg").join("DEMO-001.dwg");
+    fs::remove_file(&sibling).unwrap();
+    fs::create_dir(&sibling).unwrap();
+
+    let template_move = json!({
+        "title": "Move the shared border",
+        "sheet": "DEMO-002",
+        "steps": [{
+            "say": "Move the border right.",
+            "tool": "move",
+            "points": [{"object": {"id": "DEMO-002/border"}}],
+            "completes": {"op": "move", "target": {"id": "DEMO-002/border"}, "by": [0.1, 0, 0]}
+        }]
+    });
+    let err = give(&set, template_move).unwrap_err();
+    assert_eq!(err.code, ErrorCode::WriteFailed, "{}", err.message);
+    assert!(!set.join(GUIDES_FOLDER).exists(), "nothing was recorded");
+}
+
+#[test]
+fn undo_with_newest_seen_refuses_when_another_edit_landed() {
+    let set = demo_set("undo-race");
+    let add = |y: f64| {
+        change(
+            &set,
+            json!({"operations": [
+                {"op": "add_line", "sheet": "DEMO-002", "from": [1, y, 0], "to": [2, y, 0]}]}),
+        )
+        .result
+        .unwrap()
+        .journal_entry
+        .unwrap()
+    };
+    let e1 = add(1.0);
+    let e2 = add(2.0);
+    assert_eq!((e1, e2), (1, 2));
+
+    let refused = undo(&UndoRequest {
+        set: set.clone(),
+        change_set: e1,
+        newest_seen: Some(e1),
+        dry_run: false,
+    });
+    assert!(!refused.ok);
+    let err = refused.error.unwrap();
+    assert_eq!(err.code, ErrorCode::MovedOn, "{}", err.message);
+    assert_eq!(err.field.as_deref(), Some("newest_seen"));
+
+    // Matching newest_seen succeeds.
+    let ok = undo(&UndoRequest {
+        set: set.clone(),
+        change_set: e2,
+        newest_seen: Some(e2),
+        dry_run: false,
+    });
+    assert!(ok.ok, "{:#?}", ok.error);
+}
+
+#[test]
+fn a_legacy_guide_mark_without_completes_keeps_its_made_by_binding() {
+    let set = demo_set("legacy-mark");
+    give(&set, a_guide()).unwrap();
+    let (checked, entry) = landed(
+        &set,
+        json!({"guide": {"guide": 1, "step": 2}, "operations": [
+            {"op": "add_line", "sheet": "DEMO-002", "layer": "notes", "from": corner(), "to": side()}]}),
+    );
+    assert!(checked.completes);
+    let made = checked.made.unwrap();
+
+    // Strip `"completes":true` from the journal line to simulate a pre-`completes` mark.
+    let jpath = set.join(JOURNAL_FILE);
+    let text = fs::read_to_string(&jpath).unwrap();
+    let patched = text.replace(",\"completes\":true", "");
+    assert_ne!(patched, text);
+    fs::write(&jpath, patched).unwrap();
+
+    let report = listed(&set);
+    let steps = &report.guides[0].steps;
+    assert_eq!(steps[1].completed_by, Some(entry));
+    assert_eq!(steps[1].made.as_deref(), Some(made.as_str()));
+    assert_eq!(steps[2].points[0].object.as_deref(), Some(made.as_str()));
+}
+
+#[test]
+fn a_quoted_arc_angle_or_bulge_is_still_a_curve() {
+    let set = demo_set("quoted-curve");
+    let rect_guide = |points: Value| {
+        json!({"title": "A box", "sheet": "DEMO-002", "steps": [
+            {"say": "Draw the box.", "tool": "rectangle",
+             "points": [{"at": [1, 1]}, {"at": [3, 2]}],
+             "completes": {"op": "add_polyline", "sheet": "DEMO-002", "points": points, "closed": true}}
+        ]})
+    };
+    // Quoted `arc_angle` or `bulge` in the guide itself is refused as not a rectangle.
+    for curved in [
+        json!([[1, 1, 0], {"point": [3, 1, 0], "arc_angle": "90"}, [3, 2, 0], [1, 2, 0]]),
+        json!([[1, 1, 0], {"point": [3, 1, 0], "bulge": "0.5"}, [3, 2, 0], [1, 2, 0]]),
+    ] {
+        let err = give(&set, rect_guide(curved)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadValue, "{}", err.message);
+        assert_eq!(err.field.as_deref(), Some("guide.steps[0].completes"));
+    }
+
+    // And a change set with quoted `arc_angle: "90"` cannot complete a Rectangle step.
+    give(
+        &set,
+        rect_guide(json!([[1, 1, 0], [3, 1, 0], [3, 2, 0], [1, 2, 0]])),
+    )
+    .unwrap();
+    let (checked, _) = landed(
+        &set,
+        json!({"guide": {"guide": 1, "step": 1}, "operations": [{
+            "op": "add_polyline",
+            "sheet": "DEMO-002",
+            "points": [[1, 1, 0], {"point": [3, 1, 0], "arc_angle": "90"}, [3, 2, 0], [1, 2, 0]],
+            "closed": true
+        }]}),
+    );
+    assert!(!checked.completes, "{}", checked.message);
 }

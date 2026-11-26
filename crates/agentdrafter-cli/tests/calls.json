@@ -89,6 +89,10 @@
       "args": ["guides", "demo-set"],
       "input": {"set": "demo-set"}
     },
+    "end-guide": {
+      "args": ["end-guide", "demo-set", "1", "--by", "drafter"],
+      "input": {"set": "demo-set", "guide": 1, "by": "drafter"}
+    },
     "look-at": {
       "args": ["look-at", "demo-set", "demo-002", "--selected", "DEMO-002/border"],
       "input": {"set": "demo-set", "sheet": "demo-002", "selected": ["DEMO-002/border"]}

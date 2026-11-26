@@ -44,8 +44,8 @@ use crate::change::{
     ProposeRequest, BY_LONGEST, BY_PATTERN, DRAFTER, PROPOSALS_FOLDER,
 };
 use crate::change::{
-    guide_with, guides_with, GuideRequest, GuidesRequest, GUIDES_FOLDER, GUIDE_TOOLS,
-    LONGEST_LABEL, LONGEST_SAY, LONGEST_TITLE, MOST_STEPS,
+    end_guide, guide_with, guides_with, EndGuideRequest, GuideRequest, GuidesRequest,
+    GUIDES_FOLDER, GUIDE_TOOLS, LONGEST_LABEL, LONGEST_SAY, LONGEST_TITLE, MOST_STEPS,
 };
 use crate::check::{check_with, CheckRequest};
 use crate::convert::{convert_reply, ConvertRequest, DwgVersion};
@@ -140,7 +140,10 @@ impl Command {
         // set, so they roll nothing back; each refuses a set whose journal
         // holds an unfinished commit instead.
         let previews = (self.name == "display-list" && input.get("change_set").is_some())
-            || matches!(self.name, "propose" | "proposals" | "guide" | "guides");
+            || matches!(
+                self.name,
+                "propose" | "proposals" | "guide" | "guides" | "end-guide"
+            );
         // What the drafter is looking at is kept beside the set's records,
         // not in them; `read` reads a DWG on its own, and `query` and `check`
         // on a DWG are strictly read-only without touching any set: none of
@@ -355,6 +358,13 @@ const COMMANDS: &[Command] = &[
         input: guides_input,
         run: run_guides,
         access: Access::Reads,
+    },
+    Command {
+        name: "end-guide",
+        does: end_guide_does,
+        input: end_guide_input,
+        run: run_end_guide,
+        access: Access::Proposes,
     },
     Command {
         name: "look-at",
@@ -1360,6 +1370,13 @@ fn undo_input() -> Value {
                 "type": "integer",
                 "minimum": 0,
             },
+            "newest_seen": {
+                "description": "The journal's newest entry the caller has looked at, 0 for an empty \
+                                journal: the undo is refused if the journal holds a newer one, so \
+                                an edit that landed in between is not rolled back unasked.",
+                "type": "integer",
+                "minimum": 0,
+            },
             "dry_run": flag("Report what the undo would do, and write nothing."),
         }),
         &["set", "change_set"],
@@ -1709,6 +1726,37 @@ fn run_guides(
     let settings = take_settings(&mut input, base, false)?;
     let request: GuidesRequest = parse("guides", input)?;
     Ok(done(guides_with(&request, &settings)))
+}
+
+fn end_guide_does() -> String {
+    "Ends a guide of the drawing set in the folder `set`, named by its number `guide`, so \
+     `guides` drops it and stops working out its steps on each journal change. Nothing of the \
+     drawing set's records or journal changes; the guide's number stays reserved."
+        .to_owned()
+}
+
+fn end_guide_input() -> Value {
+    input(
+        json!({
+            "set": text("The drawing set's folder."),
+            "guide": {
+                "description": "The guide to end, by its number, such as 1.",
+                "type": "integer",
+                "minimum": 1,
+            },
+            "by": by("ends it", DRAFTER),
+        }),
+        &["set", "guide"],
+    )
+}
+
+fn run_end_guide(
+    input: Map<String, Value>,
+    _: &Settings,
+    via: Interface,
+) -> Result<JsonReply, Error> {
+    let request: EndGuideRequest = parse("end-guide", input)?;
+    Ok(done(end_guide(&request, via)))
 }
 
 // what the drafter is looking at

@@ -290,7 +290,7 @@ pub fn propose_with(
         dry_run: true,
     };
     // As `keep` would land it: on every sheet it reaches or on none.
-    let would = apply::apply(&dry, settings, &mut None, None, None, true)?;
+    let would = apply::apply(&dry, settings, &mut None, None, None, true, None)?;
     // What its records would be is checked, not whether each output can be
     // written now: a DWG open in AutoCAD, and the sheets of its template it
     // holds back, which would take a template edit with it, do not stop it.

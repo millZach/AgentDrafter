@@ -518,6 +518,7 @@ fn a_change_set_stopped_at_any_step_of_its_commit_is_rolled_back_by_the_next_com
     let report = undo(&UndoRequest {
         set: set.clone(),
         change_set: first,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(report.ok, "{:#?}", report.error);
@@ -556,6 +557,7 @@ fn an_undo_stopped_at_any_step_is_rolled_back_and_its_change_sets_stay_in_place(
         undo(&UndoRequest {
             set: set.clone(),
             change_set: first,
+            newest_seen: None,
             dry_run: false,
         });
     };
@@ -857,6 +859,7 @@ fn an_undo_is_worked_out_and_committed_holding_the_lock_so_no_change_set_lands_b
         undo(&UndoRequest {
             set: set.clone(),
             change_set: first,
+            newest_seen: None,
             dry_run: false,
         })
     };

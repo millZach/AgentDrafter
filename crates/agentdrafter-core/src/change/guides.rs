@@ -138,6 +138,14 @@ pub struct Setting {
     pub current_layer: String,
 }
 
+/// When and by whom a guide was ended in the core.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuideEnded {
+    pub by: String,
+    pub at: String,
+}
+
 /// A guide, as its file holds it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -149,6 +157,41 @@ struct Stored {
     title: String,
     sheet: String,
     steps: Vec<StepGiven>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ended: Option<GuideEnded>,
+}
+
+/// A request to end a guide so `guides` drops it and stops working out its
+/// steps on each journal change.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndGuideRequest {
+    /// The drawing set's folder.
+    pub set: PathBuf,
+    /// The guide to end, by its number.
+    pub guide: u64,
+    /// Who ends it, in the caller's words; with none, the interface it came
+    /// through.
+    #[serde(
+        default,
+        deserialize_with = "text_given",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub by: Option<String>,
+}
+
+/// A guide ended in the core.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EndGuideReport {
+    /// The drawing set's folder.
+    pub set: String,
+    /// The guide ended, by its number.
+    pub guide: u64,
+    pub title: String,
+    pub sheet: String,
+    pub ended_by: String,
+    pub at: String,
+    pub message: String,
 }
 
 /// A request to give a guide.
@@ -975,6 +1018,25 @@ pub fn guide_with(
                 )
                 .at_field(format!("guide.steps[{s}].completes.op")));
             }
+            if wants.starts_with("add_")
+                && step
+                    .completes
+                    .as_ref()
+                    .and_then(|op| op.get("id"))
+                    .is_some()
+            {
+                return Err(Error::new(
+                    ErrorCode::BadValue,
+                    format!(
+                        "step {}'s operation names an `id`, which {tool} does not send when \
+                         drawn by hand; leave `id` out and name what it makes with \
+                         `{{\"made_by\": {}}}` in later steps",
+                        s + 1,
+                        s + 1
+                    ),
+                )
+                .at_field(format!("guide.steps[{s}].completes.id")));
+            }
         }
         points_agree(s, step, &walked[s])?;
         for n in needs_of(step) {
@@ -1027,6 +1089,7 @@ pub fn guide_with(
         title: given.title.trim().to_owned(),
         sheet: sheet.clone(),
         steps: given.steps,
+        ended: None,
     };
     let path = store.join(format!("{number}.json"));
     let mut text = serde_json::to_string_pretty(&stored).expect("a guide serializes to JSON");
@@ -1060,6 +1123,85 @@ pub fn guide_with(
         sheet,
         steps,
         file: path.display().to_string(),
+    })
+}
+
+/// Ends guide `request.guide` of the drawing set in `request.set`, so
+/// `guides` drops it and stops working out its steps on each journal change.
+/// Its file and number stay beside the journal so later guides never reuse its
+/// number and journal marks keep their meaning.
+pub fn end_guide(request: &EndGuideRequest, via: Interface) -> Result<EndGuideReport, Error> {
+    let ended_by = who(request.by.as_deref(), via)?;
+    if request.guide == 0 {
+        return Err(Error::usage("`guide` is a guide's number, counted from 1").at_field("guide"));
+    }
+    let folder = &request.set;
+    read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
+    refuse_unfinished(folder, Unfinished::Proposals)?;
+    let store = folder.join(GUIDES_FOLDER);
+    if !numbers(&store)?.contains(&request.guide) {
+        return Err(Error::new(
+            ErrorCode::UnknownName,
+            format!("the set has no guide {}", request.guide),
+        )
+        .at_field("guide"));
+    }
+    let failed = |what: &str, path: &Path, e: std::io::Error| {
+        Error::new(
+            ErrorCode::WriteFailed,
+            format!("could not {what}: {e}; the guide was not ended"),
+        )
+        .in_file(path)
+    };
+    let lock_path = store.join(GUIDES_LOCK);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| failed("open the guides' lock", &lock_path, e))?;
+    lock.lock()
+        .map_err(|e| failed("take the guides' lock", &lock_path, e))?;
+    let mut stored = read(folder, request.guide)?;
+    if let Some(ended) = &stored.ended {
+        return Err(Error::new(
+            ErrorCode::BadValue,
+            format!("guide {} was ended already, by {}", request.guide, ended.by),
+        )
+        .at_field("guide"));
+    }
+    let at = now();
+    stored.ended = Some(GuideEnded {
+        by: ended_by.clone(),
+        at: at.clone(),
+    });
+    let path = store.join(format!("{}.json", request.guide));
+    let mut text = serde_json::to_string_pretty(&stored).expect("a guide serializes to JSON");
+    text.push('\n');
+    let part = store.join(format!("{}.json.part", request.guide));
+    let written = fs::File::create(&part)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&part, &path));
+    if let Err(e) = written {
+        let _ = fs::remove_file(&part);
+        return Err(failed("write the guide", &path, e));
+    }
+    drop(lock);
+    Ok(EndGuideReport {
+        set: folder.display().to_string(),
+        guide: request.guide,
+        message: format!(
+            "guide {} ended, by {ended_by}: \"{}\" on sheet `{}`",
+            request.guide, stored.title, stored.sheet
+        ),
+        title: stored.title,
+        sheet: stored.sheet,
+        ended_by,
+        at,
     })
 }
 
@@ -1107,7 +1249,10 @@ fn landed_for(entries: &[journal::Entry], number: u64, sheet: &str) -> BTreeMap<
         };
         let slot = out.entry(mark.step).or_default();
         slot.entries.push(entry.entry);
-        if mark.completes != Some(true) {
+        // Legacy journal marks predating `completes` have `None`; only an
+        // explicit `Some(false)` marks an attempt that did not complete the
+        // step.
+        if mark.completes == Some(false) {
             continue;
         }
         slot.completed_by = Some(entry.entry);
@@ -1121,7 +1266,7 @@ fn landed_for(entries: &[journal::Entry], number: u64, sheet: &str) -> BTreeMap<
 }
 
 /// Lists the drawing set's guides, the oldest first, each step worked out
-/// on the set as it stands.
+/// on the set as it stands. Ended guides are skipped without loading the set.
 pub fn guides_with(request: &GuidesRequest, settings: &Settings) -> Result<GuidesReport, Error> {
     let folder = &request.set;
     read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
@@ -1130,12 +1275,11 @@ pub fn guides_with(request: &GuidesRequest, settings: &Settings) -> Result<Guide
     let store = folder.join(GUIDES_FOLDER);
     let mut listed = Vec::new();
     for number in numbers(&store)? {
-        listed.push(listed_guide(
-            folder,
-            &entries,
-            read(folder, number)?,
-            settings,
-        ));
+        let stored = read(folder, number)?;
+        if stored.ended.is_some() {
+            continue;
+        }
+        listed.push(listed_guide(folder, &entries, stored, settings));
     }
     let message = match listed.len() {
         0 => "no guide has been given".to_owned(),
@@ -1282,6 +1426,7 @@ pub(super) fn prepare(
             None,
             None,
             false,
+            None,
         ),
         None => Err(Error::new(
             ErrorCode::BadValue,
@@ -1340,6 +1485,13 @@ fn marked_step(folder: &Path, change_set: &Value) -> Result<Option<(GuideMark, S
         .at_field("guide.guide"));
     }
     let stored = read(folder, number)?;
+    if let Some(ended) = &stored.ended {
+        return Err(Error::new(
+            ErrorCode::BadValue,
+            format!("guide {number} has ended, by {}", ended.by),
+        )
+        .at_field("guide.guide"));
+    }
     let steps = stored.steps.len() as u64;
     if step > steps {
         return Err(Error::new(
@@ -1492,6 +1644,19 @@ fn near(a: [f64; 3], b: [f64; 3]) -> bool {
     (0..3).all(|i| same(a[i], b[i]))
 }
 
+/// A plain number as the sheet reader reads `bulge` and `arc_angle`: a JSON
+/// number, or a quoted number with no unit (such as `"90"`).
+fn plain_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => match crate::units::parse_length(s) {
+            Ok((n, None)) => Some(n),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// A polyline's vertex: its point and the curve of the segment from it, as
 /// a bulge. A polyline's point gives its curve as a `bulge` or as an
 /// `arc_angle`, its included angle in degrees, whose bulge is the tangent
@@ -1499,11 +1664,11 @@ fn near(a: [f64; 3], b: [f64; 3]) -> bool {
 fn vertex(v: &Value) -> (Value, f64) {
     match v.get("point") {
         Some(p) => {
-            let bulge = v.get("bulge").and_then(Value::as_f64);
+            let bulge = v.get("bulge").and_then(plain_number);
             let arc = v
                 .get("arc_angle")
-                .and_then(Value::as_f64)
-                .map(|degrees| (degrees.to_radians() / 4.0).tan());
+                .and_then(plain_number)
+                .map(crate::draw::bulge_of);
             (p.clone(), bulge.or(arc).unwrap_or(0.0))
         }
         None => (v.clone(), 0.0),
@@ -1622,14 +1787,23 @@ fn sheets_of(outcome: &OperationOutcome) -> Vec<String> {
 }
 
 /// The change set `request` sent for a guide's step, checked against the
-/// step's own operation, as `report` says it landed.
-pub(super) fn checked(guided: &Guided, report: &ChangeReport) -> GuideChecked {
+/// step's own operation, from the exact outcomes `apply` produced.
+pub(super) fn checked_outcomes(
+    guided: &Guided,
+    landed: usize,
+    ops: &[OperationOutcome],
+) -> GuideChecked {
     let mark = guided.mark;
     let here = |id: &str| {
         let own = id.split_once(ID_SEPARATOR).map_or(id, |(_, l)| l);
         format!("{}{ID_SEPARATOR}{own}", guided.sheet)
     };
-    let made = report.operations.iter().find(|o| o.ok).and_then(|o| {
+    let on_sheet = |o: &OperationOutcome| {
+        o.sheets
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(&guided.sheet))
+    };
+    let made = ops.iter().find(|o| o.ok && on_sheet(o)).and_then(|o| {
         if o.op.starts_with("add_") {
             o.id.as_deref().map(here)
         } else if let [one] = o.copies.as_slice() {
@@ -1658,7 +1832,7 @@ pub(super) fn checked(guided: &Guided, report: &ChangeReport) -> GuideChecked {
             )
         }
     };
-    if report.landed == 0 {
+    if landed == 0 {
         return verdict(
             false,
             format!(
@@ -1674,7 +1848,6 @@ pub(super) fn checked(guided: &Guided, report: &ChangeReport) -> GuideChecked {
             "The step's own operation would not land now.".to_owned(),
         );
     };
-    let ops = &report.operations;
     if ops.len() != 1 {
         return verdict(
             false,

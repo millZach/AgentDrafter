@@ -103,6 +103,8 @@ def snapshot(set_folder):
         ) or relative == LOOKING_AT_FILE:
             record = json.loads(path.read_text(encoding="utf-8"))
             record.pop("at")
+            if isinstance(record.get("ended"), dict):
+                record["ended"].pop("at", None)
             found[relative] = record
         else:
             found[relative] = path.read_bytes()

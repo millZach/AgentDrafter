@@ -491,6 +491,7 @@ fn import_blocks_adds_a_block_to_a_set_s_library_which_undo_takes_back_byte_for_
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);

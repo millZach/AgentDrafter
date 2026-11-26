@@ -151,6 +151,7 @@ fn undo_all(set: &Path, report: &ChangeReport) {
     let undone = undo(&UndoRequest {
         set: set.to_owned(),
         change_set: report.journal_entry.unwrap(),
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);

@@ -195,6 +195,7 @@ fn stretch_makes_room_on_loop_sheet_using_snapped_box_lists_touched_and_undoes()
     let undone = undo(&UndoRequest {
         set: dir.clone(),
         change_set: report.journal_entry.unwrap(),
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{undone:#?}");

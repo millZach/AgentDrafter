@@ -368,6 +368,7 @@ fn undo_puts_a_matched_edit_back_byte_for_byte() {
     let undone = undo(&UndoRequest {
         set: set.clone(),
         change_set: entry,
+        newest_seen: None,
         dry_run: false,
     });
     assert!(undone.ok, "{:#?}", undone.error);
