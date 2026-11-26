@@ -22,6 +22,10 @@ fn context() -> Context {
             "title" => [5.0, 1.0, 7.0, 1.3],
             _ => [1.5, 6.3, 2.5, 6.7],
         }),
+        path: (kind == "polyline").then(|| array::PathCurve {
+            points: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]],
+            closed: false,
+        }),
     };
     Context {
         sheet: "DP-LD-101".to_owned(),
@@ -113,14 +117,20 @@ fn the_aliases_start_their_tools_in_any_case() {
     }
     assert_eq!(tool_for("PLINE"), None);
     assert_eq!(tool_for("X"), None);
-    for word in ["AR", "ar", "ARRAY", "arrayrect", "ARRAYPOLAR"] {
+    for word in [
+        "AR",
+        "ar",
+        "ARRAY",
+        "arrayrect",
+        "ARRAYPOLAR",
+        "ARRAYPATH",
+        "arraypath",
+    ] {
         assert_eq!(tool_for(word), Some(ToolKind::Array), "{word}");
     }
-    // A path array is the core's, for the assistant: ARRAYPATH is no
-    // tool's word.
-    assert_eq!(tool_for("ARRAYPATH"), None);
     assert_eq!(array::kind_for("arrayrect"), Some(ArrayKind::Rectangular));
     assert_eq!(array::kind_for("ARRAYPOLAR"), Some(ArrayKind::Polar));
+    assert_eq!(array::kind_for("ARRAYPATH"), Some(ArrayKind::Path));
     assert_eq!(array::kind_for("AR"), None);
 }
 
@@ -1941,4 +1951,151 @@ fn z_only_copy_and_move_displacements_are_accepted() {
     let op = &operations(&out)[0];
     assert_eq!(op["from"], json!([0.0, 0.0, 0]));
     assert_eq!(op["to"], json!([0.0, 0.0, 5.0]));
+}
+
+#[test]
+fn path_array_picks_curve_previews_and_sends_array_operation() {
+    let mut ctx = context();
+    // Add a row-own line (index 4) so we can test both template and row paths.
+    ctx.objects.push(ObjectInfo {
+        id: Some("DP-LD-101/route".to_owned()),
+        name: Some("route".to_owned()),
+        kind: "line".to_owned(),
+        layer: "wire".to_owned(),
+        from_template: Some(false),
+        bounds: Some([0.0, 0.0, 10.0, 0.0]),
+        path: Some(array::PathCurve {
+            points: vec![[0.0, 0.0], [10.0, 0.0]],
+            closed: false,
+        }),
+        ..ObjectInfo::default()
+    });
+    let mut t = Tools::default();
+    t.load(ctx.clone());
+
+    // Start ARRAYPATH with device (2) pre-selected: enters path-picking mode.
+    t.start_word("ARRAYPATH", &[2]);
+    let s = t.state(false);
+    assert_eq!(s.command, Some("ARRAYPATH"));
+    assert!(s.selecting, "picking a path selects an object");
+    assert!(!s.takes_points, "picking a path does not take a point");
+    let panel = s.array.as_ref().unwrap();
+    assert_eq!(panel.kind, ArrayKind::Path);
+    assert_eq!(panel.spacing, Spacing::Total);
+    assert!(panel.picking);
+    assert!(!panel.ready);
+    assert_eq!(panel.path.as_deref(), Some("Click a curve on the drawing"));
+
+    // Enter before picking a path is refused.
+    assert!(t.input("", None).sends.is_empty());
+    assert!(t
+        .state(false)
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("Pick the path"));
+
+    // Non-curve object (title text at index 1) is refused.
+    t.pick(Some(1));
+    assert!(t
+        .state(false)
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("is a text"));
+    assert!(t.selecting());
+
+    // Pick border polyline (index 0, length 20, L-shape: (0,0)->(10,0)->(10,10)).
+    t.pick(Some(0));
+    let s = t.state(false);
+    assert!(s.error.is_none());
+    assert!(!s.selecting);
+    let panel = s.array.as_ref().unwrap();
+    assert!(!panel.picking);
+    assert!(panel.ready);
+    assert_eq!(panel.path.as_deref(), Some("border"));
+    assert!(panel.align);
+    assert_eq!(panel.fields.len(), 1);
+    assert_eq!(panel.fields[0].key, "path_items");
+
+    // 5 items evenly along the 20-unit L-path -> spacing 5: (5,0), (10,0) turned 90°, (10,5) 90°, (10,10) 90°.
+    t.array_value("path_items", "5");
+    let (_, places, faint) = t.band(None).arrayed.unwrap();
+    assert!(!faint);
+    assert_eq!(places.len(), 4);
+    assert!((places[0].by[0] - 5.0).abs() < 1e-9 && places[0].turn == 0.0);
+    assert!((places[1].by[0] - 10.0).abs() < 1e-9 && (places[1].turn - 90.0).abs() < 1e-6);
+    assert!((places[3].by[0] - 10.0).abs() < 1e-9 && (places[3].by[1] - 10.0).abs() < 1e-9);
+
+    // Unaligning clears copy turns and emits align: false.
+    t.option("no-align");
+    assert!(!t.state(false).array.unwrap().align);
+    let (_, unaligned, _) = t.band(None).arrayed.unwrap();
+    assert!(unaligned.iter().all(|p| p.turn == 0.0));
+
+    // Switch to between-items spacing; spacing running past path length is refused.
+    t.option("between");
+    assert_eq!(t.state(false).array.unwrap().fields.len(), 2);
+    t.array_value("path_spacing", "6");
+    assert!(!t.state(false).array.unwrap().ready);
+    assert!(t.input("", None).sends.is_empty());
+
+    // Valid command-bar shorthand `4,3` sets count=4 and spacing=3.
+    t.input("4,3", None);
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(
+        *op,
+        json!({
+            "op": "array",
+            "target": {"id": "DP-LD-101/device"},
+            "kind": "path",
+            "path": {"id": "DP-LD-101/border"},
+            "count": 4,
+            "spacing": 3.0,
+            "align": false
+        })
+    );
+
+    // Evenly spaced + aligned omits spacing and align keys.
+    t.start_word("AR", &[2]);
+    t.option("path");
+    assert!(t.selecting());
+    t.pick(Some(4));
+    t.input("3", None);
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(
+        *op,
+        json!({
+            "op": "array",
+            "target": {"id": "DP-LD-101/device"},
+            "kind": "path",
+            "path": {"id": "DP-LD-101/route"},
+            "count": 3
+        })
+    );
+
+    // Shared template object (title, index 1) refuses row-own path (route, index 4).
+    t.start_word("ARRAYPATH", &[1]);
+    t.pick(Some(4));
+    assert!(t
+        .state(false)
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("needs a path in the template"));
+    assert!(t.selecting());
+
+    // Esc cancels with nothing sent.
+    assert!(t.escape().sends.is_empty());
+    assert_eq!(t.running(), None);
+
+    // Reloading when the picked path disappears returns to path-picking mode.
+    t.start_word("ARRAYPATH", &[2]);
+    t.pick(Some(4));
+    assert!(!t.selecting());
+    let mut dropped = ctx;
+    dropped.objects.pop();
+    t.load(dropped);
+    assert!(t.selecting());
+    assert!(!t.state(false).array.unwrap().ready);
 }

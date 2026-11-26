@@ -2874,14 +2874,14 @@ const checks = {
         entry = await landed(page, before, 'A field edited, then Clear');
         assert(entry.change_set.operations[0].op === 'set_attribute' && entry.change_set.operations[0].value === 'FQ', `the edit lands: ${JSON.stringify(entry.change_set.operations)}`);
         assert(!(await page.isVisible('.qp')), 'Clear clears the selection');
-        // ARRAYPATH is no tool here (#66): Enter sends it to the assistant, as any other word.
-        await page.keyboard.type('ARRAYPATH');
+        // OFFSET is no drafting-app tool yet: Enter sends it to the assistant, as any other word.
+        await page.keyboard.type('OFFSET');
         const hint = await page.textContent('.cmdbar');
-        assert(hint.includes('ask the assistant'), `ARRAYPATH is for the assistant: ${hint}`);
+        assert(hint.includes('ask the assistant'), `OFFSET is for the assistant: ${hint}`);
         await page.keyboard.press('Enter');
-        await page.waitForFunction(() => document.querySelector('.cmd .hist')?.textContent.includes('To the assistant: “ARRAYPATH”'), null, { timeout: 15000 });
+        await page.waitForFunction(() => document.querySelector('.cmd .hist')?.textContent.includes('To the assistant: “OFFSET”'), null, { timeout: 15000 });
         assert(await page.isVisible('.stab[data-side="chat"].on'), 'the chat is shown');
-        assert(!(await bar(page)).includes('ARRAY'), `no tool starts: ${await bar(page)}`);
+        assert(!(await bar(page)).includes('OFFSET'), `no tool starts: ${await bar(page)}`);
         // Not sent, with no agent here, the words go back in the bar: cleared.
         await sleep(1000);
         await page.fill('.cmdin', '');

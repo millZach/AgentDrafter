@@ -661,8 +661,10 @@ impl Viewer {
         let edges = std::mem::take(&mut sheet.edges);
         // An object whose drawing on the page is cut at a viewport's window
         // is model space seen through it: its points there are not its own.
-        // Each object's box too, which Array spaces its copies by.
+        // Each object's box too, which Array spaces its copies by, and its
+        // sampled curve for path arrays (#256).
         let mut objects: Vec<ObjectInfo> = sheet.objects.iter().map(ObjectInfo::of).collect();
+        let mut path_runs: Vec<Vec<&[[f64; 2]]>> = vec![Vec::new(); objects.len()];
         for item in &sheet.display_list.items {
             let Some(o) = objects.get_mut(item.object) else {
                 continue;
@@ -672,7 +674,14 @@ impl Viewer {
             }
             let own_image_runs: Vec<Vec<[f64; 2]>>;
             let runs = match &item.shape {
-                Shape::Stroke { runs, .. } => runs,
+                Shape::Stroke { runs, .. } => {
+                    if crate::array::PathCurve::is_path_kind(&o.kind) {
+                        for run in runs {
+                            path_runs[item.object].push(run.as_slice());
+                        }
+                    }
+                    runs
+                }
                 Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
                 Shape::Image {
                     origin,
@@ -700,6 +709,11 @@ impl Viewer {
                     b[2].max(p[0]),
                     b[3].max(p[1]),
                 ];
+            }
+        }
+        for (o, runs) in objects.iter_mut().zip(&path_runs) {
+            if !runs.is_empty() {
+                o.path = crate::array::PathCurve::from_runs(&o.kind, runs);
             }
         }
         self.shown = (sheet.sheet.clone(), sheet.layout.clone());

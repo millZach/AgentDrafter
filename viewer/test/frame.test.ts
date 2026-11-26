@@ -637,6 +637,10 @@ test('the command bar\'s note says what the keys do: with copies placed, Enter o
   // Array picking its objects ends as any tool does; its panel up, Esc sends nothing (#66).
   assert.equal(barNote(toolState({ tool: 'array', selecting: true })), 'Enter or right-click: done · Esc: end · F8: Ortho');
   assert.equal(barNote(toolState({ tool: 'array', array: arrayPanel({}) })), 'Enter: it lands · Esc: nothing is sent');
+  assert.equal(
+    barNote(toolState({ tool: 'array', array: arrayPanel({ kind: 'path', path: 'route', align: true }) })),
+    'Enter: it lands · Esc: nothing is sent',
+  );
 });
 
 const arrayPanel = (over: Partial<ArrayPanelState>): ArrayPanelState => ({

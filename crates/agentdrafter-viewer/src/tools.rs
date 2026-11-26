@@ -86,12 +86,10 @@ pub const TOOLS: [ToolSpec; 8] = [
         command: "COPY",
         aliases: &["CO", "CP", "COPY"],
     },
-    // ARRAYPATH is no tool's word: a path array is the core's, for the
-    // assistant, until the tool makes one.
     ToolSpec {
         kind: ToolKind::Array,
         command: "ARRAY",
-        aliases: &["AR", "ARRAY", "ARRAYRECT", "ARRAYPOLAR"],
+        aliases: &["AR", "ARRAY", "ARRAYRECT", "ARRAYPOLAR", "ARRAYPATH"],
     },
     ToolSpec {
         kind: ToolKind::Erase,
@@ -215,6 +213,9 @@ pub struct ObjectInfo {
     /// The box round what it draws, `[left, bottom, right, top]` in
     /// drawing units; none when it draws nothing.
     pub bounds: Option<[f64; 4]>,
+    /// The sampled curve of a path-capable object (line, polyline, arc,
+    /// circle, ellipse, spline), for path array previewing (#256).
+    pub path: Option<array::PathCurve>,
 }
 
 impl ObjectInfo {
@@ -231,6 +232,7 @@ impl ObjectInfo {
             from_template: text("from").map(|f| f == "template"),
             through_viewport: false,
             bounds: None,
+            path: None,
         }
     }
 
@@ -327,13 +329,14 @@ enum Step {
         base: Taken,
         placed: Vec<Taken>,
     },
-    /// Array's panel: its values, and a polar array's centre, which a
-    /// click takes while `picking`. Nothing lands until Enter or Array;
-    /// Esc sends nothing.
+    /// Array's panel: its values, a polar array's centre or a path array's
+    /// curve, which a click takes while `picking`. Nothing lands until Enter
+    /// or Array; Esc sends nothing.
     ArraySetup {
         picked: Vec<usize>,
         setup: Box<Setup>,
         center: Option<Taken>,
+        path: Option<usize>,
         picking: bool,
     },
 }
@@ -450,9 +453,9 @@ pub struct State {
     pub array: Option<ArrayPanel>,
 }
 
-/// What Array's panel shows (#66): its kind, how the spacing is given, its
-/// fields, a polar array's centre and whether its items turn, and how
-/// many copies it makes or what is wrong.
+/// What Array's panel shows (#66, #256): its kind, how the spacing is given,
+/// its fields, a polar array's centre or a path array's curve, whether its
+/// items turn or align, and how many copies it makes or what is wrong.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ArrayPanel {
     pub kind: ArrayKind,
@@ -462,9 +465,12 @@ pub struct ArrayPanel {
     pub fields: Vec<Field>,
     /// A polar array's centre in words, or where to click it.
     pub center: Option<String>,
-    /// Whether a click takes the centre now.
+    /// A path array's curve in words, or where to click it.
+    pub path: Option<String>,
+    /// Whether a click takes the centre or path now.
     pub picking: bool,
     pub rotate: bool,
+    pub align: bool,
     /// `3 × 2: 5 copies`, or what is wrong.
     pub count: String,
     /// Whether it can land: nothing is wrong.
@@ -757,13 +763,38 @@ impl Tools {
                 Step::ArraySetup {
                     picked,
                     center,
+                    path,
                     setup,
-                    ..
+                    picking,
                 } => {
                     follow_picked(picked);
                     setup.objects = picked.len();
                     if let Some(c) = center {
                         follow(c);
+                    }
+                    if let Some(old_path) = *path {
+                        match place(old_path) {
+                            Some(new_path) => {
+                                *path = Some(new_path);
+                                if let Some(curve) = new.get(new_path).and_then(|o| o.path.as_ref())
+                                {
+                                    setup.set_path(curve.length(), curve.closed);
+                                } else {
+                                    *path = None;
+                                    setup.path_length = None;
+                                    if setup.kind == ArrayKind::Path {
+                                        *picking = true;
+                                    }
+                                }
+                            }
+                            None => {
+                                *path = None;
+                                setup.path_length = None;
+                                if setup.kind == ArrayKind::Path {
+                                    *picking = true;
+                                }
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -796,31 +827,40 @@ impl Tools {
 
     /// Whether the tool running takes a point now.
     pub fn takes_points(&self) -> bool {
-        matches!(
-            self.running.as_ref().map(|r| &r.step),
+        match self.running.as_ref().map(|r| &r.step) {
             Some(
                 Step::LineFirst
-                    | Step::LineNext { .. }
-                    | Step::CircleCenter
-                    | Step::CircleRadius { .. }
-                    | Step::RectangleFirst
-                    | Step::RectangleSecond { .. }
-                    | Step::TextStart
-                    | Step::MoveBase { .. }
-                    | Step::MoveSecond { .. }
-                    | Step::CopyBase { .. }
-                    | Step::CopySecond { .. }
-                    | Step::ArraySetup { picking: true, .. }
-            )
-        )
+                | Step::LineNext { .. }
+                | Step::CircleCenter
+                | Step::CircleRadius { .. }
+                | Step::RectangleFirst
+                | Step::RectangleSecond { .. }
+                | Step::TextStart
+                | Step::MoveBase { .. }
+                | Step::MoveSecond { .. }
+                | Step::CopyBase { .. }
+                | Step::CopySecond { .. },
+            ) => true,
+            Some(Step::ArraySetup {
+                setup,
+                picking: true,
+                ..
+            }) => setup.kind == ArrayKind::Polar,
+            _ => false,
+        }
     }
 
     /// Whether the tool running picks objects now.
     pub fn selecting(&self) -> bool {
-        matches!(
-            self.running.as_ref().map(|r| &r.step),
-            Some(Step::Select { .. })
-        )
+        match self.running.as_ref().map(|r| &r.step) {
+            Some(Step::Select { .. }) => true,
+            Some(Step::ArraySetup {
+                setup,
+                picking: true,
+                ..
+            }) => setup.kind == ArrayKind::Path,
+            _ => false,
+        }
     }
 
     /// The height new text is drawn at: the last one typed, or a beginner's
@@ -1397,13 +1437,15 @@ impl Tools {
                 picked,
                 setup,
                 center: _,
+                path,
                 picking: true,
-            } => {
+            } if setup.kind == ArrayKind::Polar => {
                 log.push(format!("ARRAY centre {where_}"));
                 Some(Step::ArraySetup {
                     picked,
                     setup,
                     center: Some(point.clone()),
+                    path,
                     picking: false,
                 })
             }
@@ -1418,7 +1460,8 @@ impl Tools {
     }
 
     /// Picks the object at `place`, or takes it out when it is picked, in
-    /// a tool that picks objects; nothing when nothing was there.
+    /// a tool that picks objects, or sets a path array's curve while picking
+    /// its path; nothing when nothing was there.
     pub fn pick(&mut self, place: Option<usize>) -> Outcome {
         self.error = None;
         let Some(place) = place else {
@@ -1427,6 +1470,77 @@ impl Tools {
         let words = self.object_words(place);
         let nameable = self.nameable(place);
         let viewport = self.through_viewport(place);
+        let picking_path = matches!(
+            self.running.as_ref().map(|r| &r.step),
+            Some(Step::ArraySetup {
+                setup,
+                picking: true,
+                ..
+            }) if setup.kind == ArrayKind::Path
+        );
+        if picking_path {
+            if viewport {
+                self.error = Some(self.viewport_words(ToolKind::Array, place));
+                return Outcome::default();
+            }
+            if !nameable {
+                self.error = Some(format!(
+                    "{words} has no ID, so a change set cannot name it."
+                ));
+                return Outcome::default();
+            }
+            let Some(obj) = self.context.objects.get(place) else {
+                return Outcome::default();
+            };
+            if !array::PathCurve::is_path_kind(&obj.kind) {
+                self.error = Some(format!(
+                    "{words} is a {}: pick a line, polyline, arc, circle, ellipse or spline.",
+                    obj.kind
+                ));
+                return Outcome::default();
+            }
+            let picked_has_template = match self.running.as_ref().map(|r| &r.step) {
+                Some(Step::ArraySetup { picked, .. }) => {
+                    picked.iter().any(|&p| self.template_object(p))
+                }
+                _ => false,
+            };
+            if picked_has_template {
+                if let Some(reach) = self.context.template.as_ref() {
+                    if reach.sheets.len() > 1 && obj.from_template != Some(true) {
+                        self.error = Some(format!(
+                            "{words} is this sheet’s own; a template’s object shared by {} sheets \
+                             needs a path in the template.",
+                            reach.sheets.len()
+                        ));
+                        return Outcome::default();
+                    }
+                }
+            }
+            let Some(curve) = obj.path.clone() else {
+                self.error = Some(format!("{words} has no length to run along."));
+                return Outcome::default();
+            };
+            if let Some(Running {
+                step:
+                    Step::ArraySetup {
+                        setup,
+                        path,
+                        picking,
+                        ..
+                    },
+                ..
+            }) = &mut self.running
+            {
+                *path = Some(place);
+                *picking = false;
+                setup.set_path(curve.length(), curve.closed);
+            }
+            return Outcome {
+                log: vec![format!("ARRAY path {words}")],
+                sends: Vec::new(),
+            };
+        }
         let Some(Running {
             kind,
             step: Step::Select { picked },
@@ -1498,7 +1612,8 @@ impl Tools {
                     picked,
                     setup: Box::new(setup),
                     center: None,
-                    picking: array_kind == ArrayKind::Polar,
+                    path: None,
+                    picking: matches!(array_kind, ArrayKind::Polar | ArrayKind::Path),
                 },
             });
             return Outcome {
@@ -1571,15 +1686,14 @@ impl Tools {
             "radius" => self.input("R", None),
             "height" => self.input("H", None),
             "array" => self.input("", None),
-            "rectangular" | "polar" | "between" | "total" | "pick-center" | "turn" | "no-turn" => {
-                self.array_option(act)
-            }
+            "rectangular" | "polar" | "path" | "between" | "total" | "pick-center"
+            | "pick-path" | "turn" | "no-turn" | "align" | "no-align" => self.array_option(act),
             _ => Outcome::default(),
         }
     }
 
     /// Array's panel's buttons: its kind, how the spacing is given, the
-    /// centre picked again, and whether the items turn.
+    /// centre or path picked again, and whether the items turn or align.
     fn array_option(&mut self, act: &str) -> Outcome {
         self.error = None;
         let Some(Running {
@@ -1587,6 +1701,7 @@ impl Tools {
                 Step::ArraySetup {
                     setup,
                     center,
+                    path,
                     picking,
                     ..
                 },
@@ -1596,18 +1711,22 @@ impl Tools {
             return Outcome::default();
         };
         let line = match act {
-            "rectangular" | "polar" => {
-                let kind = if act == "polar" {
-                    ArrayKind::Polar
-                } else {
-                    ArrayKind::Rectangular
+            "rectangular" | "polar" | "path" => {
+                let kind = match act {
+                    "polar" => ArrayKind::Polar,
+                    "path" => ArrayKind::Path,
+                    _ => ArrayKind::Rectangular,
                 };
                 if setup.kind == kind {
                     return Outcome::default();
                 }
                 setup.kind = kind;
-                // A polar array asks for its centre first.
-                *picking = kind == ArrayKind::Polar && center.is_none();
+                if kind == ArrayKind::Path && path.is_none() && setup.spacing == Spacing::Between {
+                    setup.hold(Spacing::Total);
+                }
+                // A polar array asks for its centre first; a path array asks for its curve.
+                *picking = (kind == ArrayKind::Polar && center.is_none())
+                    || (kind == ArrayKind::Path && path.is_none());
                 kind.command().to_owned()
             }
             "between" | "total" => {
@@ -1623,15 +1742,30 @@ impl Tools {
                 format!(
                     "ARRAY: spacing {}",
                     if act == "total" {
-                        "as the total, divided evenly"
+                        if setup.kind == ArrayKind::Path {
+                            "evenly along the path"
+                        } else {
+                            "as the total, divided evenly"
+                        }
                     } else {
                         "between items"
                     }
                 )
             }
-            "pick-center" => {
+            "pick-center" | "pick-path" => {
                 *picking = true;
                 return Outcome::default();
+            }
+            "align" | "no-align" => {
+                setup.align = act == "align";
+                format!(
+                    "ARRAY: the items {}",
+                    if setup.align {
+                        "align with the path"
+                    } else {
+                        "stay unaligned along the path"
+                    }
+                )
             }
             _ => {
                 setup.rotate = act == "turn";
@@ -1679,6 +1813,7 @@ impl Tools {
                     picked,
                     mut setup,
                     center,
+                    path,
                     picking,
                 },
         }) = self.running.clone()
@@ -1696,21 +1831,39 @@ impl Tools {
                 );
                 return Some(Outcome::default());
             }
+            if setup.kind == ArrayKind::Path && (path.is_none() || picking) {
+                self.error = Some(
+                    "Pick the path the items run along first: click a line, polyline, arc, circle, \
+                     ellipse or spline."
+                        .to_owned(),
+                );
+                return Some(Outcome::default());
+            }
             if let Some(problem) = setup.problem() {
                 self.error = Some(problem);
                 return Some(Outcome::default());
             }
             self.running = None;
-            return Some(self.land_array(&picked, &setup, center.as_ref()));
+            return Some(self.land_array(&picked, &setup, center.as_ref(), path));
         }
-        if matches!(upper, "TO" | "TOTAL" | "BE" | "BETWEEN") {
-            return Some(self.array_option(if upper.starts_with('T') {
-                "total"
-            } else {
+        if matches!(
+            upper,
+            "TO" | "TOTAL" | "EV" | "EVEN" | "EVENLY" | "BE" | "BETWEEN"
+        ) {
+            return Some(self.array_option(if matches!(upper, "BE" | "BETWEEN") {
                 "between"
+            } else {
+                "total"
             }));
         }
         if picking {
+            if setup.kind == ArrayKind::Path {
+                self.error = Some(
+                    "Click a line, polyline, arc, circle, ellipse or spline for the path."
+                        .to_owned(),
+                );
+                return Some(Outcome::default());
+            }
             return None;
         }
         let whole = |t: &str| number(t).filter(|v| v.fract() == 0.0);
@@ -1761,6 +1914,23 @@ impl Tools {
                     _ => false,
                 }
             }
+            ArrayKind::Path => {
+                let (n, dist) = match typed.split_once(',') {
+                    Some((n, d)) => (whole(n), number(d).map(Some)),
+                    None => (whole(typed), Some(None)),
+                };
+                match (n, dist) {
+                    (Some(n), Some(dist)) => {
+                        setup.set("path_items", n);
+                        if let Some(d) = dist {
+                            setup.hold(Spacing::Between);
+                            setup.set("path_spacing", d);
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            }
         };
         if !took {
             self.error = Some(
@@ -1778,6 +1948,9 @@ impl Tools {
                     (ArrayKind::Polar, true) => {
                         "Type the items, such as 8, or items,angle to fill, such as 8,180."
                     }
+                    (ArrayKind::Path, _) => {
+                        "Type the items, such as 6, or items,spacing, such as 6,1.5."
+                    }
                 }
                 .to_owned(),
             );
@@ -1790,6 +1963,7 @@ impl Tools {
                 picked,
                 setup,
                 center,
+                path,
                 picking,
             },
         });
@@ -2455,10 +2629,17 @@ impl Tools {
 
     /// The array Array has set up, as one change set: one `array`
     /// operation, with the core's keys, the spacing between items worked
-    /// out from a total held, and a polar array's centre a snapped point
-    /// where it was taken on one. The core copies each object to each
-    /// place, writing a template's object's copies in the template.
-    fn land_array(&mut self, picked: &[usize], setup: &Setup, center: Option<&Taken>) -> Outcome {
+    /// out from a total held, a polar array's centre a snapped point where
+    /// it was taken on one, and a path array's curve by its ID. The core
+    /// copies each object to each place, writing a template's object's
+    /// copies in the template.
+    fn land_array(
+        &mut self,
+        picked: &[usize],
+        setup: &Setup,
+        center: Option<&Taken>,
+        path: Option<usize>,
+    ) -> Outcome {
         let template = picked.iter().any(|&p| self.template_object(p));
         let mut op = json!({"op": "array"});
         match picked {
@@ -2468,7 +2649,8 @@ impl Tools {
             }
         }
         let center = center.map_or(Value::Null, |c| self.point_value(c, template));
-        for (k, v) in setup.keys(center) {
+        let path_target = path.map_or(Value::Null, |p| self.target(p));
+        for (k, v) in setup.keys(center, path_target) {
             op[k] = v;
         }
         let objects = self.picked_words(picked);
@@ -2503,6 +2685,7 @@ impl Tools {
                     picked,
                     setup,
                     center,
+                    path,
                     picking,
                 },
             ..
@@ -2512,16 +2695,17 @@ impl Tools {
         };
         let b = self.picked_bounds(picked)?;
         let middle = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
-        let at = if *picking {
+        let at = if *picking && setup.kind == ArrayKind::Polar {
             aim.map(|a| a.at)
         } else {
             center.as_ref().map(|c| c.at)
         };
-        Some((picked.clone(), setup.places(middle, at), *picking))
+        let curve = path.and_then(|p| self.context.objects.get(p)?.path.as_ref());
+        Some((picked.clone(), setup.places(middle, at, curve), *picking))
     }
 
-    /// The box round Array's objects and every copy, and its centre, in
-    /// drawing units: what the panel goes beside and the view keeps in
+    /// The box round Array's objects and every copy, and its centre or path,
+    /// in drawing units: what the panel goes beside and the view keeps in
     /// sight. None while no array is set up.
     pub fn array_extent(&self, aim: Option<&Taken>) -> Option<[f64; 4]> {
         let (picked, places, _) = self.array_places(aim)?;
@@ -2546,7 +2730,8 @@ impl Tools {
         if let Some(Running {
             step:
                 Step::ArraySetup {
-                    center: Some(c),
+                    center,
+                    path,
                     setup,
                     ..
                 },
@@ -2554,7 +2739,14 @@ impl Tools {
         }) = &self.running
         {
             if setup.kind == ArrayKind::Polar {
-                take([c.at[0], c.at[1], c.at[0], c.at[1]]);
+                if let Some(c) = center {
+                    take([c.at[0], c.at[1], c.at[0], c.at[1]]);
+                }
+            }
+            if setup.kind == ArrayKind::Path {
+                if let Some(b) = path.and_then(|p| self.context.objects.get(p)?.bounds) {
+                    take(b);
+                }
             }
         }
         Some(all)
@@ -2790,7 +2982,16 @@ impl Tools {
                 ..
             } => {
                 state.command = Some(setup.kind.command());
-                if *picking {
+                if *picking && setup.kind == ArrayKind::Path {
+                    state.placeholder = String::new();
+                    (
+                        format!(
+                            "{click} the path the items run along: a line, polyline, arc, circle, \
+                             ellipse or spline"
+                        ),
+                        vec![cancel],
+                    )
+                } else if *picking {
                     state.placeholder = "x,y".to_owned();
                     (
                         format!("{click} the centre the items go round{hold}, or type x,y"),
@@ -2804,6 +3005,7 @@ impl Tools {
                             "rows,columns  @dx,dy",
                         ),
                         ArrayKind::Polar => ("items or items,angle", "items  items,angle"),
+                        ArrayKind::Path => ("items or items,spacing", "items  items,spacing"),
                     };
                     state.placeholder = placeholder.to_owned();
                     let land = if touch {
@@ -2878,6 +3080,7 @@ impl Tools {
             picked,
             setup,
             center,
+            path,
             picking,
         } = &running.step
         {
@@ -2885,6 +3088,10 @@ impl Tools {
                 Some("Then the copies show.".to_owned())
             } else if setup.kind == ArrayKind::Polar && *picking {
                 Some(format!("{click} the new centre on the drawing."))
+            } else if setup.kind == ArrayKind::Path && path.is_none() {
+                Some("Then the copies show.".to_owned())
+            } else if setup.kind == ArrayKind::Path && *picking {
+                Some(format!("{click} the new path on the drawing."))
             } else {
                 setup.problem()
             };
@@ -2907,8 +3114,13 @@ impl Tools {
                         }
                     }
                 }),
+                path: (setup.kind == ArrayKind::Path).then(|| match (path, picking) {
+                    (_, true) | (None, _) => format!("{click} a curve on the drawing"),
+                    (Some(p), false) => self.object_words(*p),
+                }),
                 picking: *picking,
                 rotate: setup.rotate,
+                align: setup.align,
                 ready: problem.is_none(),
                 count: problem.unwrap_or_else(|| {
                     format!(
