@@ -176,25 +176,26 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 .zoombtns button:hover { background: #4a5567; }
 .zoombtns .fit { font-size: 11px; }
 
-/* toasts, top left of the drawing */
+/* toasts: compact click-through pill, bottom right above the command bar (#257) */
 .va-overlays {
-  position: absolute; left: 12px; right: 58px; top: calc(12px + var(--gtop, 0px)); z-index: 6; display: flex; flex-direction: column;
-  gap: 8px; pointer-events: none; max-width: 430px;
+  position: absolute; left: 12px; right: 12px; bottom: calc(var(--cmd, 36px) + 20px); z-index: 6;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none;
 }
-.va-overlays > * { pointer-events: auto; }
+.va-overlays > * { pointer-events: none; }
 .va-toast {
-  display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px 8px 12px; border-radius: 4px;
-  background: rgba(48, 56, 69, .97); border: 1px solid #5a6577; border-left: 3px solid var(--blue);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, .4);
+  display: flex; gap: 8px; align-items: center; padding: 5px 10px 5px 11px; border-radius: 4px;
+  background: rgba(38, 45, 56, .94); border: 1px solid #5a6577; border-left: 3px solid var(--blue);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .38); max-width: min(430px, 100%);
 }
-.va-toast > .dot { margin-top: 5px; }
-.va-toast div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.va-toast button { pointer-events: auto; }
+.va-toast > .dot { margin-top: 0; }
+.va-toast div { flex: 1; min-width: 0; display: flex; flex-direction: row; align-items: baseline; gap: 2px 8px; flex-wrap: wrap; }
 .va-toast small { color: var(--dim); font-size: 12px; }
 .va-toast.ok { border-left-color: var(--ok); }
 .va-toast.bad { border-left-color: var(--bad); }
 .va-toast.warn { border-left-color: var(--warn); }
-.va-toast.in { animation: tin .2s ease-out; }
-@keyframes tin { from { opacity: 0; transform: translateY(-6px); } }
+.va-toast.in { animation: tin .18s ease-out; }
+@keyframes tin { from { opacity: 0; transform: translateY(6px); } }
 .va-note {
   position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); z-index: 5;
   max-width: min(440px, calc(100% - 32px)); padding: 12px 14px; border-radius: 5px;
@@ -720,7 +721,12 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
   .qin { font-size: 16px; line-height: 16px; height: 20px; padding: 1px 5px; }
   .kv .qrow th, .kv .qrow td { padding-top: 0; padding-bottom: 1px; }
   textarea.qin { height: auto; }
-  .va-overlays { left: 8px; right: 8px; max-width: none; }
+  .va-overlays {
+    left: 8px; right: 8px;
+    bottom: max(calc(var(--peek, 0px) + var(--cmd, 32px) + 14px), calc(var(--sheet, 0px) + 8px));
+    align-items: stretch;
+  }
+  .va-toast { max-width: none; }
   .long { display: none; }
   /* A preview's band takes the command bar's place: the edit, the sheet with big arrows, what would
      become of it and of all, then Cancel and Change all. */

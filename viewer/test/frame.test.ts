@@ -61,7 +61,11 @@ import {
   type ArrayPanelState,
   arrayFraming,
   arrayInputMode,
+  dismissToastOnToolStart,
   switchingAway,
+  TOAST_HOLD_MS,
+  TOAST_ROUTINE_MS,
+  toastDuration,
   toggledWords,
   toggleFor,
   typeWords,
@@ -817,4 +821,28 @@ test('a pending array is dropped the moment another sheet or layout is asked for
   // Nothing drawn yet, or nothing asked for: no switch.
   assert.equal(switchingAway('DP-LD-102', null, null), false);
   assert.equal(switchingAway(null, null, shown), false);
+});
+
+test('routine landing toasts shorten to 3 s and dismiss when starting a tool; proposals, guides and warnings stay 6 s (#257)', () => {
+  const routine = { tone: 'ok' };
+  const info = { tone: 'info' };
+  const warn = { tone: 'warn' };
+  const err = { tone: 'bad' };
+  const prop = { tone: 'prop', proposal: 3 };
+  const guide = { tone: 'prop', guides: [1] };
+
+  assert.equal(toastDuration(routine), TOAST_ROUTINE_MS);
+  assert.equal(toastDuration(info), TOAST_ROUTINE_MS);
+  assert.equal(toastDuration(warn), TOAST_HOLD_MS);
+  assert.equal(toastDuration(err), TOAST_HOLD_MS);
+  assert.equal(toastDuration(prop), TOAST_HOLD_MS);
+  assert.equal(toastDuration(guide), TOAST_HOLD_MS);
+
+  assert.equal(dismissToastOnToolStart(routine), true);
+  assert.equal(dismissToastOnToolStart(info), true);
+  assert.equal(dismissToastOnToolStart(warn), false);
+  assert.equal(dismissToastOnToolStart(err), false);
+  assert.equal(dismissToastOnToolStart(prop), false);
+  assert.equal(dismissToastOnToolStart(guide), false);
+  assert.equal(dismissToastOnToolStart(null), false);
 });

@@ -1217,3 +1217,31 @@ export function switchingAway(
   const first = shown.layouts?.[0] ?? null;
   return first !== null && shown.layout !== null && shown.layout.toUpperCase() !== first.toUpperCase();
 }
+
+/** Routine landing/info toast auto-dismiss time in milliseconds (#257). */
+export const TOAST_ROUTINE_MS = 3000;
+
+/** Hold time in milliseconds for warnings, errors, assistant proposals and guides (#257). */
+export const TOAST_HOLD_MS = 6000;
+
+/**
+ * How long a toast stays up before auto-clearing (#257): 3 s for routine
+ * landing/info notifications, 6 s for warnings, errors, assistant proposals
+ * and guides so action buttons (`Show`, `Start`) remain easy to reach.
+ */
+export function toastDuration(toast: { tone: string; proposal?: number; guides?: readonly number[] }): number {
+  if (toast.tone === 'warn' || toast.tone === 'bad' || toast.tone === 'prop') return TOAST_HOLD_MS;
+  if (toast.proposal !== undefined || (toast.guides?.length ?? 0) > 0) return TOAST_HOLD_MS;
+  return TOAST_ROUTINE_MS;
+}
+
+/**
+ * Whether starting a drawing tool dismisses the currently visible toast right
+ * away (#257): routine landing toasts clear immediately so they stay out of
+ * the drafter's way, while warnings, errors, proposals and guides stay up.
+ */
+export function dismissToastOnToolStart(
+  toast: { tone: string; proposal?: number; guides?: readonly number[] } | null,
+): boolean {
+  return toast !== null && toastDuration(toast) === TOAST_ROUTINE_MS;
+}
