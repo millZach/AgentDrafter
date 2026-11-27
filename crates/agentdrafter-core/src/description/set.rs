@@ -26,7 +26,8 @@ use crate::set::SET_SETTINGS_FILE;
 use crate::units::Unit;
 
 /// The keys of a drawing set's settings.
-pub(crate) const SETTINGS_KEYS: [&str; 7] = [
+pub(crate) const SETTINGS_KEYS: [&str; 8] = [
+    "id",
     "units",
     "output",
     "rows",
@@ -35,6 +36,12 @@ pub(crate) const SETTINGS_KEYS: [&str; 7] = [
     "format",
     "dwg_version",
 ];
+
+/// Maximum length of a drawing set's explicit `id` in characters (#234).
+pub(crate) const SET_ID_MAX_LEN: usize = 128;
+
+/// Regular expression a drawing set's explicit `id` must match (#234).
+pub(crate) const SET_ID_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9._-]*$";
 
 /// The keys at the top of a set's rows file.
 pub(crate) const ROWS_FILE_KEYS: [&str; 1] = ["rows"];
@@ -73,6 +80,10 @@ pub(crate) const DEVICE_NAMES: [&str; 22] = [
 /// A drawing set's settings.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SetSettings {
+    /// Optional stable identifier for this drawing set, recorded in its DWGs'
+    /// build marks and its PDFs' stamps so sets sharing a folder (including
+    /// via links) never claim each other's outputs (#234).
+    pub id: Option<String>,
     /// The set's declared unit: every template, sheet description and block
     /// library in the set is in it.
     pub units: Unit,
@@ -209,6 +220,10 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
         ));
     };
     let fields = Fields::of(&root, "", &SETTINGS_KEYS, "a drawing set's settings")?;
+    let id = match fields.get("id") {
+        Some(node) => Some(set_id(node, "id")?),
+        None => None,
+    };
     let units = match fields.get("units") {
         Some(node) => unit(node, "units")?,
         None => {
@@ -350,6 +365,7 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
         None => DwgVersion::default(),
     };
     Ok(SetSettings {
+        id,
         units,
         output: output.to_owned(),
         rows,
@@ -359,6 +375,30 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
         format,
         dwg_version,
     })
+}
+
+fn set_id(node: &Node, path: &str) -> Result<String, Error> {
+    const SHAPE: &str =
+        "a drawing set identifier (1 to 128 ASCII letters, digits, `.`, `_` or `-`, starting with \
+         a letter or digit, such as `unit-4-loops`)";
+    if node.is_bare_null() {
+        return Err(wrong_type(node, path, SHAPE));
+    }
+    let text = scalar(node, path, SHAPE)?;
+    let valid = !text.is_empty()
+        && text.len() <= SET_ID_MAX_LEN
+        && text.as_bytes()[0].is_ascii_alphanumeric()
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if !valid {
+        return Err(bad_value(
+            node,
+            path,
+            format!("`{text}` is not a valid drawing set id; use {SHAPE}"),
+        ));
+    }
+    Ok(text.to_owned())
 }
 
 fn rows_named(written: &str, field: String, at: Pos) -> RowsNamed {

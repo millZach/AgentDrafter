@@ -44,7 +44,7 @@ use crate::plot_style::{NotFollowed, PlotStyle};
 use crate::reply::Reply;
 use crate::set::{set_in_mark, Notice, SET_SETTINGS_FILE};
 use crate::settings::Settings;
-use crate::stamp::{SourceKind, Stamp};
+use crate::stamp::{SourceKind, Stamp, StampSet};
 use crate::text::fonts::{file_in, FontSubstitution};
 use crate::text::placement::SheetFonts;
 use crate::units::Unit;
@@ -314,6 +314,7 @@ pub fn plot_with(request: &PlotRequest, settings: &Settings) -> Result<PlotRepor
         request.overwrite,
         &title,
         &style,
+        None,
         settings,
     )
 }
@@ -377,6 +378,7 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
         .in_file(&output)
     })?;
     let _output_lock = crate::leftovers::lock_output(&output)?;
+    let marked = set_in_mark(folder, &set.output);
     let sheets: Vec<PlottedSheet> = rows
         .iter()
         .map(|row| {
@@ -417,6 +419,11 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
                     unresolved_xrefs: resolved_xrefs.unresolved,
                     unresolved_media: resolved_media.unresolved,
                 };
+                let stamp_set = StampSet {
+                    id: set.id.clone(),
+                    path: marked.clone(),
+                    sheet: row.sheet.clone(),
+                };
                 plot_record(
                     &record,
                     &template,
@@ -424,6 +431,7 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
                     request.overwrite,
                     &row.sheet,
                     sheet_style.as_ref(),
+                    Some(stamp_set),
                     settings,
                 )
             });
@@ -442,12 +450,12 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
         })
         .collect();
     let plotted = sheets.iter().filter(|s| s.ok).count();
-    let marked = set_in_mark(folder, &set.output);
     let scan = leftovers(
         &SetOutputs {
             folder,
             output: &output,
             marked: marked.as_deref(),
+            set_id: set.id.as_deref(),
             rows_files: &rows_files,
             sheets: rows.iter().map(|row| row.sheet.as_str()).collect(),
         },
@@ -661,11 +669,12 @@ pub(crate) fn plot_dwg_bytes(
     let title = source
         .file_stem()
         .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-    render_pdf_record(&record, source, output, &title, style, settings)
+    render_pdf_record(&record, source, output, &title, style, None, settings)
 }
 
 /// Plots the sheet `record` holds, read from `source`, to a PDF at
 /// `output`, written whole or not at all.
+#[allow(clippy::too_many_arguments)]
 fn plot_record(
     record: &Record,
     source: &Path,
@@ -673,10 +682,12 @@ fn plot_record(
     overwrite: bool,
     title: &str,
     style: &(PlotStyle, PlotStyleUsed),
+    stamp_set: Option<StampSet>,
     settings: &Settings,
 ) -> Result<PlotReport, Error> {
     refuse_to_replace(source, output, overwrite, OutputKind::Pdf)?;
-    let (bytes, report) = render_pdf_record(record, source, output, title, style, settings)?;
+    let (bytes, report) =
+        render_pdf_record(record, source, output, title, style, stamp_set, settings)?;
     write_whole(output, &bytes, OutputKind::Pdf)?;
     Ok(report)
 }
@@ -687,6 +698,7 @@ fn render_pdf_record(
     output: &Path,
     title: &str,
     (style, used): &(PlotStyle, PlotStyleUsed),
+    stamp_set: Option<StampSet>,
     settings: &Settings,
 ) -> Result<(Vec<u8>, PlotReport), Error> {
     let sheet = &record.sheet;
@@ -709,7 +721,7 @@ fn render_pdf_record(
         let page = page(on, &list)?;
         drawn.push((list, page));
     }
-    let stamp = Stamp::new(&record.read(), output);
+    let stamp = Stamp::new_for_set(&record.read(), output, stamp_set);
     let producer = format!("agentdrafter {}", env!("CARGO_PKG_VERSION"));
     let creator = format!("agentdrafter plot, plot style {}", used.name);
     let sheets: Vec<(&draw::DisplayList, Page)> =

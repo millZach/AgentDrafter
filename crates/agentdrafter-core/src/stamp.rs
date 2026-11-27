@@ -47,6 +47,28 @@ pub struct Stamp {
     /// say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<StampRevision>,
+    /// The drawing set and sheet that produced this output, when plotted from
+    /// a drawing set (#234).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set: Option<StampSet>,
+}
+
+/// Which drawing set and sheet produced a set output, recorded in its stamp
+/// so sets sharing an output folder or external rows file cannot claim each
+/// other's PDFs and copies saved under another name are never mistaken for
+/// leftovers (#234).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StampSet {
+    /// The set's explicit `id` from `set.yaml`, when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The way back from the output folder to the set's folder
+    /// ([`crate::set::set_in_mark`]), when it does not name a folder above
+    /// the set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The sheet name plotted (`row.sheet`).
+    pub sheet: String,
 }
 
 /// A file an output was produced from, as its stamp names it.
@@ -129,6 +151,16 @@ impl Stamp {
     /// one's kind, where it was read from and the bytes read, the record
     /// first.
     pub(crate) fn new(files: &[(SourceKind, &Path, &[u8])], output: &Path) -> Stamp {
+        Self::new_for_set(files, output, None)
+    }
+
+    /// Same as [`Stamp::new`], recording the producing drawing set and sheet
+    /// when plotted from a drawing set (#234).
+    pub(crate) fn new_for_set(
+        files: &[(SourceKind, &Path, &[u8])],
+        output: &Path,
+        set: Option<StampSet>,
+    ) -> Stamp {
         Stamp {
             stamp: STAMP_FORMAT,
             produced_by: format!("agentdrafter {}", env!("CARGO_PKG_VERSION")),
@@ -141,6 +173,7 @@ impl Stamp {
                 })
                 .collect(),
             revision: Some(stamp_revision(files)),
+            set,
         }
     }
 
@@ -430,6 +463,7 @@ mod tests {
                 via: Some(crate::Interface::Viewer),
                 why: None,
             }),
+            set: None,
         };
         let png = |stamp: &Stamp| {
             let pixmap = tiny_skia::Pixmap::new(2, 2).unwrap();

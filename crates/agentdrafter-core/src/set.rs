@@ -247,7 +247,7 @@ fn build_sheets(
     let sheets: Vec<SheetOutcome> = rows
         .iter()
         .map(|row| {
-            let mark = sheet_mark(marked.as_deref(), &rows_files, row);
+            let mark = sheet_mark(marked.as_deref(), set.id.as_deref(), &rows_files, row);
             let template = template_path(folder, row);
             let dwg = output.join(format!("{}.{}", row.sheet, format.extension()));
             let mut notices = Vec::new();
@@ -283,6 +283,7 @@ fn build_sheets(
             folder,
             output: &output,
             marked: marked.as_deref(),
+            set_id: set.id.as_deref(),
             rows_files: &rows_files,
             sheets: rows.iter().map(|row| row.sheet.as_str()).collect(),
         },
@@ -309,11 +310,19 @@ fn build_sheets(
 /// the DWG on its own reads that file alone; not when the mark names no
 /// set, nor when the file's path holds `;`, which ends it in the mark: that
 /// DWG's set's rows files are all read, as for a set of one.
-pub(crate) fn sheet_mark(set: Option<&str>, rows_files: &[RowsFile], row: &Row) -> BuildMark {
+pub(crate) fn sheet_mark(
+    set: Option<&str>,
+    set_id: Option<&str>,
+    rows_files: &[RowsFile],
+    row: &Row,
+) -> BuildMark {
     let written = &rows_files[row.file_index].written;
     let named = set.is_some() && rows_files.len() > 1 && !written.contains(';');
+    let sheet = (set.is_some() || set_id.is_some()) && !row.sheet.contains(';');
     BuildMark {
         set: set.map(str::to_owned),
+        set_id: set_id.map(str::to_owned),
+        sheet: sheet.then(|| row.sheet.clone()),
         rows: named.then(|| written.clone()),
     }
 }
@@ -438,7 +447,7 @@ fn set_of_dwg_with_mark(
     folders.dedup();
     let mut why = None;
     for folder in folders {
-        match set_at(folder, dwg, source_id, &written) {
+        match set_at(folder, dwg, source_id, &written, mark.set_id.as_deref()) {
             Ok(set) => {
                 return Ok(DwgSet {
                     rows: mark.rows,
@@ -465,6 +474,7 @@ fn set_at(
     dwg: &Path,
     source_id: Option<crate::build::FileId>,
     written: &str,
+    mark_set_id: Option<&str>,
 ) -> Result<DwgSet, String> {
     let named =
         format!("the drawing set the DWG's build mark names, `{written}` from the DWG's folder,");
@@ -477,6 +487,14 @@ fn set_at(
     }
     let settings = read_set_settings(&settings_file)
         .map_err(|e| format!("{named} cannot be read: {}", e.message))?;
+    if let Some(mark_id) = mark_set_id {
+        if settings.id.as_deref() != Some(mark_id) {
+            return Err(format!(
+                "{named} has a different set id than the DWG's build mark (`{mark_id}`), so this \
+                 DWG was built by another drawing set"
+            ));
+        }
+    }
     let ext = if dwg::is_dxf_path(dwg) { "dxf" } else { "dwg" };
     let name = format!(
         "{}.{ext}",
@@ -651,7 +669,7 @@ fn lexical(path: &Path) -> Option<PathBuf> {
 /// `path` as the file system resolves it: in full, through links, with
 /// `.` and `..` worked out. The part of it that is not there yet, such as
 /// an output folder a change set will make, is worked out as written.
-fn physical(path: &Path) -> Option<PathBuf> {
+pub(crate) fn physical(path: &Path) -> Option<PathBuf> {
     let absolute = std::path::absolute(path).ok()?;
     let (mut resolved, rest) = absolute.ancestors().find_map(|there| {
         let rest = absolute.strip_prefix(there).ok()?;
@@ -673,7 +691,7 @@ fn physical(path: &Path) -> Option<PathBuf> {
 /// `from`, which is in full with no `.` or `..`: each `..` goes up a
 /// folder. None when `written` is not a relative path of folder names, or
 /// goes up past the root.
-fn follow(from: &Path, written: &str) -> Option<PathBuf> {
+pub(crate) fn follow(from: &Path, written: &str) -> Option<PathBuf> {
     if written.starts_with('/') {
         return None;
     }
@@ -840,7 +858,9 @@ mod tests {
                     dwg::build_mark(&dwg),
                     Some(BuildMark {
                         set: None,
-                        rows: None
+                        set_id: None,
+                        sheet: None,
+                        rows: None,
                     })
                 );
                 assert!(said.unwrap().contains("`../../issued`"));
@@ -852,6 +872,8 @@ mod tests {
                 dwg::build_mark(&dwg),
                 Some(BuildMark {
                     set: Some(written.to_owned()),
+                    set_id: None,
+                    sheet: Some("DEMO-002".to_owned()),
                     rows: None,
                 }),
                 "{output}"
