@@ -561,6 +561,12 @@ const FORMAT: Place = Place {
     json: r#"{"units": "mm", "output": "dwg", "rows": "rows.yaml", "format": V}"#,
 };
 
+const SET_ID: Place = Place {
+    name: "the set's id",
+    yaml: "id: V\nunits: mm\noutput: dwg\nrows: rows.yaml\n",
+    json: r#"{"id": V, "units": "mm", "output": "dwg", "rows": "rows.yaml"}"#,
+};
+
 const DWG_VERSION: Place = Place {
     name: "the set's dwg_version",
     yaml: "units: mm\noutput: dwg\nrows: rows.yaml\ndwg_version: V\n",
@@ -570,6 +576,14 @@ const DWG_VERSION: Place = Place {
 #[test]
 fn the_set_schema_accepts_exactly_the_settings_the_reader_accepts() {
     let cases: Vec<Case> = vec![
+        (&SET_ID, "unit-4-loops", json!("unit-4-loops"), true),
+        (&SET_ID, "A1_b.2", json!("A1_b.2"), true),
+        (&SET_ID, "''", json!(""), false),
+        (&SET_ID, "'-bad'", json!("-bad"), false),
+        (&SET_ID, "'a;b'", json!("a;b"), false),
+        (&SET_ID, "'has space'", json!("has space"), false),
+        (&SET_ID, "null", json!(null), false),
+        (&SET_ID, "[a]", json!(["a"]), false),
         (&DWG_VERSION, "AC1032", json!("AC1032"), true),
         (&DWG_VERSION, "AC1024", json!("AC1024"), true),
         (&DWG_VERSION, "2010", json!(2010), true),

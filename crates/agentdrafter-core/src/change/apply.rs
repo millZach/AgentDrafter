@@ -87,9 +87,10 @@ struct SetFiles {
     output: PathBuf,
     format: DrawingFormat,
     dwg_version: DwgVersion,
-    /// The set as the build marks of its DWGs name it, as `build` names it
-    /// names it.
+    /// The set as the build marks of its DWGs name it, as `build` names it.
     marked: Option<String>,
+    /// The set's explicit `id` from `set.yaml`, when configured (#234).
+    set_id: Option<String>,
     /// The set's rows files, in the order it builds their rows.
     rows_files: Vec<RowsFile>,
     rows: Vec<Row>,
@@ -207,6 +208,7 @@ impl SetFiles {
             format: settings.format,
             dwg_version: settings.dwg_version,
             marked: set_in_mark(folder, &settings.output),
+            set_id: settings.id,
             rows_files,
             rows,
             templates,
@@ -316,7 +318,12 @@ impl SetFiles {
 
     /// The build mark sheet `k`'s DWG carries, as `build` writes it.
     fn mark(&self, k: usize) -> BuildMark {
-        sheet_mark(self.marked.as_deref(), &self.rows_files, &self.rows[k])
+        sheet_mark(
+            self.marked.as_deref(),
+            self.set_id.as_deref(),
+            &self.rows_files,
+            &self.rows[k],
+        )
     }
 
     /// Where sheet `k`'s own objects are written: its row's rows file, and

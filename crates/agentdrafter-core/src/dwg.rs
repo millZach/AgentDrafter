@@ -86,25 +86,14 @@ const NEW_SHEET_VERSION: DxfVersion = DxfVersion::AC1032;
 /// The build mark: a custom drawing property, as AutoCAD's DWGPROPS shows
 /// it, written into every DWG AgentDrafter builds. A build replaces an
 /// existing DWG only when it carries it. Its value is [`BUILT`] for a sheet
-/// built on its own, and [`BUILT_FROM_SET`] followed by the drawing set's
-/// folder for a sheet of a set, such as `build; set=..`. A sheet of a set
-/// whose rows are in more than one rows file names its own after
-/// [`ROWS_IN_MARK`], before the set: `build; rows=rows/areas.yaml; set=..`.
+/// built on its own, and adds semicolon-separated fields for a sheet of a set:
+/// optional `id=<set_id>`, optional `sheet=<sheet>`, optional `rows=<rows>`,
+/// and trailing `set=<set_path>` (always last so a set folder holding `;`
+/// parses to the end of the value) (#234).
 const BUILD_MARK: &str = "AgentDrafter";
 
 /// The build mark's value for a sheet built on its own.
 const BUILT: &str = "build";
-
-/// How the build mark's value starts for a sheet of a drawing set: the
-/// set's folder follows, relative to the DWG's folder, with `/` between
-/// folders, to the end of the value.
-const BUILT_FROM_SET: &str = "build; set=";
-
-/// How the build mark's value starts for a sheet of a drawing set that
-/// names the sheet's rows file: the rows file follows, relative to the
-/// set's folder, up to the first `;`, which it never holds, then `; set=`
-/// and the set's folder, as after [`BUILT_FROM_SET`].
-const ROWS_IN_MARK: &str = "build; rows=";
 
 /// The section of a DWG that holds its drawing properties, DWGPROPS.
 const SUMMARY_SECTION: &str = "AcDb:SummaryInfo";
@@ -114,8 +103,14 @@ const SUMMARY_SECTION: &str = "AcDb:SummaryInfo";
 pub(crate) struct BuildMark {
     /// The folder of the drawing set the DWG was built from, relative to
     /// the DWG's folder, as the mark writes it: `/` between folders, such
-    /// as `..` or `../demo-plant`. None for a sheet built on its own.
+    /// as `..` or `../demo-plant`. None for a sheet built on its own or when
+    /// the way back would name a folder above the set.
     pub set: Option<String>,
+    /// The drawing set's explicit `id` from `set.yaml`, when configured (#234).
+    pub set_id: Option<String>,
+    /// The sheet name built (`row.sheet`), when it holds no `;`, so a copy
+    /// saved under another name is never mistaken for a leftover (#234).
+    pub sheet: Option<String>,
     /// The rows file the sheet's row is in, relative to the set's folder,
     /// as the set reaches it, such as `rows/areas.yaml`: named only for a
     /// sheet of a set whose rows are in more than one rows file, and only
@@ -3525,15 +3520,37 @@ fn custom_properties(section: &[u8]) -> Option<Vec<(String, String)>> {
 
 /// The build mark's value for `mark`.
 fn mark_value(mark: &BuildMark) -> String {
-    match (&mark.set, &mark.rows) {
-        (Some(set), Some(rows)) => format!("{ROWS_IN_MARK}{rows}; set={set}"),
-        (Some(set), None) => format!("{BUILT_FROM_SET}{set}"),
-        (None, _) => BUILT.to_owned(),
+    let mut out = BUILT.to_owned();
+    if let Some(id) = &mark.set_id {
+        if !id.is_empty() && !id.contains(';') {
+            out.push_str("; id=");
+            out.push_str(id);
+        }
     }
+    if let Some(sheet) = &mark.sheet {
+        if !sheet.is_empty() && !sheet.contains(';') {
+            out.push_str("; sheet=");
+            out.push_str(sheet);
+        }
+    }
+    if let Some(rows) = &mark.rows {
+        if !rows.is_empty() && !rows.contains(';') {
+            out.push_str("; rows=");
+            out.push_str(rows);
+        }
+    }
+    if let Some(set) = &mark.set {
+        if !set.is_empty() {
+            out.push_str("; set=");
+            out.push_str(set);
+        }
+    }
+    out
 }
 
 /// The build mark among a drawing's custom properties, if one of them is
-/// it.
+/// it. Accepts both the current format (`id`, `sheet`, `rows`, `set`) and
+/// legacy marks (`build`, `build; set=...`, `build; rows=...; set=...`).
 fn mark_in(properties: &[(String, String)]) -> Option<BuildMark> {
     properties
         .iter()
@@ -3542,19 +3559,63 @@ fn mark_in(properties: &[(String, String)]) -> Option<BuildMark> {
             if value == BUILT {
                 return Some(BuildMark {
                     set: None,
+                    set_id: None,
+                    sheet: None,
                     rows: None,
                 });
             }
-            let (rows, set) = match value.strip_prefix(ROWS_IN_MARK) {
-                Some(rest) => {
-                    let (rows, set) = rest.split_once(';')?;
-                    (Some(rows), set.strip_prefix(" set=")?)
+            let mut rest = value.strip_prefix("build; ")?;
+            let mut set: Option<String> = None;
+            let mut set_id: Option<String> = None;
+            let mut sheet: Option<String> = None;
+            let mut rows: Option<String> = None;
+            while !rest.is_empty() {
+                // `set=` is always last so folder names containing `;` parse
+                // cleanly to the end of the value.
+                if let Some(set_val) = rest.strip_prefix("set=") {
+                    if set.is_some() || set_val.is_empty() {
+                        return None;
+                    }
+                    set = Some(set_val.to_owned());
+                    break;
                 }
-                None => (None, value.strip_prefix(BUILT_FROM_SET)?),
-            };
-            (!set.is_empty() && rows.is_none_or(|r| !r.is_empty())).then(|| BuildMark {
-                set: Some(set.to_owned()),
-                rows: rows.map(str::to_owned),
+                let (part, next) = match rest.split_once(';') {
+                    Some((head, tail)) => {
+                        let tail = tail.strip_prefix(' ')?;
+                        if tail.is_empty() {
+                            return None;
+                        }
+                        (head, tail)
+                    }
+                    None => (rest, ""),
+                };
+                if let Some(val) = part.strip_prefix("id=") {
+                    if set_id.is_some() || val.is_empty() {
+                        return None;
+                    }
+                    set_id = Some(val.to_owned());
+                } else if let Some(val) = part.strip_prefix("sheet=") {
+                    if sheet.is_some() || val.is_empty() {
+                        return None;
+                    }
+                    sheet = Some(val.to_owned());
+                } else {
+                    let val = part.strip_prefix("rows=")?;
+                    if rows.is_some() || val.is_empty() {
+                        return None;
+                    }
+                    rows = Some(val.to_owned());
+                }
+                rest = next;
+            }
+            if set.is_none() && set_id.is_none() {
+                return None;
+            }
+            Some(BuildMark {
+                set,
+                set_id,
+                sheet,
+                rows,
             })
         })
 }
@@ -4263,6 +4324,8 @@ mod tests {
 
     const ON_ITS_OWN: BuildMark = BuildMark {
         set: None,
+        set_id: None,
+        sheet: None,
         rows: None,
     };
 
@@ -5070,22 +5133,38 @@ mod tests {
                 "of-a-set.dwg",
                 BuildMark {
                     set: Some("..".into()),
+                    set_id: None,
+                    sheet: Some("DEMO-001".into()),
                     rows: None,
                 },
-                "build; set=..",
+                "build; sheet=DEMO-001; set=..",
+            ),
+            (
+                "of-an-identified-set.dwg",
+                BuildMark {
+                    set: Some("..".into()),
+                    set_id: Some("unit-4".into()),
+                    sheet: Some("DEMO-001".into()),
+                    rows: None,
+                },
+                "build; id=unit-4; sheet=DEMO-001; set=..",
             ),
             (
                 "of-a-set-of-rows-files.dwg",
                 BuildMark {
                     set: Some("../a; set=b".into()),
+                    set_id: None,
+                    sheet: Some("AREA-01".into()),
                     rows: Some("rows/areas.yaml".into()),
                 },
-                "build; rows=rows/areas.yaml; set=../a; set=b",
+                "build; sheet=AREA-01; rows=rows/areas.yaml; set=../a; set=b",
             ),
             (
                 "far.dwg",
                 BuildMark {
                     set: Some("../../plants/démo plant; 2".into()),
+                    set_id: None,
+                    sheet: None,
                     rows: None,
                 },
                 "build; set=../../plants/démo plant; 2",
@@ -5137,6 +5216,8 @@ mod tests {
             mark(&[("Client", "x"), ("AgentDrafter", "build; set=../a b")]),
             Some(BuildMark {
                 set: Some("../a b".into()),
+                set_id: None,
+                sheet: None,
                 rows: None,
             })
         );
@@ -5144,12 +5225,26 @@ mod tests {
             mark(&[("AgentDrafter", "build; rows=r/b.yaml; set=../a; rows=c")]),
             Some(BuildMark {
                 set: Some("../a; rows=c".into()),
+                set_id: None,
+                sheet: None,
                 rows: Some("r/b.yaml".into()),
+            })
+        );
+        assert_eq!(
+            mark(&[("AgentDrafter", "build; id=job-1; sheet=S-01")]),
+            Some(BuildMark {
+                set: None,
+                set_id: Some("job-1".into()),
+                sheet: Some("S-01".into()),
+                rows: None,
             })
         );
         for not_a_mark in [
             &[("AgentDrafter", "built")][..],
             &[("AgentDrafter", "build; set=")],
+            &[("AgentDrafter", "build; id=; set=..")],
+            &[("AgentDrafter", "build; sheet=; set=..")],
+            &[("AgentDrafter", "build; sheet=S-01")],
             &[("AgentDrafter", "build; rows=r.yaml; set=")],
             &[("AgentDrafter", "build; rows=; set=..")],
             &[("AgentDrafter", "build; rows=r.yaml")],

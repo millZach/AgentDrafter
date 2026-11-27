@@ -14,7 +14,7 @@ use super::objects::OBJECT_TYPES;
 use super::schema::{object_choices, optional_text, sheet_description_schema, SUBSET, TEXT_TYPES};
 use super::set::{
     DEVICE_NAMES, FORBIDDEN_IN_SHEET_NAMES, LONGEST_SHEET_NAME, ROWS_FILE_KEYS, ROW_KEYS,
-    SETTINGS_KEYS,
+    SETTINGS_KEYS, SET_ID_MAX_LEN, SET_ID_PATTERN,
 };
 use super::template::ROW_KEY;
 use crate::build::DrawingFormat;
@@ -26,7 +26,7 @@ pub(crate) const VALUE_NAME: &str = "^[A-Za-z0-9_-]+$";
 
 /// The schema of a drawing set's settings, `set.yaml`.
 pub(crate) fn set_schema() -> Value {
-    let [units_key, output_key, rows_key, clean_key, plot_style_key, format_key, dwg_version_key] =
+    let [id_key, units_key, output_key, rows_key, clean_key, plot_style_key, format_key, dwg_version_key] =
         SETTINGS_KEYS;
     let mut version_choices: Vec<Value> = DwgVersion::ACCEPTED_STRINGS
         .into_iter()
@@ -46,6 +46,17 @@ pub(crate) fn set_schema() -> Value {
         "required": [units_key, output_key, rows_key],
         "additionalProperties": false,
         "properties": {
+            id_key: {
+                "description": "Optional stable identifier for this drawing set, recorded in its \
+                                DWGs' build marks and its PDFs' stamps so sets sharing an output \
+                                folder (including via links) never claim each other's outputs. \
+                                1 to 128 ASCII letters, digits, `.`, `_` or `-`, starting with a \
+                                letter or digit (such as `unit-4-loops`).",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": SET_ID_MAX_LEN,
+                "pattern": SET_ID_PATTERN,
+            },
             units_key: {
                 "description": "The set's declared unit: every template, sheet description and \
                                 block library in the set is in it, and so is every DWG the set \

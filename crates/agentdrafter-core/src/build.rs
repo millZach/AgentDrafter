@@ -196,6 +196,8 @@ pub fn build_with_options(
         .unwrap_or_else(|| description.with_extension(effective.extension()));
     let alone = BuildMark {
         set: None,
+        set_id: None,
+        sheet: None,
         rows: None,
     };
     let mut report = build_sheet_with_version(

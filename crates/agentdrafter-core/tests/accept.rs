@@ -731,7 +731,7 @@ fn an_output_folder_that_is_a_link_gives_the_same_mark_as_a_plain_one() {
     let through_link = dir.join("jobs").join("issued").join("DEMO-001.dwg");
     assert!(dir.join("elsewhere/issued/DEMO-001.dwg").is_file());
     assert!(
-        holds_mark(&through_link, "build; set=../demo-set"),
+        holds_mark(&through_link, "build; sheet=DEMO-001; set=../demo-set"),
         "the way back as the set writes its output folder"
     );
 
@@ -768,8 +768,8 @@ fn a_set_built_by_a_path_through_a_link_is_named_by_its_real_folder() {
     let reached = dir.join("home/zach/link/..");
     build(&reached);
     let dwg = dir.join("srv").join("issued").join("DEMO-001.dwg");
-    assert!(holds_mark(&dwg, "build; set=../demo-set"));
-    assert!(!holds_mark(&dwg, "build; set=../zach"));
+    assert!(holds_mark(&dwg, "build; sheet=DEMO-001; set=../demo-set"));
+    assert!(!holds_mark(&dwg, "build; sheet=DEMO-001; set=../zach"));
     // Accepted by the path it was built by, it is issued.
     accept(&reached, false, None, false).result.unwrap();
     assert_eq!(rendered(&dwg, &dir.join("issued.png")).accept, Some(1));

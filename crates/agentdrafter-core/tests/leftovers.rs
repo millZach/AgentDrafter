@@ -754,3 +754,155 @@ fn a_read_only_leftover_moves_cleanly_and_rolls_back_cleanly() {
     set_ro(&sup.join("DEMO-003.dwg"), false);
     set_ro(&sup.join("DEMO-003.pdf"), false);
 }
+
+/// Two sets with `output: dwg` whose `dwg/` folders are linked to one shared
+/// directory both write `set=..`: without explicit `id`s their ownership is
+/// ambiguous so neither moves the other's outputs; with distinct `id`s in
+/// `set.yaml`, each cleans only its own leftovers (#234).
+#[test]
+fn linked_shared_output_folders_are_ambiguous_without_id_and_distinct_with_id() {
+    let dir = scratch("linked-shared-set-id");
+    let shared = dir.join("shared");
+    fs::create_dir_all(&shared).unwrap();
+
+    let set_a = demo_set(&dir.join("set-a"));
+    let set_b = demo_set(&dir.join("set-b"));
+    fs::write(
+        set_b.join("rows.yaml"),
+        fs::read_to_string(set_b.join("rows.yaml"))
+            .unwrap()
+            .replace("DEMO-", "OTHER-"),
+    )
+    .unwrap();
+    link_folder(&shared, &set_a.join("dwg"));
+    link_folder(&shared, &set_b.join("dwg"));
+
+    // Without explicit `id`, both write `set=..` into `shared`: ambiguous, so
+    // neither set lists or moves outputs in `shared`.
+    assert_eq!(built(&set_a, None), []);
+    assert_eq!(plotted(&set_a, None), []);
+    assert_eq!(built(&set_b, None), []);
+    assert_eq!(plotted(&set_b, None), []);
+    assert_eq!(built(&set_a, Some(true)), []);
+    assert_eq!(plotted(&set_a, Some(true)), []);
+    assert!(shared.join("OTHER-001.dwg").is_file());
+    assert!(shared.join("OTHER-001.pdf").is_file());
+    assert!(!shared.join(SUPERSEDED_FOLDER).exists());
+
+    // Now give each set its own explicit `id` in `set.yaml` and rebuild/replot.
+    for (set, id) in [(&set_a, "set-a"), (&set_b, "set-b")] {
+        let settings = set.join("set.yaml");
+        fs::write(
+            &settings,
+            format!("id: {id}\n{}", fs::read_to_string(&settings).unwrap()),
+        )
+        .unwrap();
+        built(set, None);
+        plotted(set, None);
+    }
+    take_out(&set_a, "DEMO-003");
+    assert_eq!(named(&built(&set_a, Some(true))), listed("DEMO-003"));
+    assert_eq!(
+        files_in(&shared.join(SUPERSEDED_FOLDER)),
+        ["DEMO-003.dwg", "DEMO-003.pdf"]
+    );
+    // Set B's outputs are completely untouched.
+    assert!(shared.join("OTHER-001.dwg").is_file());
+    assert!(shared.join("OTHER-001.pdf").is_file());
+    assert_eq!(built(&set_b, Some(true)), []);
+}
+
+/// A copy of a built DWG or plotted PDF saved under another name in the output
+/// folder keeps its mark/stamp naming the original sheet, so it is never
+/// listed as a leftover or moved into `superseded/` (#234).
+#[test]
+fn a_copy_saved_under_another_name_is_not_listed_or_moved_as_a_leftover() {
+    let set = demo_set(&scratch("renamed-copy").join("demo-set"));
+    built(&set, None);
+    plotted(&set, None);
+    let dwg = set.join("dwg");
+    fs::copy(dwg.join("DEMO-001.dwg"), dwg.join("DEMO-001-backup.dwg")).unwrap();
+    fs::copy(dwg.join("DEMO-001.pdf"), dwg.join("DEMO-001-backup.pdf")).unwrap();
+
+    assert_eq!(built(&set, Some(true)), []);
+    assert_eq!(plotted(&set, Some(true)), []);
+    assert!(dwg.join("DEMO-001-backup.dwg").is_file());
+    assert!(dwg.join("DEMO-001-backup.pdf").is_file());
+    assert!(!dwg.join(SUPERSEDED_FOLDER).exists());
+}
+
+/// Two sets sharing an output folder and one external rows file cannot claim
+/// each other's PDFs, and moving a nested set away does not let the outer set
+/// claim the nested set's PDFs (#234).
+#[test]
+fn shared_external_rows_and_moved_nested_set_pdfs_are_never_claimed_by_another_set() {
+    let dir = scratch("shared-rows-and-nested");
+    let jobs = dir.join("jobs");
+    let set_a = demo_set(&jobs.join("set-a"));
+    let set_b = demo_set(&jobs.join("set-b"));
+
+    // Move rows.yaml to an external shared file `jobs/shared-rows.yaml` used by
+    // set_a, while set_b also points at it (then changes to its own rows).
+    let shared_rows = jobs.join("shared-rows.yaml");
+    fs::copy(set_a.join("rows.yaml"), &shared_rows).unwrap();
+    for set in [&set_a, &set_b] {
+        let settings = set.join("set.yaml");
+        let text = fs::read_to_string(&settings).unwrap();
+        fs::write(
+            &settings,
+            text.replace("output: dwg", "output: ../issued")
+                .replace("rows: rows.yaml", "rows: ../shared-rows.yaml"),
+        )
+        .unwrap();
+    }
+    // Both sets share `jobs/issued` and the exact same external rows file
+    // `jobs/shared-rows.yaml`. Set A plots DEMO-001..003, then DEMO-003 is
+    // removed from the shared rows file. Set B must NOT claim Set A's PDF
+    // even while still using that same shared rows file; Set A cleans only its
+    // own PDF.
+    plotted(&set_a, None);
+    let shared_text = fs::read_to_string(&shared_rows).unwrap();
+    let start = shared_text.find("  - sheet: DEMO-003\n").unwrap();
+    fs::write(&shared_rows, &shared_text[..start]).unwrap();
+
+    assert_eq!(plotted(&set_b, Some(true)), []);
+    assert!(jobs.join("issued/DEMO-003.pdf").is_file());
+    assert!(!jobs.join("issued").join(SUPERSEDED_FOLDER).exists());
+    assert_eq!(
+        named(&plotted(&set_a, Some(true))),
+        vec![(
+            "DEMO-003.pdf".to_owned(),
+            LeftoverKind::Pdf,
+            "DEMO-003".to_owned()
+        )]
+    );
+    assert_eq!(
+        files_in(&jobs.join("issued").join(SUPERSEDED_FOLDER)),
+        ["DEMO-003.pdf"]
+    );
+
+    // Nested set: `outer/inner` plots into `outer/dwg` (`../dwg`), then
+    // `outer/inner` is moved away. `outer` must NOT claim `inner`'s PDFs.
+    let outer = demo_set(&dir.join("outer"));
+    let inner = demo_set(&outer.join("inner"));
+    fs::write(
+        inner.join("set.yaml"),
+        fs::read_to_string(inner.join("set.yaml"))
+            .unwrap()
+            .replace("output: dwg", "output: ../dwg"),
+    )
+    .unwrap();
+    fs::write(
+        inner.join("rows.yaml"),
+        fs::read_to_string(inner.join("rows.yaml"))
+            .unwrap()
+            .replace("DEMO-", "INNER-"),
+    )
+    .unwrap();
+    plotted(&inner, None);
+    fs::rename(&inner, dir.join("inner-moved")).unwrap();
+
+    assert_eq!(plotted(&outer, Some(true)), []);
+    assert!(outer.join("dwg/INNER-001.pdf").is_file());
+    assert!(!outer.join("dwg").join(SUPERSEDED_FOLDER).exists());
+}

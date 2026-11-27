@@ -258,8 +258,10 @@ pub(crate) struct SetOutputs<'a> {
     pub output: &'a Path,
     /// The set as its DWGs' build marks name it, from the output folder
     /// ([`crate::set::set_in_mark`]); none when they name no set, and then
-    /// no DWG can be told to be this set's.
+    /// no DWG can be told to be this set's unless `set_id` is configured.
     pub marked: Option<&'a str>,
+    /// The set's explicit `id` from `set.yaml`, when configured (#234).
+    pub set_id: Option<&'a str>,
     /// The set's rows files, as they were read.
     pub rows_files: &'a [RowsFile],
     /// Each sheet the set's rows name.
@@ -409,7 +411,7 @@ fn find(set: &SetOutputs) -> Result<(DirHandle, Vec<Candidate>), Error> {
         if written.writes(&path, &sheet, id) {
             continue;
         }
-        match is_sets_file(set, kind, &path, &mut file) {
+        match is_sets_file(set, kind, &sheet, &path, &mut file) {
             Ok(true) => found.push((
                 name.clone(),
                 Candidate {
@@ -531,40 +533,87 @@ fn output_kind(name: &str) -> Option<(&str, LeftoverKind)> {
 }
 
 /// Whether the already-opened file `file` at `path` of the output folder,
-/// a `kind`, is one AgentDrafter made for the set. An error when it cannot
-/// be read.
+/// a `kind` named for `candidate_sheet`, is one AgentDrafter made for the set.
+/// An error when it cannot be read.
 fn is_sets_file(
     set: &SetOutputs,
     kind: LeftoverKind,
+    candidate_sheet: &str,
     path: &Path,
     file: &mut fs::File,
 ) -> io::Result<bool> {
     match kind {
-        LeftoverKind::Dwg | LeftoverKind::Dxf => is_sets_dwg_file(set, path, file),
-        LeftoverKind::Pdf => is_sets_pdf_file(set, path, file),
+        LeftoverKind::Dwg | LeftoverKind::Dxf => is_sets_dwg_file(set, candidate_sheet, path, file),
+        LeftoverKind::Pdf => is_sets_pdf_file(set, candidate_sheet, path, file),
     }
 }
 
-/// Whether the DWG at `path`, already opened as `file`, is one the set built:
-/// its build mark names the set as the set's own build names it from there.
-/// A DWG with no mark, an original among them, or whose mark names no set or
-/// another set, is not. An error when the file cannot be read to tell, as a
-/// DWG cut short cannot ([`dwg::read_build_mark_from_file`]).
-fn is_sets_dwg_file(set: &SetOutputs, path: &Path, file: &mut fs::File) -> io::Result<bool> {
+/// Whether `written` (a relative path back from the output folder to a set,
+/// such as `..` or `../demo-plant`) unambiguously resolves from the physical
+/// output directory to `set.folder`. When `set.output` is a link or junction
+/// to a shared directory, `..` from the physical directory points to the
+/// shared directory's parent rather than `set.folder`, so ownership without
+/// an explicit `set_id` is ambiguous and refused (#234).
+fn resolves_unambiguously_to_set(set: &SetOutputs, written: &str) -> bool {
+    let Some(real_output) = crate::set::physical(set.output) else {
+        return false;
+    };
+    let Some(target) = crate::set::follow(&real_output, written) else {
+        return false;
+    };
+    is_same_file(&target, set.folder)
+}
+
+/// Whether the DWG at `path`, already opened as `file`, is one the set built
+/// as `candidate_sheet`:
+/// - a renamed copy (`mark.sheet` disagrees with `candidate_sheet`) is never
+///   a leftover (#234);
+/// - when `mark.set_id` is present, it must match `set.set_id`;
+/// - when `mark.set_id` is absent, `mark.set` must match `set.marked` AND
+///   unambiguously resolve from the physical output folder to `set.folder`
+///   (leaving outputs in symlinked/shared folders without explicit `id`s
+///   untouched) (#234).
+fn is_sets_dwg_file(
+    set: &SetOutputs,
+    candidate_sheet: &str,
+    path: &Path,
+    file: &mut fs::File,
+) -> io::Result<bool> {
+    let Some(mark) = dwg::read_build_mark_from_file(file, path).map_err(io::Error::other)? else {
+        return Ok(false);
+    };
+    if mark
+        .sheet
+        .as_deref()
+        .is_some_and(|marked_sheet| marked_sheet != candidate_sheet)
+    {
+        return Ok(false);
+    }
+    if let Some(mark_id) = mark.set_id.as_deref() {
+        return Ok(set.set_id == Some(mark_id));
+    }
     let Some(marked) = set.marked else {
         return Ok(false);
     };
-    let mark = dwg::read_build_mark_from_file(file, path).map_err(io::Error::other)?;
-    Ok(mark.is_some_and(|mark| mark.set.as_deref() == Some(marked)))
+    Ok(mark.set.as_deref() == Some(marked) && resolves_unambiguously_to_set(set, marked))
 }
 
 /// Whether the PDF at `path`, already opened as `file`, is one plotted from
-/// the set: its stamp, which AgentDrafter alone writes, names a rows file of
-/// the set. That is one of the set's rows files now, or a file in the set's
-/// folder, gone or not, that no other set inside it holds, so that a sheet
-/// whose whole rows file was taken out of the settings is still known. An
-/// error when the file cannot be read.
-fn is_sets_pdf_file(set: &SetOutputs, path: &Path, file: &mut fs::File) -> io::Result<bool> {
+/// the set as `candidate_sheet` (#234):
+/// - when the stamp carries `set` (`StampSet`), its `sheet` must match
+///   `candidate_sheet`, and either `set.id` matches `set.set_id`, or (when
+///   `set.id` is absent) `set.path` matches `set.marked` and resolves
+///   unambiguously from the physical output folder to `set.folder`;
+/// - for legacy PDFs plotted before `stamp.set` existed (`stamp.set` is
+///   `None`), only a PDF whose stamped rows file lives inside `set.folder`
+///   (never an external shared rows file) is recognised, and only when this
+///   set has no explicit `id`.
+fn is_sets_pdf_file(
+    set: &SetOutputs,
+    candidate_sheet: &str,
+    path: &Path,
+    file: &mut fs::File,
+) -> io::Result<bool> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     if !bytes.starts_with(b"%PDF-") {
@@ -573,14 +622,31 @@ fn is_sets_pdf_file(set: &SetOutputs, path: &Path, file: &mut fs::File) -> io::R
     let Ok(stamp) = stamp::stamp_of(&bytes) else {
         return Ok(false);
     };
+    if let Some(stamp_set) = stamp.set.as_ref() {
+        if stamp_set.sheet != candidate_sheet {
+            return Ok(false);
+        }
+        if let Some(stamp_id) = stamp_set.id.as_deref() {
+            return Ok(set.set_id == Some(stamp_id));
+        }
+        let Some(marked) = set.marked else {
+            return Ok(false);
+        };
+        return Ok(
+            stamp_set.path.as_deref() == Some(marked) && resolves_unambiguously_to_set(set, marked)
+        );
+    }
+    if set.set_id.is_some() {
+        return Ok(false);
+    }
     Ok(stamp
         .sources
         .iter()
         .filter(|source| source.kind == SourceKind::Rows)
         .any(|source| {
             let rows = stamp::resolve(path, &source.path);
-            set.rows_files.iter().any(|f| is_same_file(&f.path, &rows))
-                || set_holding(&rows).is_some_and(|folder| is_same_file(&folder, set.folder))
+            set_holding(&rows).is_some_and(|folder| is_same_file(&folder, set.folder))
+                && (set.rows_files.iter().any(|f| is_same_file(&f.path, &rows)) || !rows.exists())
         }))
 }
 
@@ -811,7 +877,7 @@ fn still_a_leftover(
     if is_current_output(set.output, &set.sheets, path, sheet, id) {
         return Err(changed("became a current output of the set".to_owned()));
     }
-    match is_sets_file(set, kind, path, &mut file) {
+    match is_sets_file(set, kind, sheet, path, &mut file) {
         Ok(true) => Ok(()),
         Ok(false) => Err(changed(
             "no longer carries the set's build mark or stamp".to_owned(),
@@ -2525,6 +2591,7 @@ mod tests {
             folder: &dir,
             output: &dir,
             marked: None,
+            set_id: None,
             rows_files: &[],
             sheets: vec!["CURRENT"],
         };
