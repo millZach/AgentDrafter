@@ -376,6 +376,7 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
         )
         .in_file(&output)
     })?;
+    let _output_lock = crate::leftovers::lock_output(&output)?;
     let sheets: Vec<PlottedSheet> = rows
         .iter()
         .map(|row| {

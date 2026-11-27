@@ -242,6 +242,7 @@ fn build_sheets(
         )
         .in_file(&output)
     })?;
+    let _output_lock = crate::leftovers::lock_output(&output)?;
     let marked = set_in_mark(folder, &set.output);
     let sheets: Vec<SheetOutcome> = rows
         .iter()
