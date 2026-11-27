@@ -3236,48 +3236,77 @@ pub(crate) fn read_build_mark(path: &Path) -> Result<Option<BuildMark>, String> 
     }
 }
 
+/// Same as [`read_build_mark`], reading from an already-opened file handle
+/// without reopening `path` on disk (#239).
+pub(crate) fn read_build_mark_from_file(
+    file: &mut std::fs::File,
+    path: &Path,
+) -> Result<Option<BuildMark>, String> {
+    let is_dxf = is_dxf_path(path);
+    match catch_unwind(AssertUnwindSafe(|| drawing_properties_stream(file, is_dxf))) {
+        Ok(Ok(Some(properties))) => Ok(mark_in(&properties)),
+        Ok(Ok(None)) => Ok(None),
+        Ok(Err(why)) => Err(why),
+        Err(_) => Err("the DWG library stopped reading its drawing properties".to_owned()),
+    }
+}
+
 /// The custom drawing properties of the DWG or DXF at `path`, each its name
 /// and its value. None for a file that is neither a DWG of the 2007 format or
 /// later nor a DXF; an error when the file, or such a drawing's header or
 /// summary, cannot be read.
 fn drawing_properties(path: &Path) -> Result<Option<Vec<(String, String)>>, String> {
-    let mut start = [0u8; 22];
-    let read = std::fs::File::open(path)
-        .and_then(|mut file| {
-            use std::io::Read;
-            let mut read = 0;
-            while read < start.len() {
-                match file.read(&mut start[read..])? {
-                    0 => break,
-                    n => read += n,
-                }
-            }
-            Ok(read)
-        })
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("could not read the file: {e}"))?;
+    drawing_properties_stream(&mut file, is_dxf_path(path))
+}
+
+fn drawing_properties_stream<R: std::io::Read + std::io::Seek>(
+    stream: &mut R,
+    is_dxf: bool,
+) -> Result<Option<Vec<(String, String)>>, String> {
+    use std::io::SeekFrom;
+    stream
+        .seek(SeekFrom::Start(0))
         .map_err(|e| format!("could not read the file: {e}"))?;
+    let mut start = [0u8; 22];
+    let mut read = 0;
+    while read < start.len() {
+        match stream
+            .read(&mut start[read..])
+            .map_err(|e| format!("could not read the file: {e}"))?
+        {
+            0 => break,
+            n => read += n,
+        }
+    }
     let prefix = &start[..read];
+    stream
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| format!("could not read the file: {e}"))?;
     // A DWG starts with its version, such as `AC1032` for the 2018 format;
     // the 2007 format is `AC1021`. The DWG library reads `AD` for `AC` too.
     if let Some(version) = dwg_header_version_number(prefix) {
         if version < 1021 {
             return Ok(None);
         }
-        let mut reader = DwgReader::from_file(path)
-            .map_err(|e| format!("the DWG library could not open it: {e}"))?;
+        let mut reader = DwgReader::from_stream(stream);
         return summary_properties(&mut reader);
     }
     if prefix.starts_with(BINARY_DXF_SENTINEL) {
-        let reader = DxfReader::from_file(path)
+        let mut bytes = Vec::new();
+        stream
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("could not read the file: {e}"))?;
+        let reader = DxfReader::from_reader(std::io::Cursor::new(bytes))
             .map_err(|e| format!("the DWG library could not open the DXF: {e}"))?;
         let drawing = reader
             .read()
             .map_err(|e| format!("the DWG library could not read the DXF: {e}"))?;
         return Ok(Some(drawing.summary_info.custom_properties));
     }
-    if is_dxf_path(path) {
-        let file =
-            std::fs::File::open(path).map_err(|e| format!("could not read the file: {e}"))?;
-        return ascii_dxf_header_custom_properties(std::io::BufReader::new(file));
+    if is_dxf {
+        return ascii_dxf_header_custom_properties(std::io::BufReader::new(stream));
     }
     Ok(None)
 }
@@ -3428,13 +3457,22 @@ fn summary_properties<R: std::io::Read + std::io::Seek>(
         return Ok(None);
     }
     // The summary section is optional: a DWG without one has no drawing
-    // properties, so no build mark, which is not a failed read.
+    // properties, so no build mark, which is not a failed read. When the
+    // header itself points to a summary section (nonzero `summary_info_addr`)
+    // that the section map leaves out, the section map is damaged and whether
+    // the file carries the mark cannot be told (#239).
     let has_summary = header
         .section_descriptors
         .iter()
         .any(|section| section.name == SUMMARY_SECTION)
         || header.section_locators.contains_key(SUMMARY_SECTION);
     if !has_summary {
+        if header.summary_info_addr != 0 {
+            return Err(
+                "its header points to drawing properties that are missing from its section map"
+                    .to_owned(),
+            );
+        }
         return Ok(Some(Vec::new()));
     }
     let section = reader
@@ -5151,6 +5189,46 @@ mod tests {
         // starts well, and its drawing properties cannot be read.
         fs::write(&file, &bytes[..256]).unwrap();
         assert!(read_build_mark(&file).is_err());
+
+        // A DWG whose header points to a summary section (nonzero
+        // `summary_info_addr` at 0x20..0x24) while its damaged section map
+        // omits `AcDb:SummaryInfo` must report an error (unreadable), not
+        // unmarked (#239).
+        let mut damaged = bytes.clone();
+        let header = DwgReader::from_stream(std::io::Cursor::new(&damaged))
+            .read_file_header()
+            .unwrap();
+        let section_map_magic = 0x4163_003Bu32.to_le_bytes();
+        let section_map_offset = header
+            .page_records
+            .values()
+            .map(|&(off, _)| off as usize)
+            .find(|&off| damaged.get(off..off + 4) == Some(&section_map_magic))
+            .expect("AC1032 DWG has a section map system page");
+        // Mark the section map page uncompressed (compression = 1) with 0 sections.
+        damaged[section_map_offset + 12..section_map_offset + 16]
+            .copy_from_slice(&1u32.to_le_bytes());
+        damaged[section_map_offset + 20..section_map_offset + 24]
+            .copy_from_slice(&0u32.to_le_bytes());
+        let damaged_header = DwgReader::from_stream(std::io::Cursor::new(&damaged))
+            .read_file_header()
+            .unwrap();
+        assert!(damaged_header.section_descriptors.is_empty());
+
+        damaged[0x20..0x24].copy_from_slice(&0x0000_0100u32.to_le_bytes());
+        fs::write(&file, &damaged).unwrap();
+        let err = read_build_mark(&file).unwrap_err();
+        assert!(
+            err.contains("missing from its section map"),
+            "unexpected error: {err}"
+        );
+
+        // When `summary_info_addr` is 0 and no summary section exists, it is
+        // genuinely unmarked.
+        damaged[0x20..0x24].copy_from_slice(&0u32.to_le_bytes());
+        fs::write(&file, &damaged).unwrap();
+        assert_eq!(read_build_mark(&file), Ok(None));
+
         let _ = fs::remove_dir_all(&dir);
     }
 
