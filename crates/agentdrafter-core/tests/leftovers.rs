@@ -690,3 +690,67 @@ fn concurrent_builds_and_plots_with_clean_preserve_all_current_outputs() {
         ["DEMO-003.dwg", "DEMO-003.pdf"]
     );
 }
+
+/// On Windows, a read-only leftover DWG and PDF move cleanly into `superseded/`
+/// (staying read-only there with no copy left in `dwg/`), and if one sibling is
+/// held open the read-only sibling rolls back cleanly without leaving a second
+/// copy in `superseded/` (#239).
+#[cfg(windows)]
+#[test]
+fn a_read_only_leftover_moves_cleanly_and_rolls_back_cleanly() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 1;
+
+    let set = demo_set(&scratch("readonly-win").join("demo-set"));
+    built(&set, None);
+    plotted(&set, None);
+    let dwg_dir = set.join("dwg");
+    take_out(&set, "DEMO-002");
+    take_out(&set, "DEMO-003");
+
+    let set_ro = |p: &Path, ro: bool| {
+        let mut perms = fs::metadata(p).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(ro);
+        fs::set_permissions(p, perms).unwrap();
+    };
+    set_ro(&dwg_dir.join("DEMO-002.dwg"), true);
+    set_ro(&dwg_dir.join("DEMO-003.dwg"), true);
+    set_ro(&dwg_dir.join("DEMO-003.pdf"), true);
+
+    // Hold DEMO-002.pdf open so DEMO-002.dwg (read-only) must roll back, while
+    // DEMO-003 (both read-only) moves cleanly.
+    let _held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(dwg_dir.join("DEMO-002.pdf"))
+        .unwrap();
+
+    let reply = build(&set, Some(true));
+    drop(_held);
+
+    assert!(!reply.ok);
+    let sup = dwg_dir.join(SUPERSEDED_FOLDER);
+    assert_eq!(files_in(&sup), ["DEMO-003.dwg", "DEMO-003.pdf"]);
+    assert!(fs::metadata(sup.join("DEMO-003.dwg"))
+        .unwrap()
+        .permissions()
+        .readonly());
+    assert!(fs::metadata(sup.join("DEMO-003.pdf"))
+        .unwrap()
+        .permissions()
+        .readonly());
+    assert!(!dwg_dir.join("DEMO-003.dwg").exists());
+    assert!(!dwg_dir.join("DEMO-003.pdf").exists());
+    assert!(dwg_dir.join("DEMO-002.dwg").is_file());
+    assert!(fs::metadata(dwg_dir.join("DEMO-002.dwg"))
+        .unwrap()
+        .permissions()
+        .readonly());
+    assert!(!sup.join("DEMO-002.dwg").exists());
+
+    // Clear read-only before scratch teardown on future runs.
+    set_ro(&dwg_dir.join("DEMO-002.dwg"), false);
+    set_ro(&sup.join("DEMO-003.dwg"), false);
+    set_ro(&sup.join("DEMO-003.pdf"), false);
+}
