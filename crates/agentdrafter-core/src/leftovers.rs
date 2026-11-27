@@ -1123,8 +1123,8 @@ fn move_entry_no_replace(
         let src_fd = src_dir.fd.as_raw_fd();
         let dst_fd = dst_dir.fd.as_raw_fd();
         match unix_io::rename_no_replace_at(src_fd, src_name, dst_fd, dst_name) {
-            Ok(()) => return Ok(expected_src_id),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => return Err(e),
+            Ok(()) => Ok(expected_src_id),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(e),
             Err(e) if is_cross_device_or_unsupported(&e) => {
                 // On volumes without `RENAME_NOREPLACE`/`RENAME_EXCL`, try a
                 // handle-relative `linkat` before falling back to a temp copy.
@@ -1142,22 +1142,22 @@ fn move_entry_no_replace(
                         if let Err(rm_err) = unix_io::unlink_at(src_fd, src_name) {
                             return Err(rollback_placed_entry(dst_dir, dst_name, src_id, rm_err));
                         }
-                        return Ok(src_id);
+                        Ok(src_id)
                     }
-                    Err(le) if le.kind() == ErrorKind::AlreadyExists => return Err(le),
+                    Err(le) if le.kind() == ErrorKind::AlreadyExists => Err(le),
                     Err(le) if is_cross_device_or_unsupported(&le) || is_hard_link_refused(&le) => {
-                        return move_via_copy_fallback(
+                        move_via_copy_fallback(
                             src_dir,
                             src_name,
                             dst_dir,
                             dst_name,
                             expected_src_id,
-                        );
+                        )
                     }
-                    Err(le) => return Err(le),
+                    Err(le) => Err(le),
                 }
             }
-            Err(e) => return Err(e),
+            Err(e) => Err(e),
         }
     }
     #[cfg(not(unix))]
